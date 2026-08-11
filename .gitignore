@@ -11,6 +11,7 @@ wheels/
 
 # Local caches
 .matplotlib-cache/
+.playwright-mcp/
 
 # Editor / agent scratch
 .omo/
@@ -18,3 +19,8 @@ wheels/
 # FeitCSI captures (large, environment-specific)
 captures/
 *.dat
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo

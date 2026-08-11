@@ -1,10 +1,4 @@
-"""FeitCSI .dat parser wrapping CSIKit.
-
-FeitCSI captures CSI on Intel AX200/AX210 NICs. Files are binary:
-sequence of (272-byte header + CSI block) records. CSIKit reads the
-whole file at once; this module provides a thin dataclass wrapper plus
-rolling-window helpers for realtime visualization.
-"""
+"""FeitCSI .dat parser. Wraps CSIKit to return fftshifted amplitude/phase."""
 
 from __future__ import annotations
 
@@ -19,26 +13,6 @@ from CSIKit.util import csitools
 
 @dataclass(frozen=True)
 class FeitCSICapture:
-    """Parsed FeitCSI capture.
-
-    Attributes
-    ----------
-    amplitude : np.ndarray
-        Shape (frames, subcarriers) dBm amplitude (SISO squeezed).
-    phase : np.ndarray
-        Shape (frames, subcarriers) phase in radians, wrapped [-pi, pi].
-    time_seconds : np.ndarray
-        Relative seconds per frame (frame 0 == 0.0). Derived from ftm_clock.
-    bandwidth : str
-        Bandwidth label from CSIKit (e.g. "80").
-    chipset : str
-        NIC chipset (e.g. "Intel AX2xx").
-    filename : str
-        Source file basename.
-    num_subcarriers : int
-        Subcarriers per frame.
-    """
-
     amplitude: np.ndarray
     phase: np.ndarray
     time_seconds: np.ndarray
@@ -59,25 +33,6 @@ def load_capture(
     filter_mac: str | None = None,
     fftshift: bool = True,
 ) -> FeitCSICapture:
-    """Load FeitCSI .dat file via CSIKit.
-
-    Parameters
-    ----------
-    path : str | Path
-        Path to .dat file.
-    scaled : bool
-        Apply RSSI-based scaling (dBm amplitude).
-    interpolate : bool
-        Replace pilot subcarriers via interpolation.
-    filter_mac : str | None
-        Optional source MAC filter "AA:BB:CC:DD:EE:FF".
-    fftshift : bool
-        Apply np.fft.fftshift on subcarrier axis (signed frequency order).
-
-    Returns
-    -------
-    FeitCSICapture
-    """
     path = Path(path)
     reader = FeitCSIBeamformReader()
     csi_data = reader.read_file(
@@ -131,11 +86,6 @@ def tail_window(
     max_packets: int = 200,
     start_time: float | None = None,
 ) -> FeitCSICapture:
-    """Return a trailing window of `max_packets` packets.
-
-    If `start_time` is given, packets before that relative time are dropped
-    first, then the trailing `max_packets` are kept.
-    """
     if len(capture) == 0:
         return capture
 

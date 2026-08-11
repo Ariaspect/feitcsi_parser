@@ -1,7 +1,7 @@
 [project]
 name = "feitcsi-parser"
 version = "0.1.0"
-description = "Add your description here"
+description = "FeitCSI realtime heatmap — FastAPI backend + React/uPlot frontend"
 readme = "README.md"
 authors = [
     { name = "Ariaspect", email = "keeminjoon@kaist.ac.kr" }
@@ -9,16 +9,15 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "CSIKit>=2.5",
-    "bokeh>=3.4",
-    "matplotlib>=3.8",
+    "fastapi>=0.115",
     "numpy>=1.26",
-    "pandas>=2.1",
+    "uvicorn[standard]>=0.30",
 ]
-
-[project.scripts]
-feitcsi-parser = "feitcsi_parser:main"
-feitcsi-serve = "feitcsi_parser.serve:main"
 
 [build-system]
 requires = ["uv_build>=0.12.2,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "backend"
+module-root = ""

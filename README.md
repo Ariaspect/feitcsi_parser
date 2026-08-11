@@ -1,88 +1,109 @@
 # FeitCSI Parser
 
-Parse FeitCSI `.dat` captures (Intel AX200/AX210 NIC) and render realtime
-amplitude / phase heatmaps from an actively growing file.
+Realtime heatmap for FeitCSI `.dat` captures (Intel AX200/AX210 NIC).
 
-Built on [CSIKit](https://github.com/Gi-z/CSIKit) for parsing and
-[Bokeh](https://bokeh.org/) for realtime visualization. Replaces the
-`nexmon_csi_parser` pattern (which used `csiread` + Broadcom PCAPs + Streamlit).
+Stack: FastAPI backend parses `.dat` via [CSIKit](https://github.com/Gi-z/CSIKit),
+React + Vite + [uPlot](https://github.com/leeoniya/uPlot) frontend renders
+amplitude and phase heatmaps with realtime polling.
 
 ## Setup
 
-This project uses `uv` for dependency management.
+Backend (Python, `uv`):
 
 ```bash
 uv sync
 ```
 
-## Captures
-
-Place FeitCSI `.dat` files in `captures/`:
-
-```text
-captures/
-  capture.dat        # actively written by FeitCSI
-```
-
-The default app path is `captures/capture.dat`. Override in the sidebar.
-
-## Realtime Heatmap
+Frontend (Node, `npm`):
 
 ```bash
-uv run bokeh serve src/feitcsi_parser/bokeh_app.py --show --port 5006
+cd frontend && npm install
 ```
 
-Bokeh pushes image updates over WebSocket — no full re-render, no PNG
-serialization. Smooth updates at 5-10+ Hz depending on file size and network.
+## Run
 
-Sidebar controls:
+### Development (two terminals)
 
-- **FeitCSI .dat file** — path to the growing capture.
-- **Trailing window (packets)** — last N packets to display. Older packets
-  scroll off the heatmap.
-- **Refresh interval (ms)** — how often the file is re-read (default 200 ms).
-- **Colormap** — viridis / plasma / inferno / magma / cividis / turbo /
-  blues / greens / reds / oranges / purples / greys.
-- **Run realtime** — toggle polling on/off (pause to inspect a frame).
+Backend on `:8000`:
 
-The app re-parses the whole file on each tick (CSIKit reads the file in one
-pass). For very large files, increase the refresh interval or rotate the
-capture.
-
-## Library API
-
-```python
-from feitcsi_parser import load_capture, tail_window, plot_heatmap
-
-capture = load_capture("captures/capture.dat")
-# capture.amplitude  -> (frames, subcarriers) dBm, fftshifted
-# capture.phase      -> (frames, subcarriers) radians [-pi, pi]
-# capture.time_seconds -> (frames,) relative seconds
-
-window = tail_window(capture, max_packets=200)
-fig = plot_heatmap(window, metric="amplitude", cmap_name="viridis")
-fig.savefig("heatmap.png")
+```bash
+uv run uvicorn backend.app:app --reload --port 8000
 ```
 
-`plot_heatmap` returns a matplotlib figure (useful for static export or
-scripts). For live visualization use the Bokeh app.
+Frontend on `:5173` (proxies `/api` → `:8000`):
+
+```bash
+cd frontend && npm run dev
+```
+
+Open http://localhost:5173
+
+### Production (single port)
+
+Build frontend:
+
+```bash
+cd frontend && npm run build
+```
+
+Run backend (serves built frontend from `frontend/dist/`):
+
+```bash
+uv run uvicorn backend.app:app --port 8000
+```
+
+Open http://localhost:8000
+
+## Usage
+
+1. Place FeitCSI `.dat` file at `captures/capture.dat` (or enter path in UI).
+2. Click **Run realtime**.
+3. Backend re-parses `.dat` every `refresh_ms`, returns trailing window of
+   `max_packets` packets as JSON.
+4. Frontend renders two heatmaps: amplitude (dBm) and phase (rad).
+
+Controls:
+- **.dat file** — path to growing capture.
+- **Window (packets)** — trailing N packets displayed.
+- **Refresh (ms)** — polling interval.
+- **Run realtime** — toggle polling.
+
+## API
+
+### `GET /api/snapshot`
+
+Query params:
+- `path` — path to `.dat` file (default `captures/capture.dat`)
+- `max_packets` — trailing window size (default 200)
+
+Returns JSON:
+```json
+{
+  "filename": "capture.dat",
+  "chipset": "Intel AX2xx",
+  "bandwidth": "80",
+  "num_subcarriers": 242,
+  "total_packets": 1101,
+  "window_packets": 200,
+  "time_seconds": [...],
+  "amplitude": [[...], ...],
+  "phase": [[...], ...],
+  "amp_min": 2.7,
+  "amp_max": 59.6,
+  "phase_min": -3.14,
+  "phase_max": 3.14
+}
+```
+
+### `GET /api/health`
+
+Returns `{"status": "ok"}`.
 
 ## Data Format
 
-FeitCSI `.dat` files are binary: a sequence of
-`272-byte header + CSI block` records. Each CSI value is 4 bytes
-(signed int16 real + signed int16 imag). Subcarrier count depends on
-rate format (HT/VHT/HE) and bandwidth (20/40/80/160 MHz). CSIKit
-handles pilot interpolation and subcarrier filtering.
+FeitCSI `.dat` files are binary: sequence of `272-byte header + CSI block`
+records. CSIKit handles parsing, pilot interpolation, and subcarrier
+filtering. Subcarriers are fftshifted to signed-frequency order
+(-N/2 .. +N/2-1).
 
 See https://feitcsi.kuskosoft.com/csi_format/ for the on-wire spec.
-
-## Notes
-
-- `fftshift` is applied on the subcarrier axis by default for signed-frequency
-  ordering (subcarriers run -N/2 .. +N/2-1). Disable with `fftshift=False` in
-  `load_capture` if you need raw order.
-- Timestamps are derived from `ftm_clock` (3.125 ns tick counter) with u32
-  overflow handling, matching CSIKit's logic. They are relative seconds
-  (first packet = 0.0).
-- No local tests — FeitCSI hardware required to produce `.dat` files.
