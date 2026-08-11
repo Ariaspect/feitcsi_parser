@@ -22,6 +22,16 @@ cd frontend && npm install
 
 ## Run
 
+### Development (single command)
+
+Both backend (`:8000`) and frontend (`:5173`) in parallel:
+
+```bash
+cd frontend && npm run dev:all
+```
+
+Open http://localhost:5173
+
 ### Development (two terminals)
 
 Backend on `:8000`:
@@ -35,8 +45,6 @@ Frontend on `:5173` (proxies `/api` → `:8000`):
 ```bash
 cd frontend && npm run dev
 ```
-
-Open http://localhost:5173
 
 ### Production (single port)
 
