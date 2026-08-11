@@ -96,7 +96,6 @@ export function Heatmap({
           (u: uPlot) => {
             const ctx = u.ctx;
             if (!ctx) return;
-            // Plot area
             const left = u.bbox.left;
             const top = u.bbox.top;
             const w = u.bbox.width;
@@ -104,29 +103,24 @@ export function Heatmap({
             const nFrames = timeSeconds.length;
             if (nFrames === 0 || subcarrierCount === 0) return;
 
-            const tMin = timeSeconds[0];
-            const tMax = timeSeconds[nFrames - 1];
-            const tRange = Math.max(tMax - tMin, 1e-9);
+            // Use uPlot's own scale → pixel mapping so heatmap aligns with axes.
+            const xPix = (t: number) => u.valToPos(t, "x", true);
+            const yPix = (sc: number) => u.valToPos(sc, "y", true);
 
-            // Map time → x pixel
-            const timeToX = (t: number) =>
-              left + ((t - tMin) / tRange) * w;
+            const cellW = nFrames > 1
+              ? Math.max(xPix(timeSeconds[1]) - xPix(timeSeconds[0]), 1)
+              : w;
+            const cellH = subcarrierCount > 1
+              ? Math.max(yPix(1 - halfN) - yPix(0 - halfN), 1)
+              : h;
 
-            // Map subcarrier index → y pixel (top = +N/2-1, bottom = -N/2)
-            const scToY = (sc: number) =>
-              top + ((halfN - 1 - sc) / (subcarrierCount - 1 || 1)) * h;
-
-            const cellW = w / Math.max(nFrames, 1);
-            const cellH = h / Math.max(subcarrierCount, 1);
-
-            // Draw cells
             for (let fi = 0; fi < nFrames; fi++) {
-              const x = timeToX(timeSeconds[fi]);
+              const x = xPix(timeSeconds[fi]);
               const row = matrix[fi];
               for (let si = 0; si < subcarrierCount; si++) {
-                const v = row[si];
-                const y = scToY(si);
-                ctx.fillStyle = colorFor(v, minValue, maxValue, palette);
+                const sc = si - halfN;
+                const y = yPix(sc);
+                ctx.fillStyle = colorFor(row[si], minValue, maxValue, palette);
                 ctx.fillRect(x, y, cellW + 1, cellH + 1);
               }
             }
