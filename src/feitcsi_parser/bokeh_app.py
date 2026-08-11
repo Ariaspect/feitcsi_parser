@@ -194,17 +194,44 @@ def _make_update_callback(
         _update_source(amp_source, window)
         _update_source(phase_source, window)
 
-        # Phase source gets the phase matrix, not amplitude.
         if len(window) > 0 and window.num_subcarriers > 0:
             phase_image = window.phase.T.astype(np.float32)
             phase_source.data["image"] = [phase_image]
 
+            amp_finite = window.amplitude[np.isfinite(window.amplitude)]
+            if amp_finite.size > 0:
+                amp_low = float(np.percentile(amp_finite, 2))
+                amp_high = float(np.percentile(amp_finite, 98))
+                if np.isclose(amp_low, amp_high):
+                    amp_low -= 1.0
+                    amp_high += 1.0
+                amp_mapper.low = amp_low
+                amp_mapper.high = amp_high
+
+            phase_finite = window.phase[np.isfinite(window.phase)]
+            if phase_finite.size > 0:
+                phase_low = float(np.percentile(phase_finite, 2))
+                phase_high = float(np.percentile(phase_finite, 98))
+                if np.isclose(phase_low, phase_high):
+                    phase_low -= 0.1
+                    phase_high += 0.1
+                phase_mapper.low = phase_low
+                phase_mapper.high = phase_high
+
         state["last_size"] = len(capture)
         state["last_refresh"] = time.time()
+        amp_range = ""
+        if len(window) > 0 and window.amplitude.size > 0:
+            finite = window.amplitude[np.isfinite(window.amplitude)]
+            if finite.size:
+                amp_range = (
+                    f", amp range: [{finite.min():.1f}, {finite.max():.1f}] dBm"
+                )
         status_msg.text = (
             f"<b>OK</b> — total packets: {len(capture)}, "
             f"window: {len(window)}, subcarriers: {capture.num_subcarriers}, "
             f"chipset: {capture.chipset}, BW: {capture.bandwidth} MHz"
+            f"{amp_range}"
         )
 
     return update

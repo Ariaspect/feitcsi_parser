@@ -96,6 +96,14 @@ def load_capture(
     )
     time_seconds = np.asarray(csi_data.timestamps, dtype=float)
 
+    # csitools.get_CSI returns (frames, subcarriers, rx, tx). squeeze_output
+    # only drops rx/tx axes for SISO. Force SISO slice for MIMO captures so
+    # downstream code can assume 2D (frames, subcarriers).
+    while amplitude.ndim > 2:
+        amplitude = amplitude[..., 0]
+    while phase.ndim > 2:
+        phase = phase[..., 0]
+
     amplitude = np.atleast_2d(amplitude)
     phase = np.atleast_2d(phase)
 
