@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "dev:all": "concurrently -n backend,frontend -c blue,green \"cd .. && uv run uvicorn backend.app:app --reload --port 8000\" \"vite\""
+    "preview": "vite preview"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -18,7 +17,6 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }

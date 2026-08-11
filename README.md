@@ -6,6 +6,17 @@ Stack: FastAPI backend parses `.dat` via [CSIKit](https://github.com/Gi-z/CSIKit
 React + Vite + [uPlot](https://github.com/leeoniya/uPlot) frontend renders
 amplitude and phase heatmaps with realtime polling.
 
+## Prerequisites
+
+Install once on your system:
+
+| Tool | Why | Install |
+|---|---|---|
+| [Python](https://www.python.org/) ≥3.12 | Backend runtime | `pyenv install 3.12` or system package |
+| [uv](https://docs.astral.sh/uv/) | Python dependency management | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| [Node.js](https://nodejs.org/) ≥18 | Frontend build | `nvm install 18` or system package |
+| [npm](https://www.npmjs.com/) ≥9 | Frontend dependency management | bundled with Node |
+
 ## Setup
 
 Backend (Python, `uv`):
@@ -14,50 +25,44 @@ Backend (Python, `uv`):
 uv sync
 ```
 
-Frontend (Node, `npm`):
+Frontend + root dev tools (Node, `npm`):
 
 ```bash
-cd frontend && npm install
+npm install
+npm --prefix frontend install
 ```
 
 ## Run
 
-### Development (single command)
+### Development (single command from repo root)
 
 Both backend (`:8000`) and frontend (`:5173`) in parallel:
 
 ```bash
-cd frontend && npm run dev:all
+npm run dev:all
 ```
 
 Open http://localhost:5173
 
-### Development (two terminals)
+### Development (separate terminals)
 
 Backend on `:8000`:
 
 ```bash
-uv run uvicorn backend.app:app --reload --port 8000
+npm run dev:backend
 ```
 
 Frontend on `:5173` (proxies `/api` → `:8000`):
 
 ```bash
-cd frontend && npm run dev
+npm run dev:frontend
 ```
 
 ### Production (single port)
 
-Build frontend:
-
 ```bash
-cd frontend && npm run build
-```
-
-Run backend (serves built frontend from `frontend/dist/`):
-
-```bash
-uv run uvicorn backend.app:app --port 8000
+npm run build         # builds frontend into frontend/dist
+npm run serve         # uvicorn serves API + static frontend at :8000
 ```
 
 Open http://localhost:8000
