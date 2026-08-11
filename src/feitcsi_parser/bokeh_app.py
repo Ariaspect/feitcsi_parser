@@ -22,6 +22,7 @@ from bokeh.models import (
     ColorBar,
     ColumnDataSource,
     LinearColorMapper,
+    Range1d,
     Spinner,
     TextInput,
     Toggle,
@@ -95,6 +96,8 @@ def _build_heatmap_figure(
         height=350,
         x_axis_label="Time (s)",
         y_axis_label="Subcarrier bin",
+        x_range=Range1d(0, 1),
+        y_range=Range1d(0, 1),
         tools="pan,wheel_zoom,box_zoom,reset,save",
         active_scroll="wheel_zoom",
     )
@@ -120,11 +123,17 @@ def _build_heatmap_figure(
 def _update_source(
     source: ColumnDataSource,
     capture: FeitCSICapture,
+    plot: figure | None = None,
+    metric: str = "amplitude",
 ) -> None:
     """Push capture matrix into the image ColumnDataSource.
 
     Bokeh image glyph expects image[row, col] where row = y axis (subcarrier),
     col = x axis (time). Our matrix is (frames, subcarriers) → transpose.
+
+    If `plot` is given, explicitly set x_range/y_range to cover the data.
+    Bokeh's DataRange1d can get stuck on the initial 1x1 empty image and not
+    follow the source update, leaving the real image off-screen.
     """
     if len(capture) == 0 or capture.num_subcarriers == 0:
         source.data = {
@@ -136,10 +145,9 @@ def _update_source(
         }
         return
 
-    matrix = capture.amplitude  # (frames, subcarriers)
+    matrix = capture.amplitude if metric == "amplitude" else capture.phase
     t = capture.time_seconds
 
-    # Bokeh wants image as list-of-2D arrays. Use float32 to cut payload.
     image = matrix.T.astype(np.float32)
     if t.size > 1:
         t_min = float(t[0])
@@ -160,12 +168,20 @@ def _update_source(
         "dh": [n_sc],
     }
 
+    if plot is not None:
+        plot.x_range.start = t_min
+        plot.x_range.end = t_min + dw
+        plot.y_range.start = y_low
+        plot.y_range.end = y_low + n_sc
+
 
 def _make_update_callback(
     amp_source: ColumnDataSource,
     phase_source: ColumnDataSource,
     amp_mapper: LinearColorMapper,
     phase_mapper: LinearColorMapper,
+    amp_plot: figure,
+    phase_plot: figure,
     status_msg,
     path_input: TextInput,
     window_spinner: Spinner,
@@ -191,12 +207,10 @@ def _make_update_callback(
         window_size = int(window_spinner.value)
         window = tail_window(capture, max_packets=window_size)
 
-        _update_source(amp_source, window)
-        _update_source(phase_source, window)
+        _update_source(amp_source, window, plot=amp_plot, metric="amplitude")
+        _update_source(phase_source, window, plot=phase_plot, metric="phase")
 
         if len(window) > 0 and window.num_subcarriers > 0:
-            phase_image = window.phase.T.astype(np.float32)
-            phase_source.data["image"] = [phase_image]
 
             amp_finite = window.amplitude[np.isfinite(window.amplitude)]
             if amp_finite.size > 0:
@@ -283,6 +297,8 @@ def main() -> None:
         phase_source=phase_source,
         amp_mapper=amp_mapper,
         phase_mapper=phase_mapper,
+        amp_plot=amp_fig,
+        phase_plot=phase_fig,
         status_msg=status_msg,
         path_input=path_input,
         window_spinner=window_spinner,
