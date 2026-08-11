@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import uPlot from "uplot";
 
 interface HeatmapProps {
   timeSeconds: number[];
@@ -18,8 +17,19 @@ const DEFAULT_PALETTE = [
   "#35b779", "#6ece58", "#b5de2b", "#fde725",
 ];
 
+const PADDING = { top: 30, right: 70, bottom: 40, left: 60 };
+
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const h = hex.replace("#", "");
+  return [
+    parseInt(h.substring(0, 2), 16),
+    parseInt(h.substring(2, 4), 16),
+    parseInt(h.substring(4, 6), 16),
+  ];
 }
 
 function colorFor(value: number, min: number, max: number, palette: string[]): string {
@@ -37,13 +47,22 @@ function colorFor(value: number, min: number, max: number, palette: string[]): s
   return `rgb(${r},${g},${b})`;
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const h = hex.replace("#", "");
-  return [
-    parseInt(h.substring(0, 2), 16),
-    parseInt(h.substring(2, 4), 16),
-    parseInt(h.substring(4, 6), 16),
-  ];
+interface View {
+  tMin: number;
+  tMax: number;
+  scMin: number;
+  scMax: number;
+}
+
+function nearestFrameIndex(times: number[], t: number): number {
+  let lo = 0, hi = times.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] < t) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo > 0 && Math.abs(times[lo - 1] - t) < Math.abs(times[lo] - t)) return lo - 1;
+  return lo;
 }
 
 export function Heatmap({
@@ -57,110 +76,276 @@ export function Heatmap({
   palette = DEFAULT_PALETTE,
   height = 400,
 }: HeatmapProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const plotRef = useRef<uPlot | null>(null);
+  const viewRef = useRef<View | null>(null);
+  const hoverRef = useRef<{ t: number; sc: number; v: number } | null>(null);
+
+  const halfN = Math.floor(subcarrierCount / 2);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (timeSeconds.length === 0) return;
+    viewRef.current = {
+      tMin: timeSeconds[0],
+      tMax: timeSeconds[timeSeconds.length - 1],
+      scMin: -halfN,
+      scMax: halfN - 1,
+    };
+  }, [timeSeconds, halfN]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
     const container = containerRef.current;
-    const width = container.clientWidth;
+    if (!canvas || !container) return;
 
-    // Subcarrier y-axis: -N/2 .. +N/2-1
-    const halfN = Math.floor(subcarrierCount / 2);
+    const draw = () => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = container.clientWidth;
+      const cssH = height;
+      canvas.width = cssW * dpr;
+      canvas.height = cssH * dpr;
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
 
-    // uPlot expects data as (n+1) arrays: [x, y1, y2, ...]
-    // For heatmap we pass only x (time) and use draw hook to render matrix.
-    // We pass a single dummy y series to satisfy uPlot's data shape.
-    const dummyY = new Array(timeSeconds.length).fill(0);
+      const plot = {
+        x: PADDING.left,
+        y: PADDING.top,
+        w: cssW - PADDING.left - PADDING.right,
+        h: cssH - PADDING.top - PADDING.bottom,
+      };
 
-    const data: uPlot.AlignedData = [timeSeconds, dummyY] as unknown as uPlot.AlignedData;
+      const view = viewRef.current;
+      if (!view || timeSeconds.length === 0 || subcarrierCount === 0) {
+        ctx.fillStyle = "#888";
+        ctx.font = "14px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("No data", cssW / 2, cssH / 2);
+        return;
+      }
 
-    const opts: uPlot.Options = {
-      width,
-      height,
-      title,
-      series: [
-        { label: "Time (s)" },
-        { label: "subcarrier", show: false },
-      ],
-      scales: {
-        x: { time: false },
-        y: { min: -halfN, max: halfN - 1 },
-      },
-      axes: [
-        {},
-        { label: "Subcarrier bin" },
-      ],
-      hooks: {
-        draw: [
-          (u: uPlot) => {
-            const ctx = u.ctx;
-            if (!ctx) return;
-            const left = u.bbox.left;
-            const top = u.bbox.top;
-            const w = u.bbox.width;
-            const h = u.bbox.height;
-            const nFrames = timeSeconds.length;
-            if (nFrames === 0 || subcarrierCount === 0) return;
+      const tToX = (t: number) =>
+        plot.x + ((t - view.tMin) / (view.tMax - view.tMin || 1e-9)) * plot.w;
+      const scToY = (sc: number) =>
+        plot.y + ((view.scMax - sc) / (view.scMax - view.scMin || 1)) * plot.h;
 
-            // Use uPlot's own scale → pixel mapping so heatmap aligns with axes.
-            const xPix = (t: number) => u.valToPos(t, "x", true);
-            const yPix = (sc: number) => u.valToPos(sc, "y", true);
+      const tRange = view.tMax - view.tMin || 1e-9;
+      const scRange = view.scMax - view.scMin || 1;
+      const frameSpacing = timeSeconds.length > 1 ? (timeSeconds[1] - timeSeconds[0]) : 1;
+      const cellW = (plot.w / tRange) * frameSpacing;
+      const cellH = plot.h / scRange;
 
-            const cellW = nFrames > 1
-              ? Math.max(xPix(timeSeconds[1]) - xPix(timeSeconds[0]), 1)
-              : w;
-            const cellH = subcarrierCount > 1
-              ? Math.max(yPix(1 - halfN) - yPix(0 - halfN), 1)
-              : h;
+      for (let fi = 0; fi < timeSeconds.length; fi++) {
+        const t = timeSeconds[fi];
+        if (t < view.tMin - frameSpacing || t > view.tMax + frameSpacing) continue;
+        const x = tToX(t);
+        const row = matrix[fi];
+        for (let si = 0; si < subcarrierCount; si++) {
+          const sc = si - halfN;
+          if (sc < view.scMin - 1 || sc > view.scMax + 1) continue;
+          const y = scToY(sc);
+          ctx.fillStyle = colorFor(row[si], minValue, maxValue, palette);
+          ctx.fillRect(x, y, cellW + 1, cellH + 1);
+        }
+      }
 
-            for (let fi = 0; fi < nFrames; fi++) {
-              const x = xPix(timeSeconds[fi]);
-              const row = matrix[fi];
-              for (let si = 0; si < subcarrierCount; si++) {
-                const sc = si - halfN;
-                const y = yPix(sc);
-                ctx.fillStyle = colorFor(row[si], minValue, maxValue, palette);
-                ctx.fillRect(x, y, cellW + 1, cellH + 1);
-              }
-            }
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
 
-            // Color bar on right
-            const barW = 14;
-            const barX = left + w + 8;
-            const barH = h;
-            const grad = ctx.createLinearGradient(0, top + barH, 0, top);
-            for (let i = 0; i < palette.length; i++) {
-              grad.addColorStop(i / (palette.length - 1), palette[i]);
-            }
-            ctx.fillStyle = grad;
-            ctx.fillRect(barX, top, barW, barH);
-            ctx.strokeStyle = "#888";
-            ctx.strokeRect(barX, top, barW, barH);
-            ctx.fillStyle = "#000";
-            ctx.font = "10px sans-serif";
-            ctx.textAlign = "left";
-            ctx.fillText(maxValue.toFixed(1), barX + barW + 4, top + 10);
-            ctx.fillText(minValue.toFixed(1), barX + barW + 4, top + barH);
-            ctx.save();
-            ctx.translate(barX + barW + 4, top + barH / 2);
-            ctx.rotate(-Math.PI / 2);
-            ctx.textAlign = "center";
-            ctx.fillText(colorLabel, 0, 0);
-            ctx.restore();
-          },
-        ],
-      },
+      ctx.fillStyle = "#000";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      const xTicks = 6;
+      for (let i = 0; i <= xTicks; i++) {
+        const t = view.tMin + (i / xTicks) * tRange;
+        const x = tToX(t);
+        ctx.fillText(t.toFixed(2), x, plot.y + plot.h + 6);
+        ctx.beginPath();
+        ctx.moveTo(x, plot.y + plot.h);
+        ctx.lineTo(x, plot.y + plot.h + 4);
+        ctx.stroke();
+      }
+
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      const yTicks = 6;
+      for (let i = 0; i <= yTicks; i++) {
+        const sc = view.scMin + (i / yTicks) * scRange;
+        const y = scToY(sc);
+        ctx.fillText(sc.toString(), plot.x - 6, y);
+        ctx.beginPath();
+        ctx.moveTo(plot.x, y);
+        ctx.lineTo(plot.x - 4, y);
+        ctx.stroke();
+      }
+
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText("Time (s)", plot.x + plot.w / 2, cssH - 4);
+      ctx.save();
+      ctx.translate(12, plot.y + plot.h / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText("Subcarrier bin", 0, 0);
+      ctx.restore();
+
+      const barW = 14;
+      const barX = plot.x + plot.w + 16;
+      const grad = ctx.createLinearGradient(0, plot.y + plot.h, 0, plot.y);
+      for (let i = 0; i < palette.length; i++) {
+        grad.addColorStop(i / (palette.length - 1), palette[i]);
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(barX, plot.y, barW, plot.h);
+      ctx.strokeStyle = "#888";
+      ctx.strokeRect(barX, plot.y, barW, plot.h);
+      ctx.fillStyle = "#000";
+      ctx.font = "10px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(maxValue.toFixed(1), barX + barW + 4, plot.y + 4);
+      ctx.fillText(minValue.toFixed(1), barX + barW + 4, plot.y + plot.h - 4);
+      ctx.save();
+      ctx.translate(barX + barW + 30, plot.y + plot.h / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.fillText(colorLabel, 0, 0);
+      ctx.restore();
+
+      ctx.fillStyle = "#000";
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(title, plot.x, 6);
+
+      const hover = hoverRef.current;
+      if (hover) {
+        const x = tToX(hover.t);
+        const y = scToY(hover.sc);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, plot.y);
+        ctx.lineTo(x, plot.y + plot.h);
+        ctx.moveTo(plot.x, y);
+        ctx.lineTo(plot.x + plot.w, y);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(0,0,0,0.85)";
+        const txt = `t=${hover.t.toFixed(3)}s  sc=${hover.sc}  v=${hover.v.toFixed(2)}`;
+        ctx.font = "11px monospace";
+        const tw = ctx.measureText(txt).width;
+        ctx.fillRect(x + 8, y - 22, tw + 12, 18);
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(txt, x + 14, y - 13);
+      }
     };
 
-    const plot = new uPlot(opts, data, container);
-    plotRef.current = plot;
+    draw();
+
+    const plot = {
+      x: PADDING.left,
+      y: PADDING.top,
+      w: container.clientWidth - PADDING.left - PADDING.right,
+      h: height - PADDING.top - PADDING.bottom,
+    };
+
+    const xToT = (x: number) => {
+      const v = viewRef.current!;
+      return v.tMin + ((x - plot.x) / plot.w) * (v.tMax - v.tMin);
+    };
+    const yToSc = (y: number) => {
+      const v = viewRef.current!;
+      return v.scMax - ((y - plot.y) / plot.h) * (v.scMax - v.scMin);
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const v = viewRef.current!;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const tAt = xToT(mx);
+      const scAt = yToSc(my);
+      const factor = e.deltaY > 0 ? 1.2 : 1 / 1.2;
+      const newTRange = (v.tMax - v.tMin) * factor;
+      const newScRange = (v.scMax - v.scMin) * factor;
+      const tRatio = (tAt - v.tMin) / (v.tMax - v.tMin || 1);
+      const scRatio = (v.scMax - scAt) / (v.scMax - v.scMin || 1);
+      v.tMin = tAt - tRatio * newTRange;
+      v.tMax = tAt + (1 - tRatio) * newTRange;
+      v.scMin = scAt - (1 - scRatio) * newScRange;
+      v.scMax = scAt + scRatio * newScRange;
+      hoverRef.current = null;
+      draw();
+    };
+
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    const onDown = (e: MouseEvent) => {
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    };
+    const onMove = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      if (dragging) {
+        const v = viewRef.current!;
+        const dx = e.clientX - lastX;
+        const dy = e.clientY - lastY;
+        const dt = -(dx / plot.w) * (v.tMax - v.tMin);
+        const dsc = (dy / plot.h) * (v.scMax - v.scMin);
+        v.tMin += dt; v.tMax += dt;
+        v.scMin += dsc; v.scMax += dsc;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        hoverRef.current = null;
+        draw();
+      } else if (mx >= plot.x && mx <= plot.x + plot.w && my >= plot.y && my <= plot.y + plot.h) {
+        const t = xToT(mx);
+        const sc = Math.round(yToSc(my));
+        const fi = nearestFrameIndex(timeSeconds, t);
+        const si = sc + halfN;
+        if (fi >= 0 && fi < matrix.length && si >= 0 && si < subcarrierCount) {
+          hoverRef.current = { t: timeSeconds[fi], sc, v: matrix[fi][si] };
+        } else {
+          hoverRef.current = null;
+        }
+        draw();
+      } else if (hoverRef.current) {
+        hoverRef.current = null;
+        draw();
+      }
+    };
+    const onUp = () => { dragging = false; };
+    const onLeave = () => { hoverRef.current = null; draw(); };
+
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    canvas.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    canvas.addEventListener("mouseleave", onLeave);
+
+    const onResize = () => draw();
+    window.addEventListener("resize", onResize);
 
     return () => {
-      plot.destroy();
-      plotRef.current = null;
+      canvas.removeEventListener("wheel", onWheel);
+      canvas.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      canvas.removeEventListener("mouseleave", onLeave);
+      window.removeEventListener("resize", onResize);
     };
-  }, [timeSeconds, matrix, subcarrierCount, minValue, maxValue, title, colorLabel, palette, height]);
+  }, [timeSeconds, matrix, subcarrierCount, minValue, maxValue, title, colorLabel, palette, height, halfN]);
 
-  return <div ref={containerRef} style={{ width: "100%" }} />;
+  return <div ref={containerRef} style={{ width: "100%" }}><canvas ref={canvasRef} /></div>;
 }
