@@ -29,20 +29,22 @@ from bokeh.models import (
 )
 from bokeh.layouts import column, row
 from bokeh.palettes import (
+    Blues256,
     Cividis256,
+    Greens256,
+    Greys256,
     Inferno256,
     Magma256,
+    Oranges256,
     Plasma256,
+    Purples256,
+    Reds256,
     Turbo256,
     Viridis256,
-    Coolwarm256,
-    Gray256,
-    Hot256,
-    Jet256,
 )
 from bokeh.plotting import figure, curdoc
 
-from .parser import FeitCSICapture, load_capture, tail_window
+from feitcsi_parser.parser import FeitCSICapture, load_capture, tail_window
 
 
 PALETTES = {
@@ -52,10 +54,12 @@ PALETTES = {
     "magma": Magma256,
     "cividis": Cividis256,
     "turbo": Turbo256,
-    "coolwarm": Coolwarm256,
-    "hot": Hot256,
-    "gray": Gray256,
-    "jet": Jet256,
+    "blues": Blues256,
+    "greens": Greens256,
+    "reds": Reds256,
+    "oranges": Oranges256,
+    "purples": Purples256,
+    "greys": Greys256,
 }
 
 DEFAULT_DAT_PATH = "captures/capture.dat"
@@ -300,7 +304,7 @@ def main() -> None:
         refresh_spinner,
         palette_select,
         run_toggle,
-        sizing_mode="fixed",
+        sizing_mode="scale_width",
     )
     doc.add_root(column(controls, status_msg, amp_fig, phase_fig, sizing_mode="scale_width"))
 

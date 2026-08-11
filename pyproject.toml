@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 feitcsi-parser = "feitcsi_parser:main"
+feitcsi-serve = "feitcsi_parser.serve:main"
 
 [build-system]
 requires = ["uv_build>=0.12.2,<0.13.0"]

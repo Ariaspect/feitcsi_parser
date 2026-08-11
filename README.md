@@ -42,7 +42,7 @@ Sidebar controls:
   scroll off the heatmap.
 - **Refresh interval (ms)** — how often the file is re-read (default 200 ms).
 - **Colormap** — viridis / plasma / inferno / magma / cividis / turbo /
-  coolwarm / hot / gray / jet.
+  blues / greens / reds / oranges / purples / greys.
 - **Run realtime** — toggle polling on/off (pause to inspect a frame).
 
 The app re-parses the whole file on each tick (CSIKit reads the file in one
