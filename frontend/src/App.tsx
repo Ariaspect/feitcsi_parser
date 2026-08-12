@@ -3,6 +3,22 @@ import { fetchFilters, fetchMeta, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { createTimeLink } from "./timelink";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PlayIcon, PauseIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -18,10 +34,6 @@ export function App() {
   const [mimo, setMimo] = useState<string>("all");
   const [sourceMac, setSourceMac] = useState<string>("all");
 
-  // One TimeLink shared by both heatmaps — zooming one mirrors the time axis
-  // on the other. Subcarrier zoom stays independent. useState's lazy
-  // initializer runs the factory exactly once; useRef(createTimeLink()) would
-  // rebuild it on every render (3x/s while polling) only to throw it away.
   const [timeLink] = useState(createTimeLink);
 
   useEffect(() => {
@@ -47,8 +59,6 @@ export function App() {
       }
     };
 
-    // Always fetch once on path/refresh change so explore mode (paused) has
-    // geometry. In live mode, the interval drives subsequent polls.
     poll();
     if (running) {
       const id = setInterval(poll, refreshMs);
@@ -62,9 +72,6 @@ export function App() {
     };
   }, [running, path, refreshMs, mimo, sourceMac]);
 
-  // Fetch the dropdown option lists whenever the path changes. Independent of
-  // the meta poll so a running live view does not refetch the option lists on
-  // every refresh.
   useEffect(() => {
     let cancelled = false;
     setFilters(null);
@@ -72,104 +79,147 @@ export function App() {
       .then((f) => {
         if (!cancelled) setFilters(f);
       })
-      .catch(() => {
-        // Path errors are surfaced by the meta poll; suppress duplicate.
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [path]);
 
-  return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: "1rem", maxWidth: 1400, margin: "0 auto" }}>
-      <h1>FeitCSI Heatmap</h1>
+  const mimoItems = [
+    { label: "all", value: "all" },
+    ...(filters?.mimo_modes.map((m) => ({ label: m, value: m })) ?? []),
+  ];
+  const macItems = [
+    { label: "all", value: "all" },
+    ...(filters?.source_macs.map((mac) => ({ label: mac, value: mac })) ?? []),
+  ];
 
-      <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginBottom: "1rem", alignItems: "flex-end" }}>
-        <label>
-          .dat file
-          <br />
-          <input
-            type="text"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            style={{ width: 360, padding: "0.3rem" }}
-          />
-        </label>
-        <label>
-          Refresh (ms)
-          <br />
-          <input
-            type="number"
-            min={50}
-            max={10000}
-            value={refreshMs}
-            onChange={(e) => setRefreshMs(Number(e.target.value))}
-            style={{ width: 100, padding: "0.3rem" }}
-          />
-        </label>
-        <button
-          onClick={() => setRunning((r) => !r)}
-          style={{
-            padding: "0.5rem 1.2rem",
-            background: running ? "#d33" : "#2a7",
-            color: "white",
-            border: "none",
-            borderRadius: 4,
-            cursor: "pointer",
-            fontWeight: "bold",
-          }}
-        >
-          {running ? "Pause" : "Run realtime"}
-        </button>
-        <label>
-          MIMO
-          <br />
-          <select
-            value={mimo}
-            onChange={(e) => setMimo(e.target.value)}
-            disabled={!filters || filters.mimo_modes.length <= 1}
-            style={{ padding: "0.3rem", minWidth: 90 }}
-          >
-            <option value="all">all</option>
-            {filters?.mimo_modes.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Source MAC
-          <br />
-          <select
-            value={sourceMac}
-            onChange={(e) => setSourceMac(e.target.value)}
-            disabled={!filters || filters.source_macs.length <= 1}
-            style={{ padding: "0.3rem", minWidth: 160 }}
-          >
-            <option value="all">all</option>
-            {filters?.source_macs.map((mac) => (
-              <option key={mac} value={mac}>{mac}</option>
-            ))}
-          </select>
-        </label>
-      </div>
+  return (
+    <div className="font-sans p-4 max-w-6xl mx-auto space-y-4">
+      <h1 className="text-2xl font-bold tracking-tight">FeitCSI Heatmap</h1>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Capture</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap gap-4 items-end">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="path">.dat file</Label>
+              <Input
+                id="path"
+                type="text"
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                className="w-96"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="refresh">Refresh (ms)</Label>
+              <Input
+                id="refresh"
+                type="number"
+                min={50}
+                max={10000}
+                value={refreshMs}
+                onChange={(e) => setRefreshMs(Number(e.target.value))}
+                className="w-24"
+              />
+            </div>
+
+            <Button
+              onClick={() => setRunning((r) => !r)}
+              variant={running ? "destructive" : "default"}
+            >
+              {running ? (
+                <>
+                  <PauseIcon data-icon="inline-start" />
+                  Pause
+                </>
+              ) : (
+                <>
+                  <PlayIcon data-icon="inline-start" />
+                  Run realtime
+                </>
+              )}
+            </Button>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="mimo">MIMO</Label>
+              <Select
+                value={mimo}
+                onValueChange={(v) => setMimo(v ?? "all")}
+                items={mimoItems}
+                disabled={!filters || filters.mimo_modes.length <= 1}
+              >
+                <SelectTrigger id="mimo" className="w-24">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {mimoItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="source-mac">Source MAC</Label>
+              <Select
+                value={sourceMac}
+                onValueChange={(v) => setSourceMac(v ?? "all")}
+                items={macItems}
+                disabled={!filters || filters.source_macs.length <= 1}
+              >
+                <SelectTrigger id="source-mac" className="w-48">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {macItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {error && (
-        <div style={{ color: "red", marginBottom: "1rem" }}>
-          <b>Error:</b> {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
       {meta && (
-        <div style={{ marginBottom: "1rem", color: "#444" }}>
-          <b>{meta.filename}</b> — {meta.chipset} / {meta.bandwidth} MHz —
-          frames: {meta.total_frames}, subcarriers: {meta.num_subcarriers},
-          time: [{meta.t_min.toFixed(3)}, {meta.t_max.toFixed(3)}] s
-          {lastUpdate && <span>, last update: {new Date(lastUpdate).toLocaleTimeString()}</span>}
+        <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <Badge variant="secondary">{meta.filename}</Badge>
+          <span>{meta.chipset} / {meta.bandwidth} MHz</span>
+          <Separator orientation="vertical" className="h-4" />
+          <span>frames: {meta.total_frames}</span>
+          <span>subcarriers: {meta.num_subcarriers}</span>
+          <span>time: [{meta.t_min.toFixed(3)}, {meta.t_max.toFixed(3)}] s</span>
+          {lastUpdate && (
+            <>
+              <Separator orientation="vertical" className="h-4" />
+              <span>last update: {new Date(lastUpdate).toLocaleTimeString()}</span>
+            </>
+          )}
         </div>
       )}
 
       {meta && meta.total_frames > 0 ? (
-        <>
+        <div className="space-y-6">
           <Heatmap
             path={path}
             metric="amplitude"
@@ -184,7 +234,6 @@ export function App() {
             mimo={mimo}
             sourceMac={sourceMac}
           />
-          <div style={{ height: "1.5rem" }} />
           <Heatmap
             path={path}
             metric="phase"
@@ -202,7 +251,6 @@ export function App() {
             mimo={mimo}
             sourceMac={sourceMac}
           />
-          <div style={{ height: "1.5rem" }} />
           <Heatmap
             path={path}
             metric="csi_ratio_amplitude"
@@ -217,7 +265,6 @@ export function App() {
             mimo={mimo}
             sourceMac={sourceMac}
           />
-          <div style={{ height: "1.5rem" }} />
           <Heatmap
             path={path}
             metric="csi_ratio_phase"
@@ -235,12 +282,12 @@ export function App() {
             mimo={mimo}
             sourceMac={sourceMac}
           />
-        </>
+        </div>
       ) : (
         !error && (
-          <div style={{ color: "#888", padding: "2rem" }}>
+          <div className="text-muted-foreground p-8">
             Enter a .dat path to explore, or toggle <b>Run realtime</b> for live capture. Default file:{" "}
-            <code>{DEFAULT_PATH}</code>.
+            <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{DEFAULT_PATH}</code>.
           </div>
         )
       )}
