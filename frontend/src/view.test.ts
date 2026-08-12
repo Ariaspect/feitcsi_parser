@@ -223,3 +223,41 @@ describe("shouldResetView: capture file identity", () => {
     expect(shouldResetView(base, { ...base, tMax: 21 })).toBe(false);
   });
 });
+
+describe("shouldResetView: filter change", () => {
+  const base = { filename: "a.dat", numSubcarriers: 242, tMin: 0, tMax: 100, mimo: "all", sourceMac: "all" };
+
+  it("resets when MIMO filter changes from all to 2x2", () => {
+    expect(shouldResetView(base, { ...base, mimo: "2x2", tMin: 10, tMax: 90 })).toBe(true);
+  });
+
+  it("resets when MIMO filter changes from 2x2 to all (widening)", () => {
+    const narrowed = { ...base, mimo: "2x2", tMin: 10, tMax: 90 };
+    // Widening: tMin shrinks (10→0), tMax grows (90→100). Without the filter
+    // check, tMin<prev.tMin would catch this — but the filter check fires
+    // first and is the semantically correct reason.
+    expect(shouldResetView(narrowed, base)).toBe(true);
+  });
+
+  it("resets when source MAC changes even if extent is identical", () => {
+    // Two MACs both span [0, 100]: tMin/tMax unchanged, so the time checks
+    // pass. Without the filter check, the view and ampScaleRef would stay
+    // locked to the old MAC's data — wrong colors, stale zoom.
+    const macA = { ...base, sourceMac: "aa:bb:cc:dd:ee:ff" };
+    const macB = { ...base, sourceMac: "11:22:33:44:55:66" };
+    expect(shouldResetView(macA, macB)).toBe(true);
+  });
+
+  it("does not reset when filter is unchanged (live poll with filter active)", () => {
+    // Same filter, t_max grew (new frames matching filter arrived): no reset,
+    // follow-live slides the view.
+    expect(shouldResetView(base, { ...base, tMax: 110 })).toBe(false);
+  });
+
+  it("does not reset when both filter fields are undefined", () => {
+    // Backwards compatibility: CaptureId without filter fields (e.g. older
+    // callers) still works — undefined !== undefined is false.
+    const noFilter = { filename: "a.dat", numSubcarriers: 242, tMin: 0, tMax: 100 };
+    expect(shouldResetView(noFilter, { ...noFilter, tMax: 110 })).toBe(false);
+  });
+});

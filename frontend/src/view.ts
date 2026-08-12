@@ -30,6 +30,12 @@ export interface CaptureId {
   numSubcarriers: number;
   tMin: number;
   tMax: number;
+  /** MIMO filter ('all' or 'NxM'). A filter change is a view-identity change:
+   * the visible data window and amplitude distribution both shift, so the
+   * view and the locked color scale must reset. */
+  mimo?: string | null;
+  /** Source MAC filter ('all' or a MAC string). Same rationale as mimo. */
+  sourceMac?: string | null;
 }
 
 /** Full-extent view for a fresh capture. */
@@ -87,6 +93,13 @@ export function shouldResetView(prev: CaptureId, next: CaptureId): boolean {
   // indication of why.
   if (next.filename !== prev.filename) return true;
   if (next.numSubcarriers !== prev.numSubcarriers) return true;
+  // A filter change shifts the visible data window and amplitude distribution.
+  // The time-range checks below only catch narrowing (tMin/tMax shrink); a
+  // filter that widens or shifts to a same-extent different MAC would not
+  // trigger a reset, leaving a stale view and a locked color scale bound to
+  // the old filter's data.
+  if (next.mimo !== prev.mimo) return true;
+  if (next.sourceMac !== prev.sourceMac) return true;
   if (next.tMax < prev.tMax) return true; // newest packet went backwards — truncation
   if (next.tMin < prev.tMin) return true; // start went backwards — different file
   return false;

@@ -205,6 +205,8 @@ export function Heatmap({
       numSubcarriers: props.numSubcarriers,
       tMin: props.captureTMin,
       tMax: props.captureTMax,
+      mimo: props.mimo,
+      sourceMac: props.sourceMac,
     };
 
     const prevCapture = captureRef.current;
