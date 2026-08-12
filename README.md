@@ -2,9 +2,16 @@
 
 Realtime heatmap for FeitCSI `.dat` captures (Intel AX200/AX210 NIC).
 
-Stack: FastAPI backend parses `.dat` via [CSIKit](https://github.com/Gi-z/CSIKit),
-React + Vite + [uPlot](https://github.com/leeoniya/uPlot) frontend renders
-amplitude and phase heatmaps with realtime polling.
+Stack: FastAPI backend parses `.dat` via [CSIKit](https://github.com/Gi-z/CSIKit)
+and aggregates it into display-resolution tiles; React + Vite frontend renders
+amplitude and phase heatmaps onto a raw `<canvas>`, with
+[d3-zoom](https://d3js.org/d3-zoom) driving pan and zoom and
+[d3-scale](https://d3js.org/d3-scale) mapping data to pixels. Axes and the
+colorbar are drawn directly onto the canvas — there is no charting library.
+
+The same view serves live capture and offline exploration: the backend never
+returns more cells than the plot has pixels, so cost tracks the viewport rather
+than the file. A 211 MB capture and a 1 MB one open at the same speed.
 
 ## Prerequisites
 
@@ -70,21 +77,77 @@ Open http://localhost:8000
 ## Usage
 
 1. Place FeitCSI `.dat` file at `captures/capture.dat` (or enter path in UI).
-2. Click **Run realtime**.
-3. Backend decodes the `.dat` incrementally every `refresh_ms` — only bytes
-   appended since the last poll — and returns a trailing window of
-   `max_packets` packets as JSON.
+2. To explore a finished capture, just enter its path — no need to start
+   polling. To watch one grow, click **Run realtime**.
+3. Every `refresh_ms` the frontend polls `/api/meta`, which reads the frame
+   index only and never decodes payloads. Pixels come from `/api/tile`, which
+   is fetched only when the view actually changes.
 4. Frontend renders two heatmaps: amplitude (dBm) and phase (rad).
 
 Controls:
-- **.dat file** — path to growing capture.
-- **Window (packets)** — trailing N packets displayed.
+- **.dat file** — path to a capture, growing or finished.
 - **Refresh (ms)** — polling interval.
 - **Run realtime** — toggle polling.
 
+Navigation:
+- **Wheel** / **drag** — zoom and pan the time axis. Both heatmaps share it, so
+  they always show the same instant.
+- **Shift + wheel** — zoom the subcarrier axis. This stays per-plot.
+- **Double-click** — reset to full extent and resume following the newest
+  packet.
+
+Zooming or panning freezes the view (the plot is labelled *frozen*); live polls
+then leave it exactly where you put it instead of snapping back. Double-click to
+resume following.
+
 ## API
 
+The frontend uses `/api/meta` and `/api/tile`. `/api/snapshot` predates them
+and is kept for scripted use.
+
+### `GET /api/meta`
+
+Query params:
+- `path` — path to `.dat` file
+
+Builds the frame index only — no payload is decoded — so it stays cheap on
+large files (48 ms on a 211 MB capture). Returns `filename`, `chipset`,
+`bandwidth`, `num_subcarriers`, `total_frames`, `t_min`, `t_max`, `num_rx`,
+`num_tx`.
+
+### `GET /api/tile`
+
+Query params:
+- `path` — path to `.dat` file
+- `t0`, `t1` — time window in seconds, **closed at both ends**
+- `width` — output columns, normally the plot width in pixels
+- `metric` — `amplitude` or `phase`
+
+Returns a bare `(num_subcarriers, width)` little-endian float32 array,
+row-major, row 0 = highest subcarrier. The body stays a buffer the client wraps
+in a `Float32Array`; metadata rides in headers:
+
+| Header | Meaning |
+|---|---|
+| `X-Tile-Width` / `X-Tile-Height` | Grid shape. Width may be **less** than requested — it is capped at the frame count. |
+| `X-Capture-TMin` / `X-Capture-TMax` | The whole file's extent, not this tile's window, so a live view can track growth without a second round trip. |
+| `X-Tile-Frames` | Frames decoded (≤ 8192; the range is stride-sampled beyond that). |
+| `X-Tile-Total` | Frames in range before sampling. |
+| `X-Tile-Exact` | `1` if no stride sampling was needed. |
+| `X-Tile-VMin` / `X-Tile-VMax` | Finite extrema. |
+| `X-Tile-PLow` / `X-Tile-PHigh` | 1st/99th percentiles — the robust scale the amplitude plot locks to. |
+| `X-Tile-Filled` | Columns filled from a neighbouring frame across a sampling gap. |
+
+Columns are max-hold for amplitude and nearest-frame for phase (a maximum of an
+angle is meaningless). A column that receives no frame borrows the nearest one
+within 2x the 95th-percentile inter-frame interval; beyond that it stays NaN, so
+a real capture dropout stays visible instead of being painted over.
+
 ### `GET /api/snapshot`
+
+Predates the tile API and returns decoded values as JSON. Superseded by
+`/api/meta` + `/api/tile` for anything interactive — the payload grows with the
+window, so it does not stay bounded on large captures.
 
 Query params:
 - `path` — path to `.dat` file (default `captures/capture.dat`)
