@@ -41,6 +41,8 @@ interface HeatmapProps {
   mimo?: string | null;
   /** Source MAC filter passed to /api/tile. 'all' or a MAC string. */
   sourceMac?: string | null;
+  /** Dark mode: canvas text/axes/crosshair colors adapt. */
+  dark?: boolean;
 }
 
 const PADDING = { top: 30, right: 70, bottom: 40, left: 60 };
@@ -82,6 +84,7 @@ interface PropsMirror {
   timeLink?: TimeLink;
   mimo?: string | null;
   sourceMac?: string | null;
+  dark?: boolean;
 }
 
 interface TileEntry {
@@ -116,6 +119,7 @@ export function Heatmap({
   timeLink,
   mimo,
   sourceMac,
+  dark,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -180,6 +184,7 @@ export function Heatmap({
     timeLink,
     mimo,
     sourceMac,
+    dark,
   };
 
   // -------------------------------------------------------------------------
@@ -266,6 +271,10 @@ export function Heatmap({
       const props = propsRef.current;
       if (!ctx || !props) return;
 
+      const c = props.dark
+        ? { text: "#e5e7eb", muted: "#9ca3af", border: "#3f3f46", crosshair: "#1a1a1a", tooltipBg: "rgba(255,255,255,0.9)", tooltipText: "#0a0a0a" }
+        : { text: "#000000", muted: "#888888", border: "#888888", crosshair: "#ffffff", tooltipBg: "rgba(0,0,0,0.85)", tooltipText: "#ffffff" };
+
       const dpr = window.devicePixelRatio || 1;
       const cssW = container.clientWidth;
       const cssH = props.height;
@@ -288,7 +297,7 @@ export function Heatmap({
       const tileEntry = tileRef.current;
 
       if (!view || props.numSubcarriers === 0 || !(view.tMax > view.tMin)) {
-        ctx.fillStyle = "#888";
+        ctx.fillStyle = c.muted;
         ctx.font = "14px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -326,15 +335,15 @@ export function Heatmap({
       if (!tileEntry) {
         // Geometry is live, the first tile is still in flight. Frame the plot
         // so the layout doesn't jump when it lands.
-        ctx.strokeStyle = "#000";
+        ctx.strokeStyle = c.text;
         ctx.lineWidth = 1;
         ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
-        ctx.fillStyle = "#888";
+        ctx.fillStyle = c.muted;
         ctx.font = "13px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText("Loading…", plot.x + plot.w / 2, plot.y + plot.h / 2);
-        ctx.fillStyle = "#000";
+        ctx.fillStyle = c.text;
         ctx.font = "bold 13px sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "top";
@@ -412,7 +421,7 @@ export function Heatmap({
       }
 
       // --- Frame ---
-      ctx.strokeStyle = "#000";
+      ctx.strokeStyle = c.text;
       ctx.lineWidth = 1;
       ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
 
@@ -421,7 +430,7 @@ export function Heatmap({
         .domain([view.tMin, view.tMax])
         .range([plot.x, plot.x + plot.w]);
       const tFmt = tScale.tickFormat(6);
-      ctx.fillStyle = "#000";
+      ctx.fillStyle = c.text;
       ctx.font = "11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
@@ -469,9 +478,9 @@ export function Heatmap({
       }
       ctx.fillStyle = grad;
       ctx.fillRect(barX, plot.y, barW, plot.h);
-      ctx.strokeStyle = "#888";
+      ctx.strokeStyle = c.border;
       ctx.strokeRect(barX, plot.y, barW, plot.h);
-      ctx.fillStyle = "#000";
+      ctx.fillStyle = c.text;
       ctx.font = "10px sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
@@ -485,7 +494,7 @@ export function Heatmap({
       ctx.restore();
 
       // --- Title ---
-      ctx.fillStyle = "#000";
+      ctx.fillStyle = c.text;
       ctx.font = "bold 13px sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
@@ -512,7 +521,7 @@ export function Heatmap({
       if (hover) {
         const x = tToX(hover.t);
         const y = scToY(hover.sc);
-        ctx.strokeStyle = "#fff";
+        ctx.strokeStyle = c.crosshair;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(x, plot.y);
@@ -520,12 +529,12 @@ export function Heatmap({
         ctx.moveTo(plot.x, y);
         ctx.lineTo(plot.x + plot.w, y);
         ctx.stroke();
-        ctx.fillStyle = "rgba(0,0,0,0.85)";
+        ctx.fillStyle = c.tooltipBg;
         const txt = `t=${hover.t.toFixed(3)}s  sc=${hover.sc}  v=${hover.v.toFixed(2)}`;
         ctx.font = "11px monospace";
         const tw = ctx.measureText(txt).width;
         ctx.fillRect(x + 8, y - 22, tw + 12, 18);
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = c.tooltipText;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(txt, x + 14, y - 13);
