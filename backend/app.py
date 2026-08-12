@@ -242,6 +242,34 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
+
+
+@app.get("/api/captures")
+def list_captures() -> list[dict]:
+    """List .dat files in the captures/ directory.
+
+    Returns filename, size_bytes, and mtime (ISO 8601) for each .dat file,
+    sorted by mtime descending (newest first). Missing dir → empty list.
+    """
+    if not CAPTURES_DIR.is_dir():
+        return []
+
+    files: list[dict] = []
+    for entry in CAPTURES_DIR.iterdir():
+        if entry.suffix == ".dat" and entry.is_file():
+            st = entry.stat()
+            files.append({
+                "filename": entry.name,
+                "path": str(entry),
+                "size_bytes": st.st_size,
+                "mtime": st.st_mtime,
+            })
+
+    files.sort(key=lambda f: f["mtime"], reverse=True)
+    return files
+
+
 # Serve built frontend (production). In dev, Vite runs separately on :5173.
 _dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _dist.is_dir():

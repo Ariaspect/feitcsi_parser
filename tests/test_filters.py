@@ -295,3 +295,38 @@ def test_tile_endpoint_mac_filter(mixed_file: Path) -> None:
     })
     assert r.status_code == 200
     assert int(r.headers["X-Tile-Frames"]) == expected
+
+
+# ----------------------------------------------------------------------- #
+#  /api/captures endpoint                                                #
+# ----------------------------------------------------------------------- #
+
+
+def test_captures_endpoint_lists_dat_files() -> None:
+    """GET /api/captures returns .dat files from captures/ sorted by mtime desc."""
+    client = TestClient(app)
+    r = client.get("/api/captures")
+    assert r.status_code == 200
+    caps = r.json()
+
+    cap_names = {c["filename"] for c in caps}
+    assert "capture.dat" in cap_names
+
+    for c in caps:
+        assert c["filename"].endswith(".dat")
+        assert c["size_bytes"] > 0
+        assert "path" in c
+        assert "mtime" in c
+
+    mtimes = [c["mtime"] for c in caps]
+    assert mtimes == sorted(mtimes, reverse=True)
+
+
+def test_captures_endpoint_missing_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing captures dir returns empty list, not an error."""
+    import backend.app as app_mod
+    monkeypatch.setattr(app_mod, "CAPTURES_DIR", tmp_path / "nonexistent")
+    client = TestClient(app)
+    r = client.get("/api/captures")
+    assert r.status_code == 200
+    assert r.json() == []

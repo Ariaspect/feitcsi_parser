@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchFilters, fetchMeta, type Filters, type Meta } from "./api";
+import { fetchCaptures, fetchFilters, fetchMeta, formatBytes, type CaptureFile, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { createTimeLink } from "./timelink";
@@ -31,6 +31,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
   const [filters, setFilters] = useState<Filters | null>(null);
+  const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
   const [sourceMac, setSourceMac] = useState<string>("all");
   const [dark, setDark] = useState<boolean>(() => {
@@ -89,6 +90,18 @@ export function App() {
     };
   }, [path]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchCaptures()
+      .then((c) => {
+        if (!cancelled) setCaptures(c);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const toggleDark = () => {
     setDark((d) => {
       const next = !d;
@@ -96,6 +109,11 @@ export function App() {
       return next;
     });
   };
+
+  const captureItems = (captures ?? []).map((c) => ({
+    label: `${c.filename}  (${formatBytes(c.size_bytes)})`,
+    value: c.path,
+  }));
 
   const mimoItems = [
     { label: "all", value: "all" },
@@ -113,14 +131,25 @@ export function App() {
           <h1 className="text-base font-bold tracking-tight mr-auto">FeitCSI Heatmap</h1>
 
           <div className="flex flex-col gap-0.5">
-            <Label htmlFor="path" className="text-[10px] text-muted-foreground uppercase tracking-wide">.dat file</Label>
-            <Input
-              id="path"
-              type="text"
+            <Label htmlFor="path" className="text-[10px] text-muted-foreground uppercase tracking-wide">Capture</Label>
+            <Select
               value={path}
-              onChange={(e) => setPath(e.target.value)}
-              className="w-72 h-8"
-            />
+              onValueChange={(v) => v && setPath(v)}
+              items={captureItems}
+            >
+              <SelectTrigger id="path" className="w-72 h-8" size="sm">
+                <SelectValue placeholder={captures === null ? "Loading…" : "Select a .dat file"} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {captureItems.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="flex flex-col gap-0.5">

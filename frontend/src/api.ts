@@ -15,6 +15,29 @@ export interface Filters {
   source_macs: string[];
 }
 
+export interface CaptureFile {
+  filename: string;
+  path: string;
+  size_bytes: number;
+  mtime: number;
+}
+
+export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {
+  const res = await fetch("/api/captures", { signal });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  return (await res.json()) as CaptureFile[];
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function filterParams(mimo?: string | null, sourceMac?: string | null): string {
   let p = "";
   if (mimo && mimo !== "all") p += `&mimo=${encodeURIComponent(mimo)}`;
