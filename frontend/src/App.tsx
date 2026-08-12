@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchMeta, type Meta } from "./api";
+import { fetchFilters, fetchMeta, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { createTimeLink } from "./timelink";
@@ -14,6 +14,9 @@ export function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
+  const [filters, setFilters] = useState<Filters | null>(null);
+  const [mimo, setMimo] = useState<string>("all");
+  const [sourceMac, setSourceMac] = useState<string>("all");
 
   // One TimeLink shared by both heatmaps — zooming one mirrors the time axis
   // on the other. Subcarrier zoom stays independent. useState's lazy
@@ -29,7 +32,7 @@ export function App() {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        const m = await fetchMeta(path);
+        const m = await fetchMeta(path, undefined, mimo, sourceMac);
         if (!cancelled) {
           setMeta(m);
           setError(null);
@@ -57,7 +60,25 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [running, path, refreshMs]);
+  }, [running, path, refreshMs, mimo, sourceMac]);
+
+  // Fetch the dropdown option lists whenever the path changes. Independent of
+  // the meta poll so a running live view does not refetch the option lists on
+  // every refresh.
+  useEffect(() => {
+    let cancelled = false;
+    setFilters(null);
+    fetchFilters(path)
+      .then((f) => {
+        if (!cancelled) setFilters(f);
+      })
+      .catch(() => {
+        // Path errors are surfaced by the meta poll; suppress duplicate.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: "1rem", maxWidth: 1400, margin: "0 auto" }}>
@@ -100,6 +121,36 @@ export function App() {
         >
           {running ? "Pause" : "Run realtime"}
         </button>
+        <label>
+          MIMO
+          <br />
+          <select
+            value={mimo}
+            onChange={(e) => setMimo(e.target.value)}
+            disabled={!filters || filters.mimo_modes.length <= 1}
+            style={{ padding: "0.3rem", minWidth: 90 }}
+          >
+            <option value="all">all</option>
+            {filters?.mimo_modes.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Source MAC
+          <br />
+          <select
+            value={sourceMac}
+            onChange={(e) => setSourceMac(e.target.value)}
+            disabled={!filters || filters.source_macs.length <= 1}
+            style={{ padding: "0.3rem", minWidth: 160 }}
+          >
+            <option value="all">all</option>
+            {filters?.source_macs.map((mac) => (
+              <option key={mac} value={mac}>{mac}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {error && (
@@ -130,6 +181,8 @@ export function App() {
             colorLabel="Amplitude (dBm)"
             height={400}
             timeLink={timeLink}
+            mimo={mimo}
+            sourceMac={sourceMac}
           />
           <div style={{ height: "1.5rem" }} />
           <Heatmap
@@ -146,6 +199,8 @@ export function App() {
             height={400}
             palette={TWILIGHT}
             timeLink={timeLink}
+            mimo={mimo}
+            sourceMac={sourceMac}
           />
         </>
       ) : (

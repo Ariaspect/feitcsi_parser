@@ -39,6 +39,10 @@ interface HeatmapProps {
    * one plot, the other mirrors the time window (but not the subcarrier band).
    * Omit for a standalone heatmap. */
   timeLink?: TimeLink;
+  /** MIMO filter passed to /api/tile. 'all' or 'NxM'. */
+  mimo?: string | null;
+  /** Source MAC filter passed to /api/tile. 'all' or a MAC string. */
+  sourceMac?: string | null;
 }
 
 const PADDING = { top: 30, right: 70, bottom: 40, left: 60 };
@@ -78,6 +82,8 @@ interface PropsMirror {
   palette: readonly string[];
   height: number;
   timeLink?: TimeLink;
+  mimo?: string | null;
+  sourceMac?: string | null;
 }
 
 interface TileEntry {
@@ -92,6 +98,8 @@ interface FetchKey {
   t0: number;
   t1: number;
   width: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
 }
 
 export function Heatmap({
@@ -108,6 +116,8 @@ export function Heatmap({
   palette = VIRIDIS,
   height = 400,
   timeLink,
+  mimo,
+  sourceMac,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -170,6 +180,8 @@ export function Heatmap({
     palette,
     height,
     timeLink,
+    mimo,
+    sourceMac,
   };
 
   // -------------------------------------------------------------------------
@@ -638,7 +650,9 @@ export function Heatmap({
         lastKey.metric === props.metric &&
         lastKey.t0 === t0 &&
         lastKey.t1 === t1 &&
-        lastKey.width === width
+        lastKey.width === width &&
+        lastKey.mimo === props.mimo &&
+        lastKey.sourceMac === props.sourceMac
       ) {
         return;
       }
@@ -648,6 +662,8 @@ export function Heatmap({
         t0,
         t1,
         width,
+        mimo: props.mimo,
+        sourceMac: props.sourceMac,
       };
 
       abortRef.current?.abort();
@@ -663,6 +679,8 @@ export function Heatmap({
           width,
           props.metric,
           controller.signal,
+          props.mimo,
+          props.sourceMac,
         );
         // Drop stale responses — a newer request may have been issued while
         // this one was in flight. Aborting alone is not sufficient: the fetch

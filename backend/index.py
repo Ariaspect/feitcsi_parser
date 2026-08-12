@@ -57,6 +57,22 @@ def _decode_rate_flags(rate_flags: np.ndarray) -> tuple[list[str], list[str]]:
     return rate_formats, channel_widths
 
 
+# Byte offset of the 6-byte source MAC in a FeitCSI header.
+SOURCE_MAC_OFFSET = 68
+
+
+def _mac_bytes_to_str(b: bytes) -> str:
+    return ":".join(f"{x:02x}" for x in b)
+
+
+def _macs_from_mm(mm: np.ndarray, count: int) -> list[str]:
+    macs: list[str] = []
+    for i in range(count):
+        raw = bytes(mm[i, SOURCE_MAC_OFFSET:SOURCE_MAC_OFFSET + 6].tolist())
+        macs.append(_mac_bytes_to_str(raw))
+    return macs
+
+
 def _compute_timestamps(ftm: np.ndarray, mu: np.ndarray) -> np.ndarray:
     """Vectorised cumulative timestamp chain reproducing ``read_file``.
 
@@ -100,6 +116,20 @@ def _compute_timestamps(ftm: np.ndarray, mu: np.ndarray) -> np.ndarray:
     return times
 
 
+def _mimo_label(num_rx: int, num_tx: int) -> str:
+    return f"{num_rx}x{num_tx}"
+
+
+def parse_mimo_filter(value: str | None) -> tuple[int, int] | None:
+    """Parse a 'NxM' MIMO filter string into (num_rx, num_tx), or None for 'all'."""
+    if not value or value == "all":
+        return None
+    parts = value.split("x")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"invalid mimo filter: {value!r} (expected 'all' or 'NxM')")
+    return int(parts[0]), int(parts[1])
+
+
 class FrameIndex:
     """Structural index of a FeitCSI capture: offsets, timestamps, and metadata.
 
@@ -116,6 +146,33 @@ class FrameIndex:
         self.path = Path(path)
         self._scan_end: int = 0  # byte offset past the last complete frame
         self._scan_full()
+
+    def mimo_labels(self) -> list[str]:
+        """Per-frame MIMO labels like '2x1', '2x2'."""
+        return [
+            _mimo_label(int(rx), int(tx))
+            for rx, tx in zip(self.num_rx_arr, self.num_tx_arr)
+        ]
+
+    def filter_mask(
+        self,
+        mimo: tuple[int, int] | None = None,
+        source_mac: str | None = None,
+    ) -> np.ndarray:
+        """Boolean mask over all frames: True = frame matches the filter.
+
+        ``mimo`` is a (num_rx, num_tx) tuple. ``source_mac`` is a colon-
+        separated MAC string. Either may be None to skip that filter.
+        """
+        n = self.count
+        mask = np.ones(n, dtype=bool)
+        if mimo is not None and n > 0:
+            rx, tx = mimo
+            mask &= (self.num_rx_arr == rx) & (self.num_tx_arr == tx)
+        if source_mac and n > 0:
+            macs = np.array(self.source_macs, dtype=object)
+            mask &= macs == source_mac
+        return mask
 
     # ------------------------------------------------------------------ #
     #  Full scan                                                          #
@@ -166,6 +223,8 @@ class FrameIndex:
         mu = u32(88)
         rate_flags = u32(92)
 
+        source_macs = _macs_from_mm(mm, count)
+
         mm._mmap.close()
 
         # Verify geometry is constant; fall back if num_rx/num_tx vary. The
@@ -195,6 +254,7 @@ class FrameIndex:
         self.num_tx = int(num_tx_arr[0])
         self.num_rx_arr = num_rx_arr
         self.num_tx_arr = num_tx_arr
+        self.source_macs = source_macs
         self.bandwidth = channel_widths[0]
         self.stride = stride
         self._uniform = True
@@ -211,6 +271,7 @@ class FrameIndex:
         num_sc_list: list[int] = []
         num_rx_list: list[int] = []
         num_tx_list: list[int] = []
+        mac_list: list[str] = []
 
         with self.path.open("rb") as fh:
             pos = 0
@@ -233,6 +294,7 @@ class FrameIndex:
                 num_sc_list.append(h["num_subcarriers"])
                 num_rx_list.append(h["num_rx"])
                 num_tx_list.append(h["num_tx"])
+                mac_list.append(h["source_mac_string"])
                 pos = frame_end
 
         count = len(offsets)
@@ -248,6 +310,7 @@ class FrameIndex:
         self.csi_lengths = np.array(csi_lengths, dtype=np.int64)
         self.num_rx_arr = np.array(num_rx_list, dtype=np.int64)
         self.num_tx_arr = np.array(num_tx_list, dtype=np.int64)
+        self.source_macs = mac_list
         self.times = _compute_timestamps(self.ftm_clocks, self.mu_clocks)
 
         rate_formats, channel_widths = _decode_rate_flags(self.rate_flags)
@@ -280,6 +343,7 @@ class FrameIndex:
         self.rate_flags = np.zeros(0, dtype=np.int64)
         self.num_rx_arr = np.zeros(0, dtype=np.int64)
         self.num_tx_arr = np.zeros(0, dtype=np.int64)
+        self.source_macs = []
         self.rate_formats = []
         self.channel_widths = []
         self.count = 0
@@ -339,6 +403,10 @@ class FrameIndex:
         rate_flags_new = u32(92, lo, new_count)
         csi_lengths_new = u32(0, lo, new_count)
 
+        macs_new: list[str] = []
+        if new_count > lo:
+            macs_new = _macs_from_mm(mm, new_count)[lo:]
+
         mm._mmap.close()
 
         # Verify the new frames still have the expected csi_length.
@@ -379,6 +447,7 @@ class FrameIndex:
         self.num_tx_arr = np.concatenate([
             self.num_tx_arr, np.full(new_count - lo, self.num_tx, dtype=np.int64)
         ])
+        self.source_macs.extend(macs_new)
         self.rate_formats.extend(rf_new)
         self.channel_widths.extend(cw_new)
         self.count = new_count
@@ -402,6 +471,7 @@ class FrameIndex:
         num_sc_list: list[int] = []
         num_rx_list: list[int] = []
         num_tx_list: list[int] = []
+        mac_list: list[str] = []
 
         with self.path.open("rb") as fh:
             pos = last_end
@@ -423,6 +493,7 @@ class FrameIndex:
                 num_sc_list.append(h["num_subcarriers"])
                 num_rx_list.append(h["num_rx"])
                 num_tx_list.append(h["num_tx"])
+                mac_list.append(h["source_mac_string"])
                 pos = frame_end
 
         if not offsets:
@@ -458,6 +529,7 @@ class FrameIndex:
         self.csi_lengths = np.concatenate([self.csi_lengths, np.array(csi_lengths, dtype=np.int64)])
         self.num_rx_arr = np.concatenate([self.num_rx_arr, np.array(num_rx_list, dtype=np.int64)])
         self.num_tx_arr = np.concatenate([self.num_tx_arr, np.array(num_tx_list, dtype=np.int64)])
+        self.source_macs.extend(mac_list)
         self.rate_formats.extend(rf_new)
         self.channel_widths.extend(cw_new)
         self.count += len(offsets)

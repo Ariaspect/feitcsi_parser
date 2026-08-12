@@ -10,17 +10,44 @@ export interface Meta {
   num_tx: number;
 }
 
+export interface Filters {
+  mimo_modes: string[];
+  source_macs: string[];
+}
+
+function filterParams(mimo?: string | null, sourceMac?: string | null): string {
+  let p = "";
+  if (mimo && mimo !== "all") p += `&mimo=${encodeURIComponent(mimo)}`;
+  if (sourceMac && sourceMac !== "all") p += `&source_mac=${encodeURIComponent(sourceMac)}`;
+  return p;
+}
+
 export async function fetchMeta(
   path: string,
   signal?: AbortSignal,
+  mimo?: string | null,
+  sourceMac?: string | null,
 ): Promise<Meta> {
-  const url = `/api/meta?path=${encodeURIComponent(path)}`;
+  const url = `/api/meta?path=${encodeURIComponent(path)}${filterParams(mimo, sourceMac)}`;
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`HTTP ${res.status}: ${text}`);
   }
   return (await res.json()) as Meta;
+}
+
+export async function fetchFilters(
+  path: string,
+  signal?: AbortSignal,
+): Promise<Filters> {
+  const url = `/api/filters?path=${encodeURIComponent(path)}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  return (await res.json()) as Filters;
 }
 
 export interface Tile {
@@ -47,10 +74,13 @@ export async function fetchTile(
   width: number,
   metric: "amplitude" | "phase",
   signal?: AbortSignal,
+  mimo?: string | null,
+  sourceMac?: string | null,
 ): Promise<Tile> {
   const url =
     `/api/tile?path=${encodeURIComponent(path)}` +
-    `&t0=${t0}&t1=${t1}&width=${width}&metric=${metric}`;
+    `&t0=${t0}&t1=${t1}&width=${width}&metric=${metric}` +
+    filterParams(mimo, sourceMac);
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text();

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .stream import get_stream
 from .tiles import compute_tile, get_index, reset_tile_caches
+from .index import parse_mimo_filter
 
 DEFAULT_PATH = "captures/capture.dat"
 DEFAULT_WINDOW = 200
@@ -100,29 +101,75 @@ def snapshot(
 
 
 @app.get("/api/meta")
-def meta(path: str = Query(..., description="Path to .dat file")) -> dict:
+def meta(
+    path: str = Query(..., description="Path to .dat file"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM' (e.g. '2x1', '2x2')"),
+    source_mac: str | None = Query(None, description="Source MAC filter, e.g. 'd8:3a:dd:29:22:f5'"),
+) -> dict:
     """Cheap metadata endpoint — index only, never decodes payloads.
 
     Returns capture geometry and time range.  On a 211 MB capture this returns
     in well under a second because it only builds a FrameIndex.
+
+    ``mimo`` and ``source_mac`` filter the reported counts and time range to
+    frames that match. The full capture's geometry (num_subcarriers, num_rx,
+    num_tx, bandwidth, chipset) is a property of the file and is reported
+    unfiltered.
     """
     p = resolve_capture_path(path)
     idx = get_index(p)
 
-    t_min = float(idx.times[0]) if idx.count > 0 else 0.0
-    t_max = float(idx.times[-1]) if idx.count > 0 else 0.0
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    mac_filter = source_mac if source_mac and source_mac.strip() else None
+    mask = idx.filter_mask(mimo=mimo_filter, source_mac=mac_filter)
+    filtered_count = int(mask.sum())
+
+    if filtered_count > 0:
+        idxs = np.flatnonzero(mask)
+        t_min = float(idx.times[idxs[0]])
+        t_max = float(idx.times[idxs[-1]])
+    else:
+        t_min = 0.0
+        t_max = 0.0
 
     return {
         "filename": p.name,
         "chipset": "Intel AX2xx",
         "bandwidth": idx.bandwidth,
         "num_subcarriers": idx.num_subcarriers,
-        "total_frames": idx.count,
+        "total_frames": filtered_count,
         "t_min": t_min,
         "t_max": t_max,
         "num_rx": idx.num_rx,
         "num_tx": idx.num_tx,
     }
+
+
+@app.get("/api/filters")
+def filters(path: str = Query(..., description="Path to .dat file")) -> dict:
+    """Distinct MIMO modes and source MACs present in a capture.
+
+    Used to populate the frontend dropdowns. Cheap (header scan only).
+    """
+    p = resolve_capture_path(path)
+    idx = get_index(p)
+
+    if idx.count == 0:
+        return {"mimo_modes": [], "source_macs": []}
+
+    mimo_modes = sorted({
+        f"{int(rx)}x{int(tx)}"
+        for rx, tx in zip(idx.num_rx_arr, idx.num_tx_arr)
+    })
+    # Preserve first-seen order for MACs (stable in the index).
+    seen: dict[str, None] = {}
+    for m in idx.source_macs:
+        seen.setdefault(m, None)
+    return {"mimo_modes": mimo_modes, "source_macs": list(seen)}
 
 
 @app.get("/api/tile")
@@ -132,6 +179,8 @@ def tile(
     t1: float = Query(..., description="End of requested time window (seconds)"),
     width: int = Query(1600, ge=1, description="Output columns (client plot width in pixels; capped at 4096)"),
     metric: str = Query("amplitude", description="Metric: 'amplitude' or 'phase'"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM' (e.g. '2x1', '2x2')"),
+    source_mac: str | None = Query(None, description="Source MAC filter, e.g. 'd8:3a:dd:29:22:f5'"),
 ) -> Response:
     """Pre-aggregated grid at display resolution, as raw little-endian float32.
 
@@ -149,7 +198,14 @@ def tile(
 
     p = resolve_capture_path(path)
 
-    grid, meta = compute_tile(p, t0, t1, width, metric)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    mac_filter = source_mac if source_mac and source_mac.strip() else None
+
+    grid, meta = compute_tile(p, t0, t1, width, metric, mimo=mimo_filter, source_mac=mac_filter)
 
     body = grid.astype("<f4", copy=False).tobytes()
 
