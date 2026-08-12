@@ -1,27 +1,9 @@
-// Renders CSI matrix data into an ImageData buffer using a precomputed color LUT.
-// The image is built at plot-pixel width (not per-frame width) because timestamps
-// are non-uniformly spaced — a uniform-width image would distort the time axis.
+// Renders pre-aggregated tile grids into an ImageData buffer using a LUT.
+// The grid arrives from the backend already aggregated (max-hold for
+// amplitude, nearest for phase) and already oriented with row 0 = highest
+// subcarrier index — no time search, no aggregation, no row flipping here.
 
 import { NO_DATA_COLOR, NON_FINITE_COLOR, lutIndex } from "./colormap";
-
-export interface ColumnView {
-  tMin: number;
-  tMax: number;
-}
-
-export type Aggregation = "max" | "nearest";
-
-/** Binary search: first index i where arr[i] >= x. */
-function lowerBound(arr: readonly number[], x: number): number {
-  let lo = 0;
-  let hi = arr.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (arr[mid] < x) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
 
 /**
  * Source rectangle for blitting the rendered image's subcarrier axis.
@@ -48,118 +30,72 @@ export function subcarrierSourceRect(
   return { srcY, srcH: srcYEnd - srcY };
 }
 
-export function renderToImageData(params: {
-  matrix: number[][];
-  timeSeconds: number[];
-  subcarrierCount: number;
-  view: ColumnView;
-  widthPx: number;
+/**
+ * Map a tile covering [tile.t0, tile.t1] onto a view showing [view.tMin, view.tMax].
+ * Returns the source x-range within the tile and the destination x-range as
+ * fractions of the plot width, or null when the two ranges do not overlap.
+ *
+ * `dx0`/`dx1` are fractions in [0,1] of the plot width; `sx`/`sw` are pixel
+ * coordinates in the tile. Partial overlap is clipped on BOTH rects
+ * consistently — a tile that covers only the left half of the view draws into
+ * only the left half, not stretched across it. This is what lets a stale tile
+ * be stretched into place the instant the user zooms, before the fresh tile
+ * arrives.
+ */
+export function tileSourceRect(
+  tile: { t0: number; t1: number; width: number },
+  view: { tMin: number; tMax: number },
+): { sx: number; sw: number; dx0: number; dx1: number } | null {
+  const tileSpan = tile.t1 - tile.t0;
+  const viewSpan = view.tMax - view.tMin;
+  if (!(tileSpan > 0) || !(viewSpan > 0)) return null;
+
+  const overlapT0 = Math.max(tile.t0, view.tMin);
+  const overlapT1 = Math.min(tile.t1, view.tMax);
+  if (!(overlapT1 > overlapT0)) return null;
+
+  const sx = ((overlapT0 - tile.t0) / tileSpan) * tile.width;
+  const sw = ((overlapT1 - overlapT0) / tileSpan) * tile.width;
+  const dx0 = (overlapT0 - view.tMin) / viewSpan;
+  const dx1 = (overlapT1 - view.tMin) / viewSpan;
+
+  return { sx, sw, dx0, dx1 };
+}
+
+export function renderTileToImageData(params: {
+  grid: Float32Array;
+  width: number;
+  height: number;
   lut: Uint32Array;
   min: number;
   max: number;
-  aggregation: Aggregation;
   target?: ImageData;
 }): ImageData {
-  const {
-    matrix,
-    timeSeconds,
-    subcarrierCount,
-    view,
-    widthPx,
-    lut,
-    min,
-    max,
-    aggregation,
-    target,
-  } = params;
-
+  const { grid, width, height, lut, min, max, target } = params;
   const lutSize = lut.length;
-  const n = subcarrierCount;
 
   let imageData: ImageData;
-  if (target && target.width === widthPx && target.height === n) {
+  if (target && target.width === width && target.height === height) {
     imageData = target;
   } else {
-    imageData = new ImageData(widthPx, n);
+    imageData = new ImageData(width, height);
   }
   const u32 = new Uint32Array(imageData.data.buffer);
 
-  const span = view.tMax - view.tMin;
-
-  // Reusable per-column buffer for max-hold.
-  const colMax = new Float64Array(n);
-
-  for (let x = 0; x < widthPx; x++) {
-    const colStart = view.tMin + (x / widthPx) * span;
-    const colEnd = view.tMin + ((x + 1) / widthPx) * span;
-    const center = (colStart + colEnd) / 2;
-    const isLast = x === widthPx - 1;
-
-    // Binary search for the first frame >= colStart.
-    const lo = lowerBound(timeSeconds, colStart);
-
-    // Collect frames in [colStart, colEnd). The last column is inclusive of
-    // colEnd (= view.tMax) so the final frame is not dropped by the half-open
-    // interval.
-    let hi = lo;
-    if (isLast) {
-      while (hi < timeSeconds.length && timeSeconds[hi] <= colEnd) hi++;
+  const n = width * height;
+  for (let i = 0; i < n; i++) {
+    const v = grid[i];
+    // NaN = no frames in this column (transparent). -Infinity is real data
+    // (db(0)) — opaque black, not missing. The distinction must survive the
+    // LUT path because a column of all-db(0) frames is a valid measurement,
+    // not a gap.
+    if (Number.isNaN(v)) {
+      u32[i] = NO_DATA_COLOR;
+    } else if (!Number.isFinite(v)) {
+      u32[i] = NON_FINITE_COLOR;
     } else {
-      while (hi < timeSeconds.length && timeSeconds[hi] < colEnd) hi++;
-    }
-
-    if (lo >= hi) {
-      // No frames in this column — fill with transparent NO_DATA_COLOR.
-      for (let y = 0; y < n; y++) {
-        u32[y * widthPx + x] = NO_DATA_COLOR;
-      }
-      continue;
-    }
-
-    if (aggregation === "max") {
-      // Max-hold across frames in the column, per subcarrier.
-      colMax.fill(-Infinity);
-      for (let fi = lo; fi < hi; fi++) {
-        const row = matrix[fi];
-        for (let si = 0; si < n; si++) {
-          const v = row[si];
-          if (Number.isFinite(v) && v > colMax[si]) {
-            colMax[si] = v;
-          }
-        }
-      }
-      for (let si = 0; si < n; si++) {
-        const y = n - 1 - si; // output row 0 = highest subcarrier index (top)
-        const cm = colMax[si];
-        if (cm === -Infinity) {
-          u32[y * widthPx + x] = NON_FINITE_COLOR;
-        } else {
-          const li = lutIndex(cm, min, max, lutSize);
-          u32[y * widthPx + x] = li < 0 ? NON_FINITE_COLOR : lut[li];
-        }
-      }
-    } else {
-      // nearest: use the single frame closest to the column center time.
-      let bestFi = lo;
-      let bestDist = Math.abs(timeSeconds[lo] - center);
-      for (let fi = lo + 1; fi < hi; fi++) {
-        const d = Math.abs(timeSeconds[fi] - center);
-        if (d < bestDist) {
-          bestDist = d;
-          bestFi = fi;
-        }
-      }
-      const row = matrix[bestFi];
-      for (let si = 0; si < n; si++) {
-        const y = n - 1 - si; // output row 0 = highest subcarrier index (top)
-        const v = row[si];
-        if (!Number.isFinite(v)) {
-          u32[y * widthPx + x] = NON_FINITE_COLOR;
-        } else {
-          const li = lutIndex(v, min, max, lutSize);
-          u32[y * widthPx + x] = li < 0 ? NON_FINITE_COLOR : lut[li];
-        }
-      }
+      const li = lutIndex(v, min, max, lutSize);
+      u32[i] = li < 0 ? NON_FINITE_COLOR : lut[li];
     }
   }
 

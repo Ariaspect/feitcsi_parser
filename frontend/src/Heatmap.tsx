@@ -3,7 +3,8 @@ import { select } from "d3-selection";
 import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from "d3-zoom";
 import { scaleLinear, type ScaleLinear } from "d3-scale";
 import { VIRIDIS, buildLut } from "./colormap";
-import { renderToImageData, subcarrierSourceRect, type Aggregation } from "./render";
+import { renderTileToImageData, subcarrierSourceRect, tileSourceRect } from "./render";
+import { fetchTile, type Tile } from "./api";
 import {
   advanceView,
   clampScWindow,
@@ -15,18 +16,23 @@ import {
 } from "./view";
 
 interface HeatmapProps {
-  /** Identifies which capture the data came from, so switching files resets
-   * the view. The component is never remounted on a path change. */
+  /** Path to the .dat file, used for /api/tile requests. */
+  path: string;
+  metric: "amplitude" | "phase";
+  /** Basename from /api/meta — drives capture identity (shouldResetView). */
   filename: string;
-  timeSeconds: number[];
-  matrix: number[][];
-  subcarrierCount: number;
-  minValue: number;
-  maxValue: number;
+  numSubcarriers: number;
+  captureTMin: number;
+  captureTMax: number;
+  /** Fixed color scale bounds, for a metric whose range is known a priori --
+   * phase is always [-π, π]. Omit for amplitude, whose range is a property of
+   * the capture: the scale then locks to the first tile (see ampScaleRef),
+   * falling back to the current tile's own range until it does. */
+  minValue?: number;
+  maxValue?: number;
   title: string;
   colorLabel: string;
   palette?: readonly string[];
-  aggregation?: Aggregation;
   height?: number;
 }
 
@@ -53,43 +59,47 @@ interface Geometry {
 /** Everything draw() needs from the latest render, mirrored into a ref so the
  * mount-once effect's draw/listeners never close over stale props. */
 interface PropsMirror {
+  path: string;
+  metric: "amplitude" | "phase";
   filename: string;
-  timeSeconds: number[];
-  matrix: number[][];
-  subcarrierCount: number;
+  numSubcarriers: number;
   halfN: number;
-  minValue: number;
-  maxValue: number;
+  captureTMin: number;
+  captureTMax: number;
+  minValue?: number;
+  maxValue?: number;
   title: string;
   colorLabel: string;
   palette: readonly string[];
-  aggregation: Aggregation;
   height: number;
 }
 
-function nearestFrameIndex(times: readonly number[], t: number): number {
-  let lo = 0,
-    hi = times.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (times[mid] < t) lo = mid + 1;
-    else hi = mid;
-  }
-  if (lo > 0 && Math.abs(times[lo - 1] - t) < Math.abs(times[lo] - t)) return lo - 1;
-  return lo;
+interface TileEntry {
+  tile: Tile;
+  seq: number;
+}
+
+/** Fetch key — if none of these changed, the current tile is still valid. */
+interface FetchKey {
+  path: string;
+  metric: string;
+  t0: number;
+  t1: number;
+  width: number;
 }
 
 export function Heatmap({
+  path,
+  metric,
   filename,
-  timeSeconds,
-  matrix,
-  subcarrierCount,
+  numSubcarriers,
+  captureTMin,
+  captureTMax,
   minValue,
   maxValue,
   title,
   colorLabel,
   palette = VIRIDIS,
-  aggregation = "max",
   height = 400,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -114,27 +124,41 @@ export function Heatmap({
   const zoomBehaviorRef = useRef<ZoomBehavior<HTMLCanvasElement, unknown> | null>(null);
   const programmaticRef = useRef(false);
 
-  const halfN = Math.floor(subcarrierCount / 2);
+  // --- Tile fetch state ---
+  const tileRef = useRef<TileEntry | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const seqRef = useRef(0);
+  const debounceTimerRef = useRef<number | null>(null);
+  const lastFetchKeyRef = useRef<FetchKey | null>(null);
+  const requestTileRef = useRef<(() => void) | null>(null);
+  // Amplitude color scale locked to the first tile's vmin/vmax for a given
+  // capture. A per-window scale makes identical data look different at
+  // different zoom levels — locking prevents that. Cleared on capture identity
+  // change (see Effect 1's reset path).
+  const ampScaleRef = useRef<{ vmin: number; vmax: number } | null>(null);
+
+  const halfN = Math.floor(numSubcarriers / 2);
 
   // Mirror latest props into a ref on every render so the stable draw/listen
   // path always sees fresh data without re-subscribing.
   propsRef.current = {
+    path,
+    metric,
     filename,
-    timeSeconds,
-    matrix,
-    subcarrierCount,
+    numSubcarriers,
     halfN,
+    captureTMin,
+    captureTMax,
     minValue,
     maxValue,
     title,
     colorLabel,
     palette,
-    aggregation,
     height,
   };
 
   // -------------------------------------------------------------------------
-  // Effect 1 (runs every render): view lifecycle + cheap redraw.
+  // Effect 1 (runs every render): view lifecycle + cheap redraw + tile request.
   // Decides whether to reset, slide (follow-live), or freeze the view, then
   // redraws and re-syncs the d3 transform. Does NOT register DOM listeners.
   // Declared before Effect 2 so on the first mount it runs first and the view
@@ -143,20 +167,17 @@ export function Heatmap({
   useEffect(() => {
     const props = propsRef.current;
     if (!props) return;
-    if (props.timeSeconds.length === 0) {
-      // No data this poll: show the empty state without touching the view, so
-      // a transient empty frame doesn't reset a frozen or live window.
+    if (props.numSubcarriers === 0 || !(props.captureTMax > props.captureTMin)) {
+      // Empty capture: show the empty state without touching the view.
       drawRef.current?.();
       return;
     }
 
-    const newTMin = props.timeSeconds[0];
-    const newTMax = props.timeSeconds[props.timeSeconds.length - 1];
     const newCapture: CaptureId = {
       filename: props.filename,
-      numSubcarriers: props.subcarrierCount,
-      tMin: newTMin,
-      tMax: newTMax,
+      numSubcarriers: props.numSubcarriers,
+      tMin: props.captureTMin,
+      tMax: props.captureTMax,
     };
 
     const prevCapture = captureRef.current;
@@ -169,13 +190,20 @@ export function Heatmap({
         scMax: props.halfN - 1,
       });
       followLiveRef.current = true;
+      // Stale tile and locked scale belong to the old capture — drop both so
+      // the new capture's first tile re-locks the scale and doesn't blit
+      // foreign data through tileSourceRect.
+      ampScaleRef.current = null;
+      tileRef.current = null;
+      imageDataRef.current = null;
+      lastFetchKeyRef.current = null;
     } else if (viewRef.current) {
       // Same capture: slide if live, freeze if not. advanceView returns the
       // same reference when frozen, so a frozen view is bit-identical across
       // any number of polls.
       viewRef.current = advanceView(
         viewRef.current,
-        { tMin: newTMin, tMax: newTMax },
+        { tMin: props.captureTMin, tMax: props.captureTMax },
         followLiveRef.current,
       );
     }
@@ -184,17 +212,19 @@ export function Heatmap({
     // The base time scale's domain must reflect the current data extent before
     // we resync the d3 transform, otherwise rescaleX would map to stale data.
     if (baseScaleRef.current) {
-      baseScaleRef.current.domain([newTMin, newTMax]);
+      baseScaleRef.current.domain([props.captureTMin, props.captureTMax]);
     }
 
     drawRef.current?.();
     syncZoomRef.current?.();
+    requestTileRef.current?.();
   });
 
   // -------------------------------------------------------------------------
-  // Effect 2 (mount once): register DOM listeners, ResizeObserver, and d3-zoom.
-  // Defines draw() and syncZoomToView(), storing them in refs. All handlers
-  // read from refs so they never close over a stale render's geometry or view.
+  // Effect 2 (mount once): register DOM listeners, ResizeObserver, d3-zoom,
+  // and the tile fetch loop. Defines draw(), syncZoomToView(), and
+  // requestTile(). All handlers read from refs so they never close over a
+  // stale render's geometry or view.
   // -------------------------------------------------------------------------
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -228,19 +258,9 @@ export function Heatmap({
       };
 
       const view = viewRef.current;
-      const {
-        timeSeconds: ts,
-        matrix: mx,
-        subcarrierCount: nSc,
-        minValue: mn,
-        maxValue: mxVal,
-        title: ttl,
-        colorLabel: clbl,
-        palette: pal,
-        aggregation: agg,
-      } = props;
+      const tileEntry = tileRef.current;
 
-      if (!view || ts.length === 0 || nSc === 0) {
+      if (!view || props.numSubcarriers === 0 || !(view.tMax > view.tMin)) {
         ctx.fillStyle = "#888";
         ctx.font = "14px sans-serif";
         ctx.textAlign = "center";
@@ -259,7 +279,12 @@ export function Heatmap({
       const yToSc = (y: number) =>
         view.scMax - ((y - plot.y) / plot.h) * scRange;
 
-      // Publish live geometry for the mouse handlers.
+      // Publish live geometry for the mouse handlers -- and for the tile fetch,
+      // which reads plot.w to size its request. Geometry is a function of the
+      // view and the canvas, NOT of the data, so it must be published before
+      // the no-tile bail below. Nulling it there instead deadlocks the whole
+      // component: no tile means no geometry, no geometry means the fetch
+      // returns early, and the tile that would break the cycle never arrives.
       geometryRef.current = { plot, tToX, xToT, scToY, yToSc };
 
       // Keep the base time scale in sync: domain from the data extent, range
@@ -267,40 +292,94 @@ export function Heatmap({
       // visible window.
       if (baseScaleRef.current) {
         baseScaleRef.current
-          .domain([ts[0], ts[ts.length - 1]])
+          .domain([props.captureTMin, props.captureTMax])
           .range([0, plot.w]);
       }
 
-      // --- Heatmap data via LUT + ImageData blit (phase 1) ---
-      const widthPx = Math.max(1, Math.round(plot.w));
+      if (!tileEntry) {
+        // Geometry is live, the first tile is still in flight. Frame the plot
+        // so the layout doesn't jump when it lands.
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+        ctx.fillStyle = "#888";
+        ctx.font = "13px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("Loading…", plot.x + plot.w / 2, plot.y + plot.h / 2);
+        ctx.fillStyle = "#000";
+        ctx.font = "bold 13px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(props.title, plot.x, 6);
+        return;
+      }
+
+      const tile = tileEntry.tile;
+
+      // --- Color scale ---
+      // A metric with an a-priori range (phase) uses it and never moves.
+      // Amplitude's range is a property of the capture, so it locks to the
+      // first tile that has one and stays there -- rescaling per window would
+      // make identical data look different at different zoom levels.
+      //
+      // The fallback is the current tile's own range, not a sentinel. A
+      // degenerate first tile (vmin === vmax, e.g. a uniform or empty window)
+      // leaves the lock unset, and NaN bounds would send lutIndex to NaN,
+      // index the LUT with it, and paint the entire plot transparent with
+      // "NaN" on the colorbar -- a blank screen with nothing to explain it.
+      const locked = props.metric === "amplitude" ? ampScaleRef.current : null;
+      const min = locked ? locked.vmin : props.minValue ?? tile.vmin;
+      const max = locked ? locked.vmax : props.maxValue ?? tile.vmax;
+
+      // --- Heatmap data via tile + LUT ---
+      const lut = buildLut(props.palette, 256);
+      const imageData = renderTileToImageData({
+        grid: tile.grid,
+        width: tile.width,
+        height: tile.height,
+        lut,
+        min,
+        max,
+        target: imageDataRef.current ?? undefined,
+      });
+      imageDataRef.current = imageData;
+
       if (!offscreenRef.current) {
         offscreenRef.current = document.createElement("canvas");
       }
       const offscreen = offscreenRef.current;
-      offscreen.width = widthPx;
-      offscreen.height = nSc;
+      if (offscreen.width !== tile.width || offscreen.height !== tile.height) {
+        offscreen.width = tile.width;
+        offscreen.height = tile.height;
+      }
       const offCtx = offscreen.getContext("2d");
       if (!offCtx) return;
-
-      const lut = buildLut(pal, 256);
-      const imageData = renderToImageData({
-        matrix: mx,
-        timeSeconds: ts,
-        subcarrierCount: nSc,
-        view: { tMin: view.tMin, tMax: view.tMax },
-        widthPx,
-        lut,
-        min: mn,
-        max: mxVal,
-        aggregation: agg,
-        target: imageDataRef.current ?? undefined,
-      });
-      imageDataRef.current = imageData;
       offCtx.putImageData(imageData, 0, 0);
 
-      const { srcY, srcH } = subcarrierSourceRect(nSc, view.scMin, view.scMax);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(offscreen, 0, srcY, widthPx, srcH, plot.x, plot.y, plot.w, plot.h);
+      // Blit the tile through tileSourceRect (x-axis) combined with
+      // subcarrierSourceRect (y-axis) in a single drawImage. tileSourceRect
+      // maps the tile's time range onto the view's, so a stale tile from the
+      // last fetch is stretched into place instantly and sharpens when the
+      // fresh one arrives.
+      const srcRect = tileSourceRect(
+        { t0: tile.t0, t1: tile.t1, width: tile.width },
+        { tMin: view.tMin, tMax: view.tMax },
+      );
+      if (srcRect) {
+        const { srcY, srcH } = subcarrierSourceRect(
+          props.numSubcarriers,
+          view.scMin,
+          view.scMax,
+        );
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(
+          offscreen,
+          srcRect.sx, srcY, srcRect.sw, srcH,
+          plot.x + srcRect.dx0 * plot.w, plot.y,
+          (srcRect.dx1 - srcRect.dx0) * plot.w, plot.h,
+        );
+      }
 
       // --- Frame ---
       ctx.strokeStyle = "#000";
@@ -355,8 +434,8 @@ export function Heatmap({
       const barW = 14;
       const barX = plot.x + plot.w + 16;
       const grad = ctx.createLinearGradient(0, plot.y + plot.h, 0, plot.y);
-      for (let i = 0; i < pal.length; i++) {
-        grad.addColorStop(i / (pal.length - 1), pal[i]);
+      for (let i = 0; i < props.palette.length; i++) {
+        grad.addColorStop(i / (props.palette.length - 1), props.palette[i]);
       }
       ctx.fillStyle = grad;
       ctx.fillRect(barX, plot.y, barW, plot.h);
@@ -366,13 +445,13 @@ export function Heatmap({
       ctx.font = "10px sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      ctx.fillText(mxVal.toFixed(1), barX + barW + 4, plot.y + 4);
-      ctx.fillText(mn.toFixed(1), barX + barW + 4, plot.y + plot.h - 4);
+      ctx.fillText(max.toFixed(1), barX + barW + 4, plot.y + 4);
+      ctx.fillText(min.toFixed(1), barX + barW + 4, plot.y + plot.h - 4);
       ctx.save();
       ctx.translate(barX + barW + 30, plot.y + plot.h / 2);
       ctx.rotate(-Math.PI / 2);
       ctx.textAlign = "center";
-      ctx.fillText(clbl, 0, 0);
+      ctx.fillText(props.colorLabel, 0, 0);
       ctx.restore();
 
       // --- Title ---
@@ -380,19 +459,23 @@ export function Heatmap({
       ctx.font = "bold 13px sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      ctx.fillText(ttl, plot.x, 6);
+      ctx.fillText(props.title, plot.x, 6);
 
-      // --- Follow-live / frozen indicator ---
+      // --- Follow-live / frozen + stride-sampled indicator ---
+      // exact === false means the tile was stride-sampled because the range
+      // exceeded the decode budget. A sampled max-hold can miss transients;
+      // silence would be a lie, so the indicator says so.
       const live = followLiveRef.current;
+      const sampled = tileEntry.tile.exact === false;
       ctx.font = "11px sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "top";
-      ctx.fillStyle = live ? "#2a7" : "#d33";
-      ctx.fillText(
-        live ? "● live" : "⏸ frozen — double-click to resume",
-        cssW - PADDING.right,
-        8,
-      );
+      let indicator = live ? "● live" : "⏸ frozen — double-click to resume";
+      if (sampled) {
+        indicator += "  ⚠ sampled — zoom in for exact";
+      }
+      ctx.fillStyle = sampled ? "#d80" : live ? "#2a7" : "#d33";
+      ctx.fillText(indicator, cssW - PADDING.right, 8);
 
       // --- Hover crosshair + tooltip ---
       const hover = hoverRef.current;
@@ -449,7 +532,7 @@ export function Heatmap({
         }
         const base = baseScaleRef.current;
         const props = propsRef.current;
-        if (!base || !props || props.timeSeconds.length === 0 || !viewRef.current) return;
+        if (!base || !props || props.numSubcarriers === 0 || !viewRef.current) return;
         const [d0, d1] = base.domain();
         if (!(d1 > d0)) return;
         const [visTMin, visTMax] = event.transform.rescaleX(base).domain();
@@ -462,6 +545,7 @@ export function Heatmap({
         followLiveRef.current = false;
         hoverRef.current = null;
         draw();
+        requestTileRef.current?.();
       });
     zoomBehaviorRef.current = zoomBehavior;
     sel.call(zoomBehavior);
@@ -477,7 +561,7 @@ export function Heatmap({
       const base = baseScaleRef.current;
       const props = propsRef.current;
       const v = viewRef.current;
-      if (!zb || !base || !props || !v || props.timeSeconds.length === 0) return;
+      if (!zb || !base || !props || !v || props.numSubcarriers === 0) return;
       const [d0, d1] = base.domain();
       const [r0, r1] = base.range();
       if (!(d1 > d0) || !(r1 > r0)) return;
@@ -506,15 +590,103 @@ export function Heatmap({
     };
     syncZoomRef.current = syncZoomToView;
 
+    // --- Tile fetch: trailing-debounced, one AbortController per request,
+    // monotonically sequenced so stale responses are dropped. ---
+    const doFetchTile = async () => {
+      const props = propsRef.current;
+      const view = viewRef.current;
+      const geo = geometryRef.current;
+      if (!props || !view || !geo) return;
+      if (props.numSubcarriers === 0 || !(view.tMax > view.tMin)) return;
+
+      const t0 = view.tMin;
+      const t1 = view.tMax;
+      // Requested width = the plot's pixel width, so the server never returns
+      // more columns than there are pixels to display them.
+      const width = Math.max(1, Math.round(geo.plot.w));
+
+      // Skip if nothing changed since the last fetch — a subcarrier-only
+      // change (shift+wheel, shift+drag) reaches here via Effect 1 but has
+      // the same time window, so it correctly does not refetch.
+      const lastKey = lastFetchKeyRef.current;
+      if (
+        lastKey &&
+        lastKey.path === props.path &&
+        lastKey.metric === props.metric &&
+        lastKey.t0 === t0 &&
+        lastKey.t1 === t1 &&
+        lastKey.width === width
+      ) {
+        return;
+      }
+      lastFetchKeyRef.current = {
+        path: props.path,
+        metric: props.metric,
+        t0,
+        t1,
+        width,
+      };
+
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const seq = ++seqRef.current;
+
+      try {
+        const tile = await fetchTile(
+          props.path,
+          t0,
+          t1,
+          width,
+          props.metric,
+          controller.signal,
+        );
+        // Drop stale responses — a newer request may have been issued while
+        // this one was in flight. Aborting alone is not sufficient: the fetch
+        // can still resolve between abort() and the abort taking effect.
+        if (seq < seqRef.current) return;
+        if (controller.signal.aborted) return;
+
+        // Lock amplitude scale to the first tile with a meaningful range.
+        // vmin === vmax (empty or uniform tile) is skipped so a degenerate
+        // first tile doesn't lock the scale to [0, 0].
+        if (
+          props.metric === "amplitude" &&
+          ampScaleRef.current === null &&
+          tile.vmax > tile.vmin
+        ) {
+          ampScaleRef.current = { vmin: tile.vmin, vmax: tile.vmax };
+        }
+
+        tileRef.current = { tile, seq };
+        draw();
+      } catch (e) {
+        // AbortError is normal control flow during zoom/pan — the user moved
+        // on before the previous request finished. Swallow it silently.
+        if (e instanceof Error && e.name === "AbortError") return;
+        console.error("tile fetch failed:", e);
+      }
+    };
+
+    const scheduleTileFetch = () => {
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = window.setTimeout(() => {
+        debounceTimerRef.current = null;
+        void doFetchTile();
+      }, 100);
+    };
+    requestTileRef.current = scheduleTileFetch;
+
     // --- Double-click: reset to full extent and re-enable follow-live. ---
     const onDoubleClick = () => {
       const props = propsRef.current;
-      if (!props || props.timeSeconds.length === 0) return;
-      const tMin = props.timeSeconds[0];
-      const tMax = props.timeSeconds[props.timeSeconds.length - 1];
+      if (!props || props.numSubcarriers === 0) return;
+      if (!(props.captureTMax > props.captureTMin)) return;
       viewRef.current = {
-        tMin,
-        tMax,
+        tMin: props.captureTMin,
+        tMax: props.captureTMax,
         scMin: -props.halfN,
         scMax: props.halfN - 1,
       };
@@ -522,6 +694,7 @@ export function Heatmap({
       hoverRef.current = null;
       syncZoomToView();
       draw();
+      scheduleTileFetch();
     };
     canvas.addEventListener("dblclick", onDoubleClick);
 
@@ -545,6 +718,7 @@ export function Heatmap({
       viewRef.current = { ...v, scMin: clamped.scMin, scMax: clamped.scMax };
       hoverRef.current = null;
       draw();
+      // Subcarrier-only change — no tile refetch.
     };
     canvas.addEventListener("wheel", onShiftWheel, { passive: false });
 
@@ -582,12 +756,15 @@ export function Heatmap({
     window.addEventListener("mouseup", onShiftUp);
 
     // --- Hover crosshair + tooltip (skipped while any button is held, i.e.
-    // during a d3 pan or a shift+drag pan). ---
+    // during a d3 pan or a shift+drag pan). Reads the value straight from the
+    // tile grid at the hovered pixel — no frame index search needed. ---
     const onMove = (e: MouseEvent) => {
       if (e.buttons !== 0) return;
       const props = propsRef.current;
       const geo = geometryRef.current;
-      if (!props || !geo || !viewRef.current) return;
+      const tileEntry = tileRef.current;
+      if (!props || !geo || !viewRef.current || !tileEntry) return;
+      const tile = tileEntry.tile;
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -605,12 +782,31 @@ export function Heatmap({
       }
       const t = geo.xToT(mx);
       const sc = Math.round(geo.yToSc(my));
-      const fi = nearestFrameIndex(props.timeSeconds, t);
-      const si = sc + props.halfN;
-      if (fi >= 0 && fi < props.matrix.length && si >= 0 && si < props.subcarrierCount) {
-        hoverRef.current = { t: props.timeSeconds[fi], sc, v: props.matrix[fi][si] };
+
+      // Map t to a tile column. If t is outside the tile's coverage (the view
+      // was panned beyond the last tile), there is no value to show.
+      const tileSpan = tile.t1 - tile.t0;
+      let col: number;
+      if (tileSpan > 0 && t >= tile.t0 && t <= tile.t1) {
+        col = Math.floor(((t - tile.t0) / tileSpan) * tile.width);
+        col = Math.max(0, Math.min(tile.width - 1, col));
       } else {
+        if (hoverRef.current) {
+          hoverRef.current = null;
+          draw();
+        }
+        return;
+      }
+
+      // Map signed bin sc to a tile row. Row 0 = highest subcarrier index;
+      // bin sc lives at row n - 1 - halfN - sc (mirrors subcarrierSourceRect).
+      const nSc = props.numSubcarriers;
+      const row = nSc - 1 - props.halfN - sc;
+      if (row < 0 || row >= nSc) {
         hoverRef.current = null;
+      } else {
+        const v = tile.grid[row * tile.width + col];
+        hoverRef.current = { t, sc, v };
       }
       draw();
     };
@@ -625,16 +821,18 @@ export function Heatmap({
 
     // --- ResizeObserver: redraw when the container's flex layout reflows
     // (sidebar toggle, scrollbar appearing, font load), not just on window
-    // resize. Also resync d3 since the plot width changed. ---
+    // resize. Also resync d3 and refetch since the plot width changed. ---
     const ro = new ResizeObserver(() => {
       draw();
       syncZoomToView();
+      scheduleTileFetch();
     });
     ro.observe(container);
 
     // Initial render.
     draw();
     syncZoomToView();
+    scheduleTileFetch();
 
     return () => {
       ro.disconnect();
@@ -646,6 +844,10 @@ export function Heatmap({
       window.removeEventListener("mouseup", onShiftUp);
       canvas.removeEventListener("mousemove", onMove);
       canvas.removeEventListener("mouseleave", onLeave);
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      abortRef.current?.abort();
     };
     // Mount once: listeners and d3-zoom are registered exactly once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps

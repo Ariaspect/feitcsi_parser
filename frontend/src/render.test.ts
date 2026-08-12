@@ -1,158 +1,216 @@
 import { describe, it, expect } from "vitest";
 import { buildLut, lutIndex, NO_DATA_COLOR, NON_FINITE_COLOR } from "./colormap";
-import { renderToImageData, subcarrierSourceRect } from "./render";
+import {
+  renderTileToImageData,
+  subcarrierSourceRect,
+  tileSourceRect,
+} from "./render";
 
-/** Minimal ImageData shim for the node test environment. */
-function makeImageData(width: number, height: number): ImageData {
-  const data = new Uint8ClampedArray(width * height * 4);
-  return { width, height, data } as unknown as ImageData;
-}
-
-function pixel(u32: Uint32Array, x: number, y: number, widthPx: number): number {
-  return u32[y * widthPx + x];
+// Shim ImageData for the node test environment. The browser has this as a
+// global; node does not unless jsdom is configured.
+if (typeof globalThis.ImageData === "undefined") {
+  globalThis.ImageData = class {
+    width: number;
+    height: number;
+    data: Uint8ClampedArray;
+    constructor(width: number, height: number) {
+      this.width = width;
+      this.height = height;
+      this.data = new Uint8ClampedArray(width * height * 4);
+    }
+  } as unknown as typeof ImageData;
 }
 
 const STOPS = ["#000000", "#ffffff"];
 
-describe("renderToImageData — row order", () => {
-  it("last source subcarrier lands in output row 0", () => {
-    const N = 4;
-    // subcarrier 0 = value 0 (low), subcarrier 3 = value 100 (high)
-    const matrix = [[0, 0, 0, 100]];
-    const timeSeconds = [0];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
-    const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "max", target,
-    });
-    const u32 = new Uint32Array(target.data.buffer);
-    // col 0 contains the frame (t=0 ∈ [0,1))
-    const topRow = pixel(u32, 0, 0, widthPx);        // si = N-1 = 3 → value 100
-    const bottomRow = pixel(u32, 0, N - 1, widthPx);  // si = 0 → value 0
-    expect(topRow).toBe(lut[lutIndex(100, 0, 100, 256)]);
-    expect(bottomRow).toBe(lut[lutIndex(0, 0, 100, 256)]);
+// ---------------------------------------------------------------------------
+// tileSourceRect
+// ---------------------------------------------------------------------------
+
+describe("tileSourceRect", () => {
+  it("exact match: tile spans the whole view", () => {
+    const r = tileSourceRect(
+      { t0: 0, t1: 10, width: 100 },
+      { tMin: 0, tMax: 10 },
+    );
+    expect(r).toEqual({ sx: 0, sw: 100, dx0: 0, dx1: 1 });
+  });
+
+  it("zoomed in: tile is wider than the view (source subset, full destination)", () => {
+    // Tile covers [0, 10] in 100 px; view is [2, 8].
+    // Overlap [2, 8] → source [20, 80], destination [0, 1].
+    const r = tileSourceRect(
+      { t0: 0, t1: 10, width: 100 },
+      { tMin: 2, tMax: 8 },
+    );
+    expect(r).toEqual({ sx: 20, sw: 60, dx0: 0, dx1: 1 });
+  });
+
+  it("zoomed out: tile is narrower than the view (full source, destination subset)", () => {
+    // Tile covers [2, 8] in 60 px; view is [0, 10].
+    // Overlap [2, 8] → source [0, 60], destination [0.2, 0.8].
+    const r = tileSourceRect(
+      { t0: 2, t1: 8, width: 60 },
+      { tMin: 0, tMax: 10 },
+    );
+    expect(r).toEqual({ sx: 0, sw: 60, dx0: 0.2, dx1: 0.8 });
+  });
+
+  it("panned: partial overlap on the left (tile covers left part of view)", () => {
+    // Tile covers [0, 5]; view is [0, 10]. Overlap [0, 5] → left half.
+    const r = tileSourceRect(
+      { t0: 0, t1: 5, width: 50 },
+      { tMin: 0, tMax: 10 },
+    );
+    expect(r).toEqual({ sx: 0, sw: 50, dx0: 0, dx1: 0.5 });
+  });
+
+  it("panned: partial overlap on the right (tile covers right part of view)", () => {
+    // Tile covers [5, 10]; view is [0, 10]. Overlap [5, 10] → right half.
+    const r = tileSourceRect(
+      { t0: 5, t1: 10, width: 50 },
+      { tMin: 0, tMax: 10 },
+    );
+    expect(r).toEqual({ sx: 0, sw: 50, dx0: 0.5, dx1: 1 });
+  });
+
+  it("no overlap: tile entirely before view → null", () => {
+    expect(
+      tileSourceRect({ t0: 0, t1: 5, width: 50 }, { tMin: 6, tMax: 10 }),
+    ).toBeNull();
+  });
+
+  it("no overlap: tile entirely after view → null", () => {
+    expect(
+      tileSourceRect({ t0: 6, t1: 10, width: 50 }, { tMin: 0, tMax: 5 }),
+    ).toBeNull();
+  });
+
+  it("degenerate tile span (t0 === t1) → null", () => {
+    expect(
+      tileSourceRect({ t0: 5, t1: 5, width: 10 }, { tMin: 0, tMax: 10 }),
+    ).toBeNull();
+  });
+
+  it("degenerate view span (tMin === tMax) → null", () => {
+    expect(
+      tileSourceRect({ t0: 0, t1: 10, width: 100 }, { tMin: 5, tMax: 5 }),
+    ).toBeNull();
+  });
+
+  it("edge touch (overlapT0 === overlapT1) → null", () => {
+    // Tile ends exactly where the view starts — zero-width overlap.
+    expect(
+      tileSourceRect({ t0: 0, t1: 5, width: 50 }, { tMin: 5, tMax: 10 }),
+    ).toBeNull();
   });
 });
 
-describe("renderToImageData — column time mapping", () => {
-  it("frames at t=0,5,10 land in expected columns", () => {
-    const N = 1;
-    const matrix = [[100], [50], [0]];
-    const timeSeconds = [0, 5, 10];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
+// ---------------------------------------------------------------------------
+// renderTileToImageData
+// ---------------------------------------------------------------------------
+
+describe("renderTileToImageData — LUT mapping", () => {
+  it("finite values map to the correct LUT entries", () => {
+    const W = 2;
+    const H = 1;
+    const grid = new Float32Array([0, 100]);
     const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "nearest", target,
-    });
+    const target = new ImageData(W, H);
+    renderTileToImageData({ grid, width: W, height: H, lut, min: 0, max: 100, target });
     const u32 = new Uint32Array(target.data.buffer);
-    // col 0 = [0,1) → t=0 → value 100
-    // col 5 = [5,6) → t=5 → value 50
-    // col 9 (last, inclusive of colEnd) → t=10 → value 0
-    expect(pixel(u32, 0, 0, widthPx)).toBe(lut[lutIndex(100, 0, 100, 256)]);
-    expect(pixel(u32, 5, 0, widthPx)).toBe(lut[lutIndex(50, 0, 100, 256)]);
-    expect(pixel(u32, 9, 0, widthPx)).toBe(lut[lutIndex(0, 0, 100, 256)]);
+    expect(u32[0]).toBe(lut[lutIndex(0, 0, 100, 256)]);
+    expect(u32[1]).toBe(lut[lutIndex(100, 0, 100, 256)]);
+  });
+
+  it("row 0 of the grid lands in row 0 of the image (no flip)", () => {
+    // The backend already emits row 0 = highest subcarrier. renderTileToImageData
+    // must NOT flip — a flip here would invert the subcarrier axis relative to
+    // subcarrierSourceRect, which expects row 0 = top.
+    const W = 1;
+    const H = 2;
+    const grid = new Float32Array([10, 90]);
+    const lut = buildLut(STOPS, 256);
+    const target = new ImageData(W, H);
+    renderTileToImageData({ grid, width: W, height: H, lut, min: 0, max: 100, target });
+    const u32 = new Uint32Array(target.data.buffer);
+    expect(u32[0]).toBe(lut[lutIndex(10, 0, 100, 256)]); // grid[0] → row 0
+    expect(u32[1]).toBe(lut[lutIndex(90, 0, 100, 256)]); // grid[1] → row 1
   });
 });
 
-describe("renderToImageData — gap handling", () => {
-  it("columns with no frames get NO_DATA_COLOR", () => {
-    const N = 1;
-    const matrix = [[50]];
-    const timeSeconds = [0];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
+describe("renderTileToImageData — non-finite values", () => {
+  it("NaN maps to NO_DATA_COLOR (transparent)", () => {
+    const grid = new Float32Array([NaN]);
     const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "max", target,
-    });
+    const target = new ImageData(1, 1);
+    renderTileToImageData({ grid, width: 1, height: 1, lut, min: 0, max: 100, target });
     const u32 = new Uint32Array(target.data.buffer);
-    expect(pixel(u32, 0, 0, widthPx)).not.toBe(NO_DATA_COLOR);
-    for (let x = 1; x < widthPx; x++) {
-      expect(pixel(u32, x, 0, widthPx)).toBe(NO_DATA_COLOR);
-    }
+    expect(u32[0]).toBe(NO_DATA_COLOR);
+  });
+
+  it("-Infinity maps to NON_FINITE_COLOR, NOT NO_DATA_COLOR", () => {
+    // -Infinity comes from db(0) — a real measurement, not a gap. It must
+    // render as opaque black, not transparent.
+    const grid = new Float32Array([-Infinity]);
+    const lut = buildLut(STOPS, 256);
+    const target = new ImageData(1, 1);
+    renderTileToImageData({ grid, width: 1, height: 1, lut, min: 0, max: 100, target });
+    const u32 = new Uint32Array(target.data.buffer);
+    expect(u32[0]).toBe(NON_FINITE_COLOR);
+    expect(u32[0]).not.toBe(NO_DATA_COLOR);
+  });
+
+  it("a mix of NaN, -Infinity, and finite in one grid", () => {
+    const grid = new Float32Array([42, NaN, -Infinity, 0]);
+    const lut = buildLut(STOPS, 256);
+    const target = new ImageData(2, 2);
+    renderTileToImageData({ grid, width: 2, height: 2, lut, min: 0, max: 100, target });
+    const u32 = new Uint32Array(target.data.buffer);
+    expect(u32[0]).toBe(lut[lutIndex(42, 0, 100, 256)]);
+    expect(u32[1]).toBe(NO_DATA_COLOR);
+    expect(u32[2]).toBe(NON_FINITE_COLOR);
+    expect(u32[3]).toBe(lut[lutIndex(0, 0, 100, 256)]);
   });
 });
 
-describe("renderToImageData — max aggregation", () => {
-  it("uses the per-subcarrier maximum across frames in a column", () => {
-    const N = 1;
-    // both frames in col 0 = [0, 1)
-    const matrix = [[30], [70]];
-    const timeSeconds = [0.4, 0.6];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
+describe("renderTileToImageData — target reuse", () => {
+  it("same dimensions reuses the target ImageData reference", () => {
+    const grid = new Float32Array([50]);
     const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "max", target,
+    const target = new ImageData(1, 1);
+    const result = renderTileToImageData({
+      grid, width: 1, height: 1, lut, min: 0, max: 100, target,
     });
-    const u32 = new Uint32Array(target.data.buffer);
-    expect(pixel(u32, 0, 0, widthPx)).toBe(lut[lutIndex(70, 0, 100, 256)]);
+    expect(result).toBe(target);
+  });
+
+  it("different dimensions returns a new ImageData (not the target)", () => {
+    const grid = new Float32Array([50]);
+    const lut = buildLut(STOPS, 256);
+    const target = new ImageData(2, 2);
+    const result = renderTileToImageData({
+      grid, width: 1, height: 1, lut, min: 0, max: 100, target,
+    });
+    expect(result).not.toBe(target);
+    expect(result.width).toBe(1);
+    expect(result.height).toBe(1);
+  });
+
+  it("no target creates a new ImageData with the right dimensions", () => {
+    const grid = new Float32Array([50, 60, 70, 80]);
+    const lut = buildLut(STOPS, 256);
+    const result = renderTileToImageData({
+      grid, width: 2, height: 2, lut, min: 0, max: 100,
+    });
+    expect(result.width).toBe(2);
+    expect(result.height).toBe(2);
   });
 });
 
-describe("renderToImageData — nearest aggregation", () => {
-  it("the frame closest to column center wins", () => {
-    const N = 1;
-    // col 0 = [0, 1), center = 0.5
-    // t=0.3 (dist 0.2, value 30) vs t=0.6 (dist 0.1, value 70) → 70 wins
-    const matrix = [[30], [70]];
-    const timeSeconds = [0.3, 0.6];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
-    const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "nearest", target,
-    });
-    const u32 = new Uint32Array(target.data.buffer);
-    expect(pixel(u32, 0, 0, widthPx)).toBe(lut[lutIndex(70, 0, 100, 256)]);
-  });
-});
-
-describe("renderToImageData — non-finite input", () => {
-  it("NaN maps to NON_FINITE_COLOR", () => {
-    const N = 1;
-    const matrix = [[NaN]];
-    const timeSeconds = [0];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
-    const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "max", target,
-    });
-    const u32 = new Uint32Array(target.data.buffer);
-    expect(pixel(u32, 0, 0, widthPx)).toBe(NON_FINITE_COLOR);
-  });
-
-  it("all-non-finite column in max aggregation maps to NON_FINITE_COLOR", () => {
-    const N = 1;
-    const matrix = [[Infinity], [NaN]];
-    const timeSeconds = [0.4, 0.6];
-    const view = { tMin: 0, tMax: 10 };
-    const widthPx = 10;
-    const lut = buildLut(STOPS, 256);
-    const target = makeImageData(widthPx, N);
-    renderToImageData({
-      matrix, timeSeconds, subcarrierCount: N, view, widthPx,
-      lut, min: 0, max: 100, aggregation: "max", target,
-    });
-    const u32 = new Uint32Array(target.data.buffer);
-    expect(pixel(u32, 0, 0, widthPx)).toBe(NON_FINITE_COLOR);
-  });
-});
+// ---------------------------------------------------------------------------
+// subcarrierSourceRect (unchanged — still governs the subcarrier blit)
+// ---------------------------------------------------------------------------
 
 describe("subcarrierSourceRect", () => {
   it("covers every row at the default view of an even-width capture", () => {

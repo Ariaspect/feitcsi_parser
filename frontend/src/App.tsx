@@ -1,22 +1,19 @@
 import { useEffect, useState } from "react";
-import { fetchSnapshot, type Snapshot } from "./api";
+import { fetchMeta, type Meta } from "./api";
 import { Heatmap } from "./Heatmap";
 
 const DEFAULT_PATH = "captures/capture.dat";
-const DEFAULT_WINDOW = 200;
 const DEFAULT_REFRESH_MS = 300;
 
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
-  const [maxPackets, setMaxPackets] = useState(DEFAULT_WINDOW);
   const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS);
   const [running, setRunning] = useState(false);
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!running) return;
     let cancelled = false;
     let inFlight = false;
 
@@ -24,9 +21,9 @@ export function App() {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        const snap = await fetchSnapshot(path, maxPackets);
+        const m = await fetchMeta(path);
         if (!cancelled) {
-          setSnapshot(snap);
+          setMeta(m);
           setError(null);
           setLastUpdate(Date.now());
         }
@@ -39,17 +36,24 @@ export function App() {
       }
     };
 
+    // Always fetch once on path/refresh change so explore mode (paused) has
+    // geometry. In live mode, the interval drives subsequent polls.
     poll();
-    const id = setInterval(poll, refreshMs);
+    if (running) {
+      const id = setInterval(poll, refreshMs);
+      return () => {
+        cancelled = true;
+        clearInterval(id);
+      };
+    }
     return () => {
       cancelled = true;
-      clearInterval(id);
     };
-  }, [running, path, maxPackets, refreshMs]);
+  }, [running, path, refreshMs]);
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: "1rem", maxWidth: 1400, margin: "0 auto" }}>
-      <h1>FeitCSI Realtime Heatmap</h1>
+      <h1>FeitCSI Heatmap</h1>
 
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginBottom: "1rem", alignItems: "flex-end" }}>
         <label>
@@ -60,18 +64,6 @@ export function App() {
             value={path}
             onChange={(e) => setPath(e.target.value)}
             style={{ width: 360, padding: "0.3rem" }}
-          />
-        </label>
-        <label>
-          Window (packets)
-          <br />
-          <input
-            type="number"
-            min={1}
-            max={10000}
-            value={maxPackets}
-            onChange={(e) => setMaxPackets(Number(e.target.value))}
-            style={{ width: 100, padding: "0.3rem" }}
           />
         </label>
         <label>
@@ -108,46 +100,48 @@ export function App() {
         </div>
       )}
 
-      {snapshot && (
+      {meta && (
         <div style={{ marginBottom: "1rem", color: "#444" }}>
-          <b>{snapshot.filename}</b> — {snapshot.chipset} / {snapshot.bandwidth} MHz —
-          total: {snapshot.total_packets} packets, window: {snapshot.window_packets},
-          subcarriers: {snapshot.num_subcarriers}, amp range: [{snapshot.amp_min.toFixed(1)}, {snapshot.amp_max.toFixed(1)}] dBm
+          <b>{meta.filename}</b> — {meta.chipset} / {meta.bandwidth} MHz —
+          frames: {meta.total_frames}, subcarriers: {meta.num_subcarriers},
+          time: [{meta.t_min.toFixed(3)}, {meta.t_max.toFixed(3)}] s
           {lastUpdate && <span>, last update: {new Date(lastUpdate).toLocaleTimeString()}</span>}
         </div>
       )}
 
-      {snapshot && snapshot.window_packets > 0 ? (
+      {meta && meta.total_frames > 0 ? (
         <>
           <Heatmap
-            filename={snapshot.filename}
-            timeSeconds={snapshot.time_seconds}
-            matrix={snapshot.amplitude}
-            subcarrierCount={snapshot.num_subcarriers}
-            minValue={snapshot.amp_min}
-            maxValue={snapshot.amp_max}
+            path={path}
+            metric="amplitude"
+            filename={meta.filename}
+            numSubcarriers={meta.num_subcarriers}
+            captureTMin={meta.t_min}
+            captureTMax={meta.t_max}
             title="FeitCSI — amplitude"
             colorLabel="Amplitude (dBm)"
             height={400}
           />
           <div style={{ height: "1.5rem" }} />
           <Heatmap
-            filename={snapshot.filename}
-            timeSeconds={snapshot.time_seconds}
-            matrix={snapshot.phase}
-            subcarrierCount={snapshot.num_subcarriers}
-            minValue={snapshot.phase_min}
-            maxValue={snapshot.phase_max}
+            path={path}
+            metric="phase"
+            filename={meta.filename}
+            numSubcarriers={meta.num_subcarriers}
+            captureTMin={meta.t_min}
+            captureTMax={meta.t_max}
+            minValue={-Math.PI}
+            maxValue={Math.PI}
             title="FeitCSI — phase"
             colorLabel="Phase (rad)"
-            aggregation="nearest"
             height={400}
           />
         </>
       ) : (
         !error && (
           <div style={{ color: "#888", padding: "2rem" }}>
-            Toggle <b>Run realtime</b> to begin. Default file: <code>{DEFAULT_PATH}</code>.
+            Enter a .dat path to explore, or toggle <b>Run realtime</b> for live capture. Default file:{" "}
+            <code>{DEFAULT_PATH}</code>.
           </div>
         )
       )}
