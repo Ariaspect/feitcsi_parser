@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { VIRIDIS, buildLut } from "./colormap";
+import { renderToImageData, subcarrierSourceRect, type Aggregation } from "./render";
 
 interface HeatmapProps {
   timeSeconds: number[];
@@ -8,44 +10,12 @@ interface HeatmapProps {
   maxValue: number;
   title: string;
   colorLabel: string;
-  palette?: string[];
+  palette?: readonly string[];
+  aggregation?: Aggregation;
   height?: number;
 }
 
-const DEFAULT_PALETTE = [
-  "#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89",
-  "#35b779", "#6ece58", "#b5de2b", "#fde725",
-];
-
 const PADDING = { top: 30, right: 70, bottom: 40, left: 60 };
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const h = hex.replace("#", "");
-  return [
-    parseInt(h.substring(0, 2), 16),
-    parseInt(h.substring(2, 4), 16),
-    parseInt(h.substring(4, 6), 16),
-  ];
-}
-
-function colorFor(value: number, min: number, max: number, palette: string[]): string {
-  if (!Number.isFinite(value)) return "#000000";
-  const t = Math.max(0, Math.min(1, (value - min) / (max - min || 1)));
-  const scaled = t * (palette.length - 1);
-  const i = Math.floor(scaled);
-  const f = scaled - i;
-  if (i >= palette.length - 1) return palette[palette.length - 1];
-  const c1 = hexToRgb(palette[i]);
-  const c2 = hexToRgb(palette[i + 1]);
-  const r = Math.round(lerp(c1[0], c2[0], f));
-  const g = Math.round(lerp(c1[1], c2[1], f));
-  const b = Math.round(lerp(c1[2], c2[2], f));
-  return `rgb(${r},${g},${b})`;
-}
 
 interface View {
   tMin: number;
@@ -73,13 +43,16 @@ export function Heatmap({
   maxValue,
   title,
   colorLabel,
-  palette = DEFAULT_PALETTE,
+  palette = VIRIDIS,
+  aggregation = "max",
   height = 400,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<View | null>(null);
   const hoverRef = useRef<{ t: number; sc: number; v: number } | null>(null);
+  const offscreenRef = useRef<HTMLCanvasElement | null>(null);
+  const imageDataRef = useRef<ImageData | null>(null);
 
   const halfN = Math.floor(subcarrierCount / 2);
 
@@ -134,23 +107,41 @@ export function Heatmap({
 
       const tRange = view.tMax - view.tMin || 1e-9;
       const scRange = view.scMax - view.scMin || 1;
-      const frameSpacing = timeSeconds.length > 1 ? (timeSeconds[1] - timeSeconds[0]) : 1;
-      const cellW = (plot.w / tRange) * frameSpacing;
-      const cellH = plot.h / scRange;
 
-      for (let fi = 0; fi < timeSeconds.length; fi++) {
-        const t = timeSeconds[fi];
-        if (t < view.tMin - frameSpacing || t > view.tMax + frameSpacing) continue;
-        const x = tToX(t);
-        const row = matrix[fi];
-        for (let si = 0; si < subcarrierCount; si++) {
-          const sc = si - halfN;
-          if (sc < view.scMin - 1 || sc > view.scMax + 1) continue;
-          const y = scToY(sc);
-          ctx.fillStyle = colorFor(row[si], minValue, maxValue, palette);
-          ctx.fillRect(x, y, cellW + 1, cellH + 1);
-        }
+      // --- Render heatmap data via LUT + ImageData blit ---
+      const widthPx = Math.max(1, Math.round(plot.w));
+
+      if (!offscreenRef.current) {
+        offscreenRef.current = document.createElement("canvas");
       }
+      const offscreen = offscreenRef.current;
+      offscreen.width = widthPx;
+      offscreen.height = subcarrierCount;
+      const offCtx = offscreen.getContext("2d");
+      if (!offCtx) return;
+
+      const lut = buildLut(palette, 256);
+      const imageData = renderToImageData({
+        matrix,
+        timeSeconds,
+        subcarrierCount,
+        view: { tMin: view.tMin, tMax: view.tMax },
+        widthPx,
+        lut,
+        min: minValue,
+        max: maxValue,
+        aggregation,
+        target: imageDataRef.current ?? undefined,
+      });
+      imageDataRef.current = imageData;
+      offCtx.putImageData(imageData, 0, 0);
+
+      // Crop to the visible subcarrier band and stretch it into the plot area.
+      const { srcY, srcH } = subcarrierSourceRect(subcarrierCount, view.scMin, view.scMax);
+
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(offscreen, 0, srcY, widthPx, srcH, plot.x, plot.y, plot.w, plot.h);
+      // --- End heatmap data render ---
 
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 1;
@@ -345,7 +336,7 @@ export function Heatmap({
       canvas.removeEventListener("mouseleave", onLeave);
       window.removeEventListener("resize", onResize);
     };
-  }, [timeSeconds, matrix, subcarrierCount, minValue, maxValue, title, colorLabel, palette, height, halfN]);
+  }, [timeSeconds, matrix, subcarrierCount, minValue, maxValue, title, colorLabel, palette, aggregation, height, halfN]);
 
   return <div ref={containerRef} style={{ width: "100%" }}><canvas ref={canvasRef} /></div>;
 }
