@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,30 @@ import numpy as np
 
 from CSIKit.reader import FeitCSIBeamformReader
 from CSIKit.util import csitools
+
+
+def _mimo_safe_interpolate(upstream: Callable[[dict], dict], csi: dict) -> dict:
+    """Pilot interpolation that survives multi-stream frames.
+
+    CSIKit's interpolate() loops over the rx axis of a (subcarrier, rx, tx)
+    matrix, so its wrap-correction test `phase[i-1, j] > 2` is a bare `if` on
+    an array of length num_tx. That is only unambiguous while num_tx == 1;
+    a 2x2 frame raises ValueError and kills the whole read.
+
+    Interpolation is independent per stream, so folding tx into the rx axis
+    gives each (rx, tx) pair its own j and restores the scalar comparison
+    upstream assumes. Same arithmetic, same results, no forked index table.
+    """
+    matrix = csi["csi_matrix"]
+    shape = matrix.shape
+
+    if matrix.ndim != 3 or shape[2] <= 1:
+        return upstream(csi)
+
+    csi["csi_matrix"] = matrix.reshape(shape[0], shape[1] * shape[2], 1)
+    csi = upstream(csi)
+    csi["csi_matrix"] = csi["csi_matrix"].reshape(shape)
+    return csi
 
 
 @dataclass(frozen=True)
@@ -35,6 +60,11 @@ def load_capture(
 ) -> FeitCSICapture:
     path = Path(path)
     reader = FeitCSIBeamformReader()
+
+    if interpolate:
+        _upstream = reader.interpolate
+        reader.interpolate = lambda csi: _mimo_safe_interpolate(_upstream, csi)
+
     csi_data = reader.read_file(
         str(path),
         scaled=scaled,
