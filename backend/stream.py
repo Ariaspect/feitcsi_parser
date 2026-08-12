@@ -4,22 +4,21 @@ CSIKit's ``read_file`` re-reads and re-decodes the entire capture on every call,
 so a polling UI pays O(file) per refresh and falls behind as the capture grows.
 FeitCSI frames are self-delimiting -- a 272-byte header whose first word is the
 payload length -- so bytes appended since the last poll can be decoded on their
-own. ``CaptureStream`` keeps a byte offset plus a rolling window of decoded
-frames and touches only what is new.
+own. ``CaptureStream`` keeps a ``FrameIndex`` for the structural scan and a
+rolling window of decoded frames, touching only what is new.
 
-Decoding is kept bit-for-bit compatible with CSIKit:
+Decoding is kept compatible with CSIKit:
 
-* header fields come from ``FeitCSIBeamformReader.parseHeader``
-* pilot interpolation and RSSI scaling call the same upstream functions
-* the timestamp chain reproduces ``read_file``'s ftm_clock/mu_clock arithmetic
+* header fields come from ``FeitCSIBeamformReader.parseHeader`` (via FrameIndex)
+* pilot interpolation and RSSI scaling are vectorised across frames in
+  ``backend.batch.decode_frames``, reproducing the same upstream functions
+* the timestamp chain reproduces ``read_file``'s ftm_clock/mu_clock arithmetic,
+  vectorised via ``FrameIndex._compute_timestamps``
 * amplitude is ``db(abs(csi))`` and phase ``angle(csi)``, matching
   ``csitools.get_CSI`` with ``extract_as_dBm=True``
 
-The one intentional divergence is payload decoding: ``parseCsiData`` unpacks
-each complex value in a Python triple loop, which dominates parse time. The
-buffer is a flat array of little-endian int16 (real, imag) pairs ordered
-rx-major, then tx, then subcarrier, so ``np.frombuffer`` reproduces it exactly
-and vectorises the hot path.
+The output dtype is float32 (halving memory versus float64) because the batch
+decode casts to float32 before returning.
 
 ``filter_mac`` is not supported here. Upstream compares ``filter_mac.casefold()``
 against ``FeitCSIFrame.source_mac``, which is a tuple of six ints rather than a
@@ -34,11 +33,9 @@ from pathlib import Path
 
 import numpy as np
 
-from CSIKit.reader import FeitCSIBeamformReader
-from CSIKit.util.csitools import scale_csi_frame
-from CSIKit.util.matlab import db
-
-from .parser import FeitCSICapture, mimo_safe_interpolate
+from .batch import decode_frames
+from .index import FrameIndex
+from .parser import FeitCSICapture
 
 HEADER_BYTES = 272
 
@@ -92,62 +89,16 @@ class CaptureStream:
         self.interpolate = interpolate
         self.max_frames = max_frames
 
-        self._reader = FeitCSIBeamformReader()
         self._lock = threading.Lock()
-        self._reset()
-
-    def _reset(self) -> None:
-        self._offset = 0
-        self._amplitude: deque[np.ndarray] = deque(maxlen=self.max_frames)
-        self._phase: deque[np.ndarray] = deque(maxlen=self.max_frames)
-        self._times: deque[float] = deque(maxlen=self.max_frames)
-        self._total_frames = 0
-        self._num_subcarriers = 0
-        self._bandwidth: str | None = None
-        # Tail of the timestamp chain, carried across polls.
-        self._prev_ftm: int | None = None
-        self._prev_mu: int | None = None
-        self._prev_time = 0.0
-
-    def _next_timestamp(self, header: dict) -> float:
-        """Reproduce read_file's cumulative timestamp arithmetic."""
-        if self._prev_ftm is None or self._prev_mu is None:
-            return 0.0
-
-        ftm = header["ftm_clock"]
-        mu = header["mu_clock"]
-
-        if (mu - self._prev_mu) / 1e6 < FTM_WRAP_SECONDS:
-            if ftm > self._prev_ftm:
-                diff = ftm - self._prev_ftm
-            else:  # ftm_clock overflow
-                diff = ftm + (MAX_TICK - self._prev_ftm)
-            return self._prev_time + (diff * TICK_RESOLUTION) / 1e9
-
-        if mu > self._prev_mu:
-            diff = mu - self._prev_mu
-        else:  # mu_clock overflow
-            diff = mu + (MAX_TICK - self._prev_mu)
-        return self._prev_time + diff / 1e6
-
-    def _decode_frame(self, header: dict, payload: bytes) -> tuple[np.ndarray, np.ndarray]:
-        matrix = decode_payload(payload, header)
-
-        if self.interpolate:
-            data = mimo_safe_interpolate(
-                self._reader.interpolate, {"header": header, "csi_matrix": matrix}
-            )
-            matrix = data["csi_matrix"]
-
-        if self.scaled:
-            for j in range(header["num_rx"]):
-                matrix[:, j, :] = scale_csi_frame(matrix[:, j, :], header["rssi_1"])
-
-        # csitools.get_CSI keeps a (frames, subcarriers, rx, tx) array; the
-        # display path then collapses to the first stream. Do it here so the
-        # buffer stores one row per frame.
-        stream = matrix[:, 0, 0]
-        return db(np.abs(stream)), np.angle(stream)
+        self._index = FrameIndex(self.path)
+        self._amplitude: deque[np.ndarray] = deque(maxlen=max_frames)
+        self._phase: deque[np.ndarray] = deque(maxlen=max_frames)
+        self._times: deque[float] = deque(maxlen=max_frames)
+        self._decoded_count = 0
+        self._num_subcarriers = self._index.num_subcarriers
+        self._bandwidth: str | None = (
+            self._index.bandwidth if self._index.count > 0 else None
+        )
 
     def update(self) -> None:
         """Decode any frames appended since the last call."""
@@ -155,60 +106,66 @@ class CaptureStream:
             self._update_locked()
 
     def _update_locked(self) -> None:
-        size = self.path.stat().st_size
+        old_decoded = self._decoded_count
 
-        # Shrinking means the capture was truncated or rotated; the retained
-        # offset and timestamp chain no longer describe this file.
-        if size < self._offset:
-            self._reset()
+        # Extend the index (handles truncation via rebuild and new frames).
+        self._index.extend()
 
-        if size == self._offset:
-            return
+        # Truncation: index was rebuilt and may now have fewer frames.
+        if self._index.count < old_decoded:
+            self._amplitude.clear()
+            self._phase.clear()
+            self._times.clear()
+            self._bandwidth = None
+            self._decoded_count = 0
 
-        with self.path.open("rb") as handle:
-            handle.seek(self._offset)
-            buffer = handle.read()
+        start = self._decoded_count
+        end = self._index.count
 
-        pos = 0
-        consumed = 0
-        limit = len(buffer)
-
-        while pos + HEADER_BYTES <= limit:
-            header = self._reader.parseHeader(buffer[pos : pos + HEADER_BYTES])
-            end = pos + HEADER_BYTES + header["csi_length"]
-            if end > limit:
-                break  # frame still being written; retry next poll
-
-            payload = buffer[pos + HEADER_BYTES : end]
-            num_sc = header["num_subcarriers"]
-
-            # A subcarrier-count change (bandwidth switch mid-capture) makes
-            # earlier rows unstackable. Upstream drops the odd frames; here the
-            # newer geometry wins and the buffer restarts.
-            if self._num_subcarriers and num_sc != self._num_subcarriers:
+        # Geometry change: new frames have a different csi_length. Clear the
+        # buffer so the newer geometry wins, matching the old per-frame behavior.
+        if end > start and start > 0:
+            old_cl = int(self._index.csi_lengths[start - 1])
+            new_cl = int(self._index.csi_lengths[start])
+            if old_cl != new_cl:
                 self._amplitude.clear()
                 self._phase.clear()
                 self._times.clear()
                 self._bandwidth = None
+                self._decoded_count = 0
+                start = 0
+                end = self._index.count
 
-            amplitude, phase = self._decode_frame(header, payload)
-            timestamp = self._next_timestamp(header)
+        if end <= start:
+            return
 
-            self._amplitude.append(amplitude)
-            self._phase.append(phase)
-            self._times.append(timestamp)
-            self._num_subcarriers = num_sc
-            if self._bandwidth is None:
-                self._bandwidth = header["channel_width"]
-            self._prev_ftm = header["ftm_clock"]
-            self._prev_mu = header["mu_clock"]
-            self._prev_time = timestamp
-            self._total_frames += 1
+        # Only the trailing max_frames survive the ring buffer, so decoding
+        # anything older is work whose result is discarded on arrival. Opening a
+        # 211 MB capture would otherwise decode all 95,787 frames -- 3.2 s and
+        # 540 MB peak -- to keep the last 10,000. Timestamps are unaffected:
+        # FrameIndex derives the whole chain from headers alone, so skipping
+        # decode does not break the cumulative arithmetic.
+        if end - start > self.max_frames:
+            start = end - self.max_frames
 
-            pos = end
-            consumed = end
+        frame_ids = np.arange(start, end)
+        amp, phase = decode_frames(
+            self.path,
+            self._index,
+            frame_ids,
+            scaled=self.scaled,
+            interpolate=self.interpolate,
+        )
+        times = self._index.times[start:end]
+        for i in range(len(frame_ids)):
+            self._amplitude.append(amp[i])
+            self._phase.append(phase[i])
+            self._times.append(float(times[i]))
 
-        self._offset += consumed
+        self._decoded_count = end
+        self._num_subcarriers = self._index.num_subcarriers
+        if self._bandwidth is None:
+            self._bandwidth = self._index.bandwidth
 
     def snapshot(self, *, max_packets: int = 200) -> FeitCSICapture:
         """Trailing window of decoded frames, newest last."""
@@ -246,8 +203,14 @@ class CaptureStream:
 
     @property
     def total_frames(self) -> int:
-        """Frames decoded since the stream was opened or last reset."""
-        return self._total_frames
+        """Frames present in the capture, whether or not they were decoded.
+
+        Read from the index rather than counted while decoding, because the
+        decoder now skips frames that fall outside the retained window. The UI
+        reports this as the capture's packet total, which is a property of the
+        file and not of how much of it was worth decoding.
+        """
+        return self._index.count
 
 
 _streams: dict[Path, CaptureStream] = {}

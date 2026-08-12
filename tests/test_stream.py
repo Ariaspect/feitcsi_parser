@@ -34,11 +34,20 @@ def frame_offsets(raw: bytes) -> list[int]:
 
 
 def assert_matrices_equal(actual: np.ndarray, expected: np.ndarray) -> None:
-    """allclose that tolerates the -inf db() produces for zero-magnitude bins."""
+    """allclose that tolerates the -inf db() produces for zero-magnitude bins.
+
+    CaptureStream stores float32 while load_capture returns float64, so the two
+    cannot agree to float64 precision. The claim worth testing is narrower than
+    "close": the arithmetic is identical and only the storage is narrower. So
+    round the reference to the actual dtype first and demand agreement to a
+    couple of ULP of that type. A blanket rtol=1e-5 would pass just as happily
+    if the batched decoder started diverging for real.
+    """
     assert actual.shape == expected.shape
     finite = np.isfinite(expected)
     np.testing.assert_array_equal(np.isfinite(actual), finite)
-    np.testing.assert_allclose(actual[finite], expected[finite], rtol=1e-9, atol=1e-9)
+    reference = expected[finite].astype(actual.dtype)
+    np.testing.assert_allclose(actual[finite], reference, rtol=2e-7, atol=0)
 
 
 @pytest.fixture(scope="module")
@@ -221,3 +230,55 @@ def test_load_capture_has_no_fftshift_option() -> None:
     import inspect
 
     assert "fftshift" not in inspect.signature(load_capture).parameters
+
+
+def test_decode_is_capped_to_the_retained_window(
+    tmp_path: Path, raw: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Frames that the ring buffer will drop are never decoded.
+
+    The deque keeps only max_frames rows, so decoding older frames produces
+    values that are discarded the moment they are appended. On a 211 MB capture
+    that is 95,787 frames decoded to retain 10,000. Assert the decoder is asked
+    only for the tail, while total_frames still reports the whole file.
+    """
+    boundaries = frame_offsets(raw)
+    target = tmp_path / "capped.dat"
+    target.write_bytes(raw[: boundaries[20]])
+
+    import backend.stream as stream_mod
+
+    requested: list[int] = []
+    real_decode = stream_mod.decode_frames
+
+    def spy(path, index, frame_ids, **kwargs):
+        requested.extend(int(i) for i in frame_ids)
+        return real_decode(path, index, frame_ids, **kwargs)
+
+    monkeypatch.setattr(stream_mod, "decode_frames", spy)
+
+    stream = CaptureStream(target, max_frames=5)
+    stream.update()
+
+    assert requested == [15, 16, 17, 18, 19]
+    assert stream.total_frames == 20
+    assert stream.snapshot(max_packets=0).amplitude.shape[0] == 5
+
+
+def test_capped_window_matches_the_reference_tail(reference) -> None:
+    """Skipping older frames does not disturb the retained rows or their times.
+
+    The timestamp chain is cumulative, so a decoder that skipped frames could
+    plausibly lose the running offset. It does not: FrameIndex derives every
+    timestamp from headers alone, independently of what gets decoded.
+    """
+    stream = CaptureStream(CAPTURE, max_frames=25)
+    stream.update()
+    snap = stream.snapshot(max_packets=0)
+
+    assert snap.amplitude.shape[0] == 25
+    assert_matrices_equal(snap.amplitude, reference.amplitude[-25:])
+    assert_matrices_equal(snap.phase, reference.phase[-25:])
+    np.testing.assert_allclose(
+        snap.time_seconds, reference.time_seconds[-25:], rtol=1e-12, atol=1e-12
+    )
