@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from backend.batch import decode_frames
-from backend.index import FrameIndex
+from backend.index import HEADER_BYTES, MAX_TICK, TICK_RESOLUTION, FrameIndex
 from backend.parser import load_capture
 from backend.tiles import (
     BLOCK_SIZE,
@@ -110,6 +110,34 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
         s, e = int(col_starts[x]), int(col_ends[x])
         if e > s:
             expected[:, x] = amp[s:e].max(axis=0)
+
+    # Reproduce the sampling-gap fill: empty columns borrow the nearest
+    # decoded frame's values when within the self-tuned gap_limit.  This
+    # mirrors the fill in compute_tile exactly -- the bimodal timing of the
+    # real capture means many columns receive no frame at width=frame_count,
+    # and those within gap_limit are now filled rather than NaN.
+    decoded_times = times
+    empty = col_ends <= col_starts
+    if len(decoded_times) >= 2:
+        gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
+    else:
+        gap_limit = 0.0
+    gap_limit = max(gap_limit, span / width)
+    if len(decoded_times) > 0 and empty.any():
+        centres = t0 + (np.arange(width) + 0.5) / width * span
+        ec = centres[empty]
+        j = np.searchsorted(decoded_times, ec)
+        j_lo = np.clip(j - 1, 0, len(decoded_times) - 1)
+        j_hi = np.clip(j, 0, len(decoded_times) - 1)
+        d_lo = np.abs(decoded_times[j_lo] - ec)
+        d_hi = np.abs(decoded_times[j_hi] - ec)
+        nearest = np.where(d_lo <= d_hi, j_lo, j_hi)
+        dist = np.minimum(d_lo, d_hi)
+        ok = dist <= gap_limit
+        cols = np.flatnonzero(empty)[ok]
+        if cols.size > 0:
+            expected[:, cols] = amp[nearest[ok]].T
+
     expected = np.ascontiguousarray(expected[::-1, :])
 
     _assert_grids_equal(grid, expected)
@@ -264,7 +292,9 @@ def test_narrow_range_is_exact(index: FrameIndex) -> None:
 
     assert meta["exact"] is True
     assert meta["total_in_range"] <= TILE_FRAME_BUDGET
-    assert grid.shape == (index.num_subcarriers, 400)
+    # Width is capped at the number of frames in range (41: frames 10–50
+    # inclusive) — never more columns than there are packets to fill.
+    assert grid.shape == (index.num_subcarriers, meta["total_in_range"])
 
 
 # ----------------------------------------------------------------------- #
@@ -418,7 +448,7 @@ def test_tile_endpoint_content_type_and_body(index: FrameIndex) -> None:
     for h in [
         "X-Tile-Width", "X-Tile-Height", "X-Capture-TMin", "X-Capture-TMax",
         "X-Tile-Frames", "X-Tile-Total", "X-Tile-Exact", "X-Tile-VMin",
-        "X-Tile-VMax",
+        "X-Tile-VMax", "X-Tile-PLow", "X-Tile-PHigh", "X-Tile-Filled",
     ]:
         assert h in resp.headers, f"missing header {h}"
         float(resp.headers[h])  # parseable as float
@@ -443,7 +473,10 @@ def test_tile_endpoint_phase_metric(index: FrameIndex) -> None:
     })
     assert resp.status_code == 200
     height = int(resp.headers["X-Tile-Height"])
-    assert len(resp.content) == 200 * height * 4
+    w = int(resp.headers["X-Tile-Width"])
+    # Width is capped at total_in_range (41 frames in [times[10], times[50]]).
+    assert w == 41
+    assert len(resp.content) == w * height * 4
 
 
 def test_tile_endpoint_invalid_metric(index: FrameIndex) -> None:
@@ -546,6 +579,111 @@ def test_string_path_is_accepted(index: FrameIndex) -> None:
 
 
 # ----------------------------------------------------------------------- #
+#  12. Robust percentile bounds in metadata                               #
+# ----------------------------------------------------------------------- #
+
+
+def test_tile_percentile_bounds(index: FrameIndex) -> None:
+    """compute_tile returns p_low/p_high (1st/99th percentile of finite values).
+
+    The raw min/max is dominated by outliers; percentile bounds are the robust
+    scale the frontend locks to. -inf from db(0) must be excluded from the
+    percentile computation, not clamped into it — clamping would drag p_low
+    to -inf and defeat the purpose.
+    """
+    t0, t1 = _full_range(index)
+    grid, meta = compute_tile(CAPTURE, t0, t1, 200, "amplitude")
+
+    finite_mask = np.isfinite(grid)
+    if finite_mask.any():
+        finite_vals = grid[finite_mask]
+        expected_low = float(np.nanpercentile(finite_vals, 1))
+        expected_high = float(np.nanpercentile(finite_vals, 99))
+        assert meta["p_low"] == pytest.approx(expected_low, rel=1e-5)
+        assert meta["p_high"] == pytest.approx(expected_high, rel=1e-5)
+        # Percentile bounds sit inside the finite extrema.
+        assert meta["vmin"] <= meta["p_low"] <= meta["p_high"] <= meta["vmax"]
+    else:
+        assert meta["p_low"] == 0.0
+        assert meta["p_high"] == 0.0
+
+
+def test_tile_percentile_excludes_neg_inf(index: FrameIndex) -> None:
+    """-inf from db(0) is excluded from the percentile, not clamped into it.
+
+    If -inf were included, p_low would be -inf and the robust scale would be
+    no better than the raw min. The finite mask excludes both NaN and -inf;
+    the percentile is computed over that subset only.
+    """
+    t0, t1 = _full_range(index)
+    grid, meta = compute_tile(CAPTURE, t0, t1, 200, "amplitude")
+
+    if np.any(np.isneginf(grid)):
+        # p_low must be finite — -inf was excluded from the computation.
+        assert np.isfinite(meta["p_low"]), "p_low is -inf: -inf was not excluded"
+        assert np.isfinite(meta["p_high"]), "p_high is -inf: -inf was not excluded"
+
+
+def test_tile_endpoint_percentile_headers(index: FrameIndex) -> None:
+    """X-Tile-PLow/X-Tile-PHigh headers are present and parseable."""
+    from fastapi.testclient import TestClient
+    from backend.app import app
+
+    client = TestClient(app)
+    t0 = float(index.times[0])
+    t1 = float(index.times[-1])
+    resp = client.get("/api/tile", params={
+        "path": str(CAPTURE),
+        "t0": t0, "t1": t1, "width": 200, "metric": "amplitude",
+    })
+    assert resp.status_code == 200
+    for h in ["X-Tile-PLow", "X-Tile-PHigh"]:
+        assert h in resp.headers, f"missing header {h}"
+        float(resp.headers[h])
+
+
+# ----------------------------------------------------------------------- #
+#  13. Tile width capped at frame count                                   #
+# ----------------------------------------------------------------------- #
+
+
+def test_tile_width_capped_at_frame_count(index: FrameIndex) -> None:
+    """Tile width is capped at the number of frames in range.
+
+    A full-extent request for more columns than packets returns a tile whose
+    width equals the frame count — never more columns than there are packets
+    to fill. At full extent on a 1101-packet capture, a 1230-wide request
+    would otherwise produce 660 empty columns of 1230 (transparent stripes).
+    """
+    t0, t1 = _full_range(index)
+    total = index.count
+
+    # Request more columns than frames → capped.
+    grid, meta = compute_tile(CAPTURE, t0, t1, total + 100, "amplitude")
+    assert grid.shape == (index.num_subcarriers, total)
+    assert meta["total_in_range"] == total
+
+    # Request fewer columns than frames → no cap.
+    narrow = max(1, total - 100)
+    grid2, _ = compute_tile(CAPTURE, t0, t1, narrow, "amplitude")
+    assert grid2.shape == (index.num_subcarriers, narrow)
+
+
+def test_tile_width_capped_at_one_for_empty_range(index: FrameIndex) -> None:
+    """An empty range caps width at 1, not 0.
+
+    'Do not cap below 1' — a 0-wide tile would be a degenerate buffer the
+    frontend cannot blit.
+    """
+    t0 = float(index.times[-1]) + 1.0
+    t1 = t0 + 1.0
+    grid, meta = compute_tile(CAPTURE, t0, t1, 400, "amplitude")
+    assert grid.shape == (index.num_subcarriers, 1)
+    assert meta["total_in_range"] == 0
+    assert np.all(np.isnan(grid))
+
+
+# ----------------------------------------------------------------------- #
 #  Fixture: raw bytes for truncation test                                 #
 # ----------------------------------------------------------------------- #
 
@@ -553,3 +691,199 @@ def test_string_path_is_accepted(index: FrameIndex) -> None:
 @pytest.fixture(scope="module")
 def raw() -> bytes:
     return CAPTURE.read_bytes()
+
+
+# ----------------------------------------------------------------------- #
+#  14. Sampling-gap fill: empty columns borrow nearest frame             #
+# ----------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def template_frame(raw: bytes) -> bytes:
+    """One frame's bytes from the real capture, as a template for synthetic captures."""
+    csi_length = struct.unpack("I", raw[:4])[0]
+    return raw[: HEADER_BYTES + csi_length]
+
+
+def _write_synthetic_capture(
+    path: Path, frame_deltas: list[float], template: bytes
+) -> None:
+    """Write a synthetic .dat file with the given inter-frame intervals.
+
+    Reuses the real capture's frame bytes as a template (valid csi_length,
+    num_sc, rate_flags, etc.) and rewrites only the ftm/mu clock fields to
+    produce the requested timing.  The first frame is at t=0.0;
+    *frame_deltas[i]* is the interval between frame i and frame i+1.
+    """
+    n = len(frame_deltas) + 1
+    ftm = 0
+    mu = 0
+    frames: list[bytes] = []
+    for i in range(n):
+        frame = bytearray(template)
+        struct.pack_into("<I", frame, 8, ftm)   # ftm_clock at offset 8
+        struct.pack_into("<I", frame, 88, mu)   # mu_clock at offset 88
+        frames.append(bytes(frame))
+        if i < len(frame_deltas):
+            dt = frame_deltas[i]
+            ftm = (ftm + int(round(dt * 1e9 / TICK_RESOLUTION))) % (MAX_TICK + 1)
+            mu = (mu + int(round(dt * 1e6))) % (MAX_TICK + 1)
+    path.write_bytes(b"".join(frames))
+
+
+def test_fill_closes_uniform_sampling_gaps(
+    tmp_path: Path, template_frame: bytes
+) -> None:
+    """A capture whose burst cadence leaves sampling gaps (intervals wider
+    than one column) is filled: no column is all-NaN, filled_columns > 0."""
+    # 20 frames in 10 burst pairs: (0, 0.001), (0.2, 0.201), ...
+    # Column width ≈ 0.09 s, burst cadence 0.2 s → every other column is empty.
+    deltas: list[float] = []
+    for i in range(10):
+        deltas.append(0.001)        # intra-burst
+        if i < 9:
+            deltas.append(0.199)    # inter-burst
+    # 19 deltas → 20 frames.
+
+    path = tmp_path / "burst.dat"
+    _write_synthetic_capture(path, deltas, template_frame)
+    idx = FrameIndex(path)
+
+    t0 = float(idx.times[0])
+    t1 = float(idx.times[-1])
+    grid, meta = compute_tile(path, t0, t1, 20, "amplitude")
+
+    assert grid.shape == (idx.num_subcarriers, 20)
+    # No column should be entirely NaN — all sampling gaps filled.
+    assert not np.any(np.all(np.isnan(grid), axis=0)), "found an all-NaN column"
+    assert meta["filled_columns"] > 0
+
+
+def test_fill_preserves_genuine_dropout(
+    tmp_path: Path, template_frame: bytes
+) -> None:
+    """A genuine multi-second dropout stays NaN: the gap is far wider than the
+    self-tuned gap_limit, so columns inside it are not filled."""
+    normal = 0.2
+    huge = 50.0 * normal  # 10 s dropout
+    n_side = 21  # frames on each side of the gap
+
+    deltas: list[float] = []
+    for _ in range(n_side - 1):
+        deltas.append(normal)
+    deltas.append(huge)
+    for _ in range(n_side - 1):
+        deltas.append(normal)
+    # 41 deltas → 42 frames.
+
+    path = tmp_path / "dropout.dat"
+    _write_synthetic_capture(path, deltas, template_frame)
+    idx = FrameIndex(path)
+
+    t0 = float(idx.times[0])
+    t1 = float(idx.times[-1])
+    width = 42
+    grid, meta = compute_tile(path, t0, t1, width, "amplitude")
+
+    # Recompute gap_limit the same way the implementation does.
+    decoded_times = idx.times  # full range, exact
+    gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
+    gap_limit = max(gap_limit, (t1 - t0) / width)
+
+    # Find columns whose centre is deep inside the dropout (beyond gap_limit
+    # from either edge frame) and assert they are all-NaN.
+    span = t1 - t0
+    centres = t0 + (np.arange(width) + 0.5) / width * span
+    last_before = float(idx.times[n_side - 1])
+    first_after = float(idx.times[n_side])
+    deep = (centres > last_before + gap_limit) & (centres < first_after - gap_limit)
+    assert deep.any(), "test misconfigured: no columns deep inside the dropout"
+    for x in np.flatnonzero(deep):
+        assert np.all(np.isnan(grid[:, x])), (
+            f"column {x} inside dropout should be NaN but was filled"
+        )
+    # The dropout columns are not counted in filled_columns.
+    assert meta["filled_columns"] == 0
+
+
+def test_filled_column_carries_nearest_frame(
+    tmp_path: Path, template_frame: bytes
+) -> None:
+    """A filled column carries the nearest decoded frame's values exactly."""
+    # Same bimodal burst pattern as test_fill_closes_uniform_sampling_gaps.
+    deltas: list[float] = []
+    for i in range(10):
+        deltas.append(0.001)
+        if i < 9:
+            deltas.append(0.199)
+
+    path = tmp_path / "burst_exact.dat"
+    _write_synthetic_capture(path, deltas, template_frame)
+    idx = FrameIndex(path)
+
+    t0 = float(idx.times[0])
+    t1 = float(idx.times[-1])
+    width = 20
+    grid, meta = compute_tile(path, t0, t1, width, "amplitude")
+
+    # Find an empty column that was filled.
+    decoded_times = idx.times
+    span = t1 - t0
+    col_edges = t0 + np.arange(width + 1, dtype=np.float64) / width * span
+    col_starts = np.searchsorted(decoded_times, col_edges[:-1], side="left")
+    col_ends = np.searchsorted(decoded_times, col_edges[1:], side="left")
+    col_ends[-1] = len(decoded_times)
+    empty = col_ends <= col_starts
+    # A filled column is empty (by bucketing) but not NaN (in the grid).
+    col_all_nan = np.all(np.isnan(grid), axis=0)
+    filled_cols = np.flatnonzero(empty & ~col_all_nan)
+    assert filled_cols.size > 0, "expected at least one filled column"
+    assert meta["filled_columns"] == filled_cols.size
+
+    col = int(filled_cols[0])
+    centre = t0 + (col + 0.5) / width * span
+    nearest_frame = int(np.argmin(np.abs(decoded_times - centre)))
+
+    # Decode that frame independently and compare.  The grid is row-flipped
+    # (row 0 = highest subcarrier), so undo the flip before comparing.
+    amp, _ = decode_frames(path, idx, np.array([nearest_frame]))
+    np.testing.assert_array_equal(grid[:, col][::-1], amp[0])
+
+
+def test_filled_columns_zero_when_no_gaps(
+    tmp_path: Path, template_frame: bytes
+) -> None:
+    """When every column already has a frame, filled_columns == 0."""
+    # Uniform 0.2 s cadence, 11 frames, width = 11.  Column width ≈ 0.182 s,
+    # so each frame lands in its own column — no sampling gaps to fill.
+    n = 11
+    deltas = [0.2] * (n - 1)
+    path = tmp_path / "uniform.dat"
+    _write_synthetic_capture(path, deltas, template_frame)
+    idx = FrameIndex(path)
+
+    t0 = float(idx.times[0])
+    t1 = float(idx.times[-1])
+    grid, meta = compute_tile(path, t0, t1, n, "amplitude")
+    assert meta["filled_columns"] == 0
+    # And no column is NaN.
+    assert not np.any(np.all(np.isnan(grid), axis=0))
+
+
+def test_fill_handles_zero_and_one_decoded(index: FrameIndex) -> None:
+    """n_decoded == 0 and n_decoded == 1 do not crash; filled_columns == 0."""
+    # n_decoded == 0: range entirely outside the capture.
+    t0 = float(index.times[-1]) + 1.0
+    t1 = t0 + 1.0
+    grid0, meta0 = compute_tile(CAPTURE, t0, t1, 10, "amplitude")
+    assert meta0["filled_columns"] == 0
+    assert np.all(np.isnan(grid0))
+
+    # n_decoded == 1: a tiny range around a single frame.  Width is capped at 1.
+    t0 = float(index.times[5])
+    t1 = float(index.times[5]) + 1e-9
+    grid1, meta1 = compute_tile(CAPTURE, t0, t1, 10, "amplitude")
+    assert meta1["filled_columns"] == 0
+    assert grid1.shape == (index.num_subcarriers, 1)
+    assert not np.all(np.isnan(grid1))
+

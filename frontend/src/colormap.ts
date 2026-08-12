@@ -9,6 +9,18 @@ const VIRIDIS_STOPS = [
 
 export const VIRIDIS: readonly string[] = VIRIDIS_STOPS;
 
+// Cyclic colormap for phase: −π and +π are the same angle, so the colormap
+// must start and end on the same color — otherwise every wrap paints a hard
+// false edge that looks like a real discontinuity. Sampled from matplotlib's
+// twilight; the first and last stops are identical by construction.
+const TWILIGHT_STOPS = [
+  "#e1d8e2", "#b3c6ce", "#7ba0c2", "#6175ba", "#5d43a4", "#4d176e",
+  "#2f1436", "#581547", "#8d2c50", "#b25652", "#c5886c", "#d3bbab",
+  "#e1d8e2",
+];
+
+export const TWILIGHT: readonly string[] = TWILIGHT_STOPS;
+
 /** Fully transparent — used for pixel columns that contain no frames at all. */
 export const NO_DATA_COLOR: number = 0; // alpha 0, canvas background shows through
 

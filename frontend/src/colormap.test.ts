@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { VIRIDIS, buildLut, lutIndex, NO_DATA_COLOR, NON_FINITE_COLOR } from "./colormap";
+import { VIRIDIS, TWILIGHT, buildLut, lutIndex, NO_DATA_COLOR, NON_FINITE_COLOR } from "./colormap";
 
 function unpack(rgba: number): [number, number, number, number] {
   return [rgba & 0xff, (rgba >>> 8) & 0xff, (rgba >>> 16) & 0xff, (rgba >>> 24) & 0xff];
@@ -70,5 +70,28 @@ describe("special colors", () => {
 
   it("NON_FINITE_COLOR is opaque black", () => {
     expect(unpack(NON_FINITE_COLOR)).toEqual([0, 0, 0, 255]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TWILIGHT cyclic colormap — phase wraps, so the colormap must start and end
+// on the same color or every −π/+π wrap paints a false edge.
+// ---------------------------------------------------------------------------
+
+describe("TWILIGHT cyclic colormap", () => {
+  it("first and last stops are identical", () => {
+    expect(TWILIGHT[0]).toBe(TWILIGHT[TWILIGHT.length - 1]);
+  });
+
+  it("buildLut produces near-identical RGBA at index 0 and size-1", () => {
+    const lut = buildLut(TWILIGHT, 256);
+    const [r0, g0, b0] = unpack(lut[0]);
+    const [r1, g1, b1] = unpack(lut[255]);
+    // Exact equality is expected (both endpoints map to the same stop), but
+    // allow a tolerance of 1 so a future LUT rounding change doesn't break the
+    // guard while still catching a real cycle break.
+    expect(Math.abs(r0 - r1)).toBeLessThanOrEqual(1);
+    expect(Math.abs(g0 - g1)).toBeLessThanOrEqual(1);
+    expect(Math.abs(b0 - b1)).toBeLessThanOrEqual(1);
   });
 });

@@ -35,6 +35,9 @@ app.add_middleware(
         "X-Tile-Exact",
         "X-Tile-VMin",
         "X-Tile-VMax",
+        "X-Tile-PLow",
+        "X-Tile-PHigh",
+        "X-Tile-Filled",
     ],
 )
 
@@ -163,6 +166,9 @@ def tile(
             "X-Tile-Exact": "1" if meta["exact"] else "0",
             "X-Tile-VMin": str(meta["vmin"]),
             "X-Tile-VMax": str(meta["vmax"]),
+            "X-Tile-PLow": str(meta["p_low"]),
+            "X-Tile-PHigh": str(meta["p_high"]),
+            "X-Tile-Filled": str(meta["filled_columns"]),
         },
     )
 

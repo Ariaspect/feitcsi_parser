@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchMeta, type Meta } from "./api";
+import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
+import { createTimeLink } from "./timelink";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -12,6 +14,12 @@ export function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
+
+  // One TimeLink shared by both heatmaps — zooming one mirrors the time axis
+  // on the other. Subcarrier zoom stays independent. useState's lazy
+  // initializer runs the factory exactly once; useRef(createTimeLink()) would
+  // rebuild it on every render (3x/s while polling) only to throw it away.
+  const [timeLink] = useState(createTimeLink);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,6 +129,7 @@ export function App() {
             title="FeitCSI — amplitude"
             colorLabel="Amplitude (dBm)"
             height={400}
+            timeLink={timeLink}
           />
           <div style={{ height: "1.5rem" }} />
           <Heatmap
@@ -135,6 +144,8 @@ export function App() {
             title="FeitCSI — phase"
             colorLabel="Phase (rad)"
             height={400}
+            palette={TWILIGHT}
+            timeLink={timeLink}
           />
         </>
       ) : (

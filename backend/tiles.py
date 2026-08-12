@@ -230,7 +230,8 @@ def compute_tile(
     convention).  Empty columns are NaN; ``-inf`` from ``db(0)`` is preserved.
 
     *metadata* keys: ``frames_decoded``, ``total_in_range``, ``exact``,
-    ``vmin``, ``vmax``, ``t_min``, ``t_max``.
+    ``vmin``, ``vmax``, ``p_low``, ``p_high``, ``t_min``, ``t_max``,
+    ``filled_columns``.
     """
     path = Path(path)
     index = get_index(path)
@@ -249,8 +250,11 @@ def compute_tile(
             "exact": True,
             "vmin": 0.0,
             "vmax": 0.0,
+            "p_low": 0.0,
+            "p_high": 0.0,
             "t_min": float(times[0]) if len(times) else 0.0,
             "t_max": float(times[-1]) if len(times) else 0.0,
+            "filled_columns": 0,
         }
 
     # Find frames in [t0, t1] -- CLOSED at both ends.
@@ -266,6 +270,14 @@ def compute_tile(
     lo = int(np.searchsorted(times, t0, side="left"))
     hi = int(np.searchsorted(times, t1, side="right"))
     total_in_range = hi - lo
+
+    # Cap tile width at the number of frames in range — never return more
+    # columns than there are packets to fill. At full extent a sparse capture
+    # (1101 packets) in a wide plot (1230 px) would otherwise produce 660
+    # empty columns of 1230, rendering as transparent stripes. X-Tile-Width
+    # reports the real width and the frontend stretches via tileSourceRect,
+    # so a narrower tile is seamless. Do not cap below 1.
+    width = max(1, min(width, total_in_range))
 
     # Stride-sample if the range exceeds the budget.
     if total_in_range > TILE_FRAME_BUDGET:
@@ -328,18 +340,67 @@ def compute_tile(
                 nearest = s + int(np.argmin(np.abs(decoded_times[s:e] - centre)))
                 grid[:, x] = data[nearest]
 
+    # Fill sampling gaps: columns that received no frame borrow the nearest
+    # decoded frame's values, but only when that frame is close enough in time.
+    # Packet timing is bimodal on real captures (sub-millisecond bursts
+    # interleaved with ~0.2 s burst cadence), so when the column width is
+    # ~0.1 s roughly half the columns receive no frame and render as transparent
+    # stripes.  A genuine capture dropout (multi-second silence in a sub-second
+    # cadence stream) must stay NaN and stay visible; only sampling gaps get
+    # filled.
+    #
+    # The limit self-tunes from the decoded frames in range: 2x the 95th
+    # percentile of inter-frame intervals covers the burst cadence while
+    # rejecting long dropouts.  The span/width floor guarantees a single-column
+    # gap is always fillable -- it can never be a real dropout, only an artifact
+    # of column quantisation.  Run before the row flip so grid rows still match
+    # data columns.
+    filled_columns = 0
+    empty = col_ends <= col_starts
+    if n_decoded >= 2:
+        gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
+    else:
+        gap_limit = 0.0
+    gap_limit = max(gap_limit, span / width)
+    if n_decoded > 0 and empty.any():
+        centres = t0 + (np.arange(width) + 0.5) / width * span
+        ec = centres[empty]
+        j = np.searchsorted(decoded_times, ec)
+        j_lo = np.clip(j - 1, 0, n_decoded - 1)
+        j_hi = np.clip(j, 0, n_decoded - 1)
+        d_lo = np.abs(decoded_times[j_lo] - ec)
+        d_hi = np.abs(decoded_times[j_hi] - ec)
+        nearest = np.where(d_lo <= d_hi, j_lo, j_hi)
+        dist = np.minimum(d_lo, d_hi)
+        ok = dist <= gap_limit
+        cols = np.flatnonzero(empty)[ok]
+        if cols.size > 0:
+            grid[:, cols] = data[nearest[ok]].T
+            filled_columns = int(cols.size)
+
     # Flip subcarrier axis so row 0 = highest subcarrier index, matching the
     # frontend's image convention (subcarrierSourceRect in render.ts).
     grid = np.ascontiguousarray(grid[::-1, :])
 
-    # Finite value range (excludes NaN and -inf).
+    # Finite value range (excludes NaN and -inf) and robust percentile bounds.
+    # The raw min/max is dominated by outliers — on the real capture, 98.5% of
+    # amplitude values fall in [40, 60] while extrema span [7.7, 84.7]. A
+    # min/max scale compresses the visible structure into one narrow slice of
+    # the colormap. The 1st/99th percentile bounds are the robust scale the
+    # frontend locks to. -inf from db(0) is excluded by the finite mask, not
+    # clamped into the percentile — clamping would drag p_low to -inf.
     finite_mask = np.isfinite(grid)
     if finite_mask.any():
-        vmin = float(grid[finite_mask].min())
-        vmax = float(grid[finite_mask].max())
+        finite_vals = grid[finite_mask]
+        vmin = float(finite_vals.min())
+        vmax = float(finite_vals.max())
+        p_low = float(np.nanpercentile(finite_vals, 1))
+        p_high = float(np.nanpercentile(finite_vals, 99))
     else:
         vmin = 0.0
         vmax = 0.0
+        p_low = 0.0
+        p_high = 0.0
 
     return grid, {
         "frames_decoded": n_decoded,
@@ -347,6 +408,9 @@ def compute_tile(
         "exact": exact,
         "vmin": vmin,
         "vmax": vmax,
+        "p_low": p_low,
+        "p_high": p_high,
         "t_min": float(times[0]),
         "t_max": float(times[-1]),
+        "filled_columns": filled_columns,
     }

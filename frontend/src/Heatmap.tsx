@@ -5,6 +5,7 @@ import { scaleLinear, type ScaleLinear } from "d3-scale";
 import { VIRIDIS, buildLut } from "./colormap";
 import { renderTileToImageData, subcarrierSourceRect, tileSourceRect } from "./render";
 import { fetchTile, type Tile } from "./api";
+import { type TimeLink } from "./timelink";
 import {
   advanceView,
   clampScWindow,
@@ -34,6 +35,10 @@ interface HeatmapProps {
   colorLabel: string;
   palette?: readonly string[];
   height?: number;
+  /** Link between stacked heatmaps' time axes. When the user zooms or resets
+   * one plot, the other mirrors the time window (but not the subcarrier band).
+   * Omit for a standalone heatmap. */
+  timeLink?: TimeLink;
 }
 
 const PADDING = { top: 30, right: 70, bottom: 40, left: 60 };
@@ -72,6 +77,7 @@ interface PropsMirror {
   colorLabel: string;
   palette: readonly string[];
   height: number;
+  timeLink?: TimeLink;
 }
 
 interface TileEntry {
@@ -101,6 +107,7 @@ export function Heatmap({
   colorLabel,
   palette = VIRIDIS,
   height = 400,
+  timeLink,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -124,6 +131,10 @@ export function Heatmap({
   const zoomBehaviorRef = useRef<ZoomBehavior<HTMLCanvasElement, unknown> | null>(null);
   const programmaticRef = useRef(false);
 
+  // Stable identity for TimeLink: a subscriber ignores publishes that carry
+  // its own source so a link-driven d3 resync is not mistaken for user input.
+  const sourceRef = useRef({});
+
   // --- Tile fetch state ---
   const tileRef = useRef<TileEntry | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -131,11 +142,14 @@ export function Heatmap({
   const debounceTimerRef = useRef<number | null>(null);
   const lastFetchKeyRef = useRef<FetchKey | null>(null);
   const requestTileRef = useRef<(() => void) | null>(null);
-  // Amplitude color scale locked to the first tile's vmin/vmax for a given
-  // capture. A per-window scale makes identical data look different at
-  // different zoom levels — locking prevents that. Cleared on capture identity
+  // Amplitude color scale locked to the first tile's percentile bounds
+  // (1st/99th) for a given capture. The raw min/max is dominated by outliers
+  // — 98.5% of values fall in [40, 60] while extrema span [7.7, 84.7] — so a
+  // min/max scale compresses the visible structure into one narrow slice of
+  // the colormap. Percentile bounds expose that structure. Values outside the
+  // band clamp to the end colors via lutIndex. Cleared on capture identity
   // change (see Effect 1's reset path).
-  const ampScaleRef = useRef<{ vmin: number; vmax: number } | null>(null);
+  const ampScaleRef = useRef<{ lo: number; hi: number } | null>(null);
 
   const halfN = Math.floor(numSubcarriers / 2);
 
@@ -155,6 +169,7 @@ export function Heatmap({
     colorLabel,
     palette,
     height,
+    timeLink,
   };
 
   // -------------------------------------------------------------------------
@@ -320,17 +335,19 @@ export function Heatmap({
       // --- Color scale ---
       // A metric with an a-priori range (phase) uses it and never moves.
       // Amplitude's range is a property of the capture, so it locks to the
-      // first tile that has one and stays there -- rescaling per window would
-      // make identical data look different at different zoom levels.
+      // first tile's percentile bounds (1st/99th) and stays there -- the raw
+      // min/max is outlier-dominated and compresses the visible structure.
+      // Rescaling per window would also make identical data look different at
+      // different zoom levels.
       //
-      // The fallback is the current tile's own range, not a sentinel. A
-      // degenerate first tile (vmin === vmax, e.g. a uniform or empty window)
-      // leaves the lock unset, and NaN bounds would send lutIndex to NaN,
-      // index the LUT with it, and paint the entire plot transparent with
-      // "NaN" on the colorbar -- a blank screen with nothing to explain it.
+      // The fallback is the current tile's own vmin/vmax, not a sentinel. A
+      // degenerate first tile (pHigh === pLow AND vmax === vmin) leaves the
+      // lock unset, and NaN bounds would send lutIndex to NaN, index the LUT
+      // with it, and paint the entire plot transparent with "NaN" on the
+      // colorbar -- a blank screen with nothing to explain it.
       const locked = props.metric === "amplitude" ? ampScaleRef.current : null;
-      const min = locked ? locked.vmin : props.minValue ?? tile.vmin;
-      const max = locked ? locked.vmax : props.maxValue ?? tile.vmax;
+      const min = locked ? locked.lo : props.minValue ?? tile.vmin;
+      const max = locked ? locked.hi : props.maxValue ?? tile.vmax;
 
       // --- Heatmap data via tile + LUT ---
       const lut = buildLut(props.palette, 256);
@@ -546,6 +563,12 @@ export function Heatmap({
         hoverRef.current = null;
         draw();
         requestTileRef.current?.();
+        // Broadcast the time window to linked plots. Subcarrier zoom stays
+        // per-plot and is not part of the message.
+        const link = props.timeLink;
+        if (link) {
+          link.publish(sourceRef.current, { tMin: clamped.tMin, tMax: clamped.tMax }, false);
+        }
       });
     zoomBehaviorRef.current = zoomBehavior;
     sel.call(zoomBehavior);
@@ -648,14 +671,15 @@ export function Heatmap({
         if (controller.signal.aborted) return;
 
         // Lock amplitude scale to the first tile with a meaningful range.
-        // vmin === vmax (empty or uniform tile) is skipped so a degenerate
-        // first tile doesn't lock the scale to [0, 0].
-        if (
-          props.metric === "amplitude" &&
-          ampScaleRef.current === null &&
-          tile.vmax > tile.vmin
-        ) {
-          ampScaleRef.current = { vmin: tile.vmin, vmax: tile.vmax };
+        // Prefer percentile bounds (robust to outliers); fall back to extrema
+        // if the percentile band is degenerate (pHigh === pLow); leave unset
+        // if both are degenerate — draw() then uses the current tile's vmin/vmax.
+        if (props.metric === "amplitude" && ampScaleRef.current === null) {
+          if (tile.pHigh > tile.pLow) {
+            ampScaleRef.current = { lo: tile.pLow, hi: tile.pHigh };
+          } else if (tile.vmax > tile.vmin) {
+            ampScaleRef.current = { lo: tile.vmin, hi: tile.vmax };
+          }
         }
 
         tileRef.current = { tile, seq };
@@ -695,6 +719,14 @@ export function Heatmap({
       syncZoomToView();
       draw();
       scheduleTileFetch();
+      const link = props.timeLink;
+      if (link) {
+        link.publish(
+          sourceRef.current,
+          { tMin: props.captureTMin, tMax: props.captureTMax },
+          true,
+        );
+      }
     };
     canvas.addEventListener("dblclick", onDoubleClick);
 
@@ -829,6 +861,29 @@ export function Heatmap({
     });
     ro.observe(container);
 
+    // --- TimeLink: mirror the time window across stacked heatmaps. ---
+    // Subscribes once on mount. On receiving a window from another plot,
+    // update only the time half of the view (subcarrier zoom is per-plot),
+    // mirror followLive, resync d3, redraw, and refetch. The programmaticRef
+    // guard inside syncZoomToView prevents the d3 resync from re-entering the
+    // zoom handler and re-publishing — an infinite loop otherwise.
+    const link = propsRef.current?.timeLink;
+    let unsubTimeLink: (() => void) | null = null;
+    if (link) {
+      unsubTimeLink = link.subscribe((w, followLive, source) => {
+        if (source === sourceRef.current) return; // ignore own publish
+        const v = viewRef.current;
+        const p = propsRef.current;
+        if (!v || !p || p.numSubcarriers === 0) return;
+        viewRef.current = { ...v, tMin: w.tMin, tMax: w.tMax };
+        followLiveRef.current = followLive;
+        hoverRef.current = null;
+        syncZoomToView();
+        draw();
+        scheduleTileFetch();
+      });
+    }
+
     // Initial render.
     draw();
     syncZoomToView();
@@ -836,6 +891,7 @@ export function Heatmap({
 
     return () => {
       ro.disconnect();
+      unsubTimeLink?.();
       sel.on(".zoom", null);
       canvas.removeEventListener("dblclick", onDoubleClick);
       canvas.removeEventListener("wheel", onShiftWheel);

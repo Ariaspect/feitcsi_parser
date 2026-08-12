@@ -98,6 +98,8 @@ describe("fetchTile", () => {
             "X-Tile-Exact": "0",
             "X-Tile-VMin": "-90.5",
             "X-Tile-VMax": "-30.2",
+            "X-Tile-PLow": "-55.0",
+            "X-Tile-PHigh": "-35.0",
           },
         }),
       ),
@@ -117,6 +119,8 @@ describe("fetchTile", () => {
     expect(tile.exact).toBe(false);
     expect(tile.vmin).toBe(-90.5);
     expect(tile.vmax).toBe(-30.2);
+    expect(tile.pLow).toBe(-55.0);
+    expect(tile.pHigh).toBe(-35.0);
 
     // Body decode: little-endian float32, row-major.
     expect(tile.grid.length).toBe(4);

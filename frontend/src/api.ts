@@ -36,6 +36,8 @@ export interface Tile {
   exact: boolean;
   vmin: number;
   vmax: number;
+  pLow: number; // 1st percentile of finite values — robust scale for amplitude
+  pHigh: number; // 99th percentile — amplitude locks to this, not vmin/vmax
 }
 
 export async function fetchTile(
@@ -72,5 +74,7 @@ export async function fetchTile(
     exact: h.get("X-Tile-Exact") === "1",
     vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
     vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
+    pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),
+    pHigh: parseFloat(h.get("X-Tile-PHigh") ?? "0"),
   };
 }
