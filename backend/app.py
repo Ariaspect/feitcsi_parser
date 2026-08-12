@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .parser import load_capture, tail_window
+from .stream import get_stream
 
 
 DEFAULT_PATH = "captures/capture.dat"
@@ -34,12 +34,15 @@ def snapshot(
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
+    # Cached per path: decodes only the bytes appended since the last poll,
+    # so refresh cost tracks new frames rather than total capture size.
+    stream = get_stream(p)
     try:
-        capture = load_capture(p)
+        stream.update()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Parse error: {exc}") from exc
 
-    window = tail_window(capture, max_packets=max_packets)
+    window = stream.snapshot(max_packets=max_packets)
 
     amp_finite = window.amplitude[np.isfinite(window.amplitude)]
     phase_finite = window.phase[np.isfinite(window.phase)]
@@ -49,7 +52,7 @@ def snapshot(
         "chipset": window.chipset,
         "bandwidth": window.bandwidth,
         "num_subcarriers": window.num_subcarriers,
-        "total_packets": len(capture),
+        "total_packets": stream.total_frames,
         "window_packets": len(window),
         "time_seconds": window.time_seconds.tolist(),
         "amplitude": window.amplitude.tolist(),

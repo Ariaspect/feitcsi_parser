@@ -21,3 +21,8 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "backend"
 module-root = ""
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

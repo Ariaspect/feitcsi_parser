@@ -71,7 +71,8 @@ Open http://localhost:8000
 
 1. Place FeitCSI `.dat` file at `captures/capture.dat` (or enter path in UI).
 2. Click **Run realtime**.
-3. Backend re-parses `.dat` every `refresh_ms`, returns trailing window of
+3. Backend decodes the `.dat` incrementally every `refresh_ms` — only bytes
+   appended since the last poll — and returns a trailing window of
    `max_packets` packets as JSON.
 4. Frontend renders two heatmaps: amplitude (dBm) and phase (rad).
 
@@ -115,8 +116,13 @@ Returns `{"status": "ok"}`.
 ## Data Format
 
 FeitCSI `.dat` files are binary: sequence of `272-byte header + CSI block`
-records. CSIKit handles parsing, pilot interpolation, and subcarrier
-filtering. Subcarriers are fftshifted to signed-frequency order
-(-N/2 .. +N/2-1).
+records. The header's first word is the payload length, so frames are
+self-delimiting and can be decoded as they are appended. CSIKit supplies
+header parsing, pilot interpolation, and RSSI scaling.
+
+Subcarriers arrive already centred — index 0 is the lowest subcarrier and
+index N/2 is DC. They are **not** in FFT bin order, so `fftshift` must not be
+applied: it would split the contiguous spectrum and weld the two outer edges
+together.
 
 See https://feitcsi.kuskosoft.com/csi_format/ for the on-wire spec.

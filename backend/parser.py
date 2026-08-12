@@ -1,4 +1,4 @@
-"""FeitCSI .dat parser. Wraps CSIKit to return fftshifted amplitude/phase."""
+"""FeitCSI .dat parser. Wraps CSIKit to return amplitude/phase per frame."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from CSIKit.reader import FeitCSIBeamformReader
 from CSIKit.util import csitools
 
 
-def _mimo_safe_interpolate(upstream: Callable[[dict], dict], csi: dict) -> dict:
+def mimo_safe_interpolate(upstream: Callable[[dict], dict], csi: dict) -> dict:
     """Pilot interpolation that survives multi-stream frames.
 
     CSIKit's interpolate() loops over the rx axis of a (subcarrier, rx, tx)
@@ -56,14 +56,22 @@ def load_capture(
     scaled: bool = True,
     interpolate: bool = True,
     filter_mac: str | None = None,
-    fftshift: bool = True,
 ) -> FeitCSICapture:
+    """Full-file parse via CSIKit. Reference path; see stream.CaptureStream.
+
+    Subcarriers are returned in the order FeitCSI emits them, which is already
+    centred (index 0 is the lowest subcarrier, index N//2 is DC). Do not
+    fftshift: the array is not in FFT bin order, so shifting it splits a
+    contiguous spectrum and welds the two outer edges together. Measured on an
+    80 MHz capture, that injects a 5.5 dB discontinuity at the seam where the
+    largest genuine bin-to-bin step is 0.34 dB, and relabels DC as bin -N//2.
+    """
     path = Path(path)
     reader = FeitCSIBeamformReader()
 
     if interpolate:
         _upstream = reader.interpolate
-        reader.interpolate = lambda csi: _mimo_safe_interpolate(_upstream, csi)
+        reader.interpolate = lambda csi: mimo_safe_interpolate(_upstream, csi)
 
     csi_data = reader.read_file(
         str(path),
@@ -91,10 +99,6 @@ def load_capture(
 
     amplitude = np.atleast_2d(amplitude)
     phase = np.atleast_2d(phase)
-
-    if fftshift and amplitude.shape[1] > 0:
-        amplitude = np.fft.fftshift(amplitude, axes=1)
-        phase = np.fft.fftshift(phase, axes=1)
 
     bandwidth = str(csi_data.bandwidth) if csi_data.bandwidth is not None else "unknown"
     chipset = str(csi_data.chipset) if csi_data.chipset else "unknown"
