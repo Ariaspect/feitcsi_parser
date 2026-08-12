@@ -82,6 +82,8 @@ def snapshot(
 
     amp_finite = window.amplitude[np.isfinite(window.amplitude)]
     phase_finite = window.phase[np.isfinite(window.phase)]
+    ratio_amp_finite = window.ratio_amplitude[np.isfinite(window.ratio_amplitude)]
+    ratio_phase_finite = window.ratio_phase[np.isfinite(window.ratio_phase)]
 
     return {
         "filename": window.filename,
@@ -93,10 +95,16 @@ def snapshot(
         "time_seconds": window.time_seconds.tolist(),
         "amplitude": window.amplitude.tolist(),
         "phase": window.phase.tolist(),
+        "ratio_amplitude": window.ratio_amplitude.tolist(),
+        "ratio_phase": window.ratio_phase.tolist(),
         "amp_min": float(np.nanmin(amp_finite)) if amp_finite.size else 0.0,
         "amp_max": float(np.nanmax(amp_finite)) if amp_finite.size else 1.0,
         "phase_min": float(np.nanmin(phase_finite)) if phase_finite.size else -np.pi,
         "phase_max": float(np.nanmax(phase_finite)) if phase_finite.size else np.pi,
+        "ratio_amp_min": float(np.nanmin(ratio_amp_finite)) if ratio_amp_finite.size else 0.0,
+        "ratio_amp_max": float(np.nanmax(ratio_amp_finite)) if ratio_amp_finite.size else 1.0,
+        "ratio_phase_min": float(np.nanmin(ratio_phase_finite)) if ratio_phase_finite.size else -np.pi,
+        "ratio_phase_max": float(np.nanmax(ratio_phase_finite)) if ratio_phase_finite.size else np.pi,
     }
 
 
@@ -193,8 +201,8 @@ def tile(
     cannot know is how far the capture has grown since. Returning it here lets
     a live view track the newest packet without a second /api/meta round trip.
     """
-    if metric not in ("amplitude", "phase"):
-        raise HTTPException(status_code=400, detail="metric must be 'amplitude' or 'phase'")
+    if metric not in ("amplitude", "phase", "csi_ratio_amplitude", "csi_ratio_phase"):
+        raise HTTPException(status_code=400, detail="metric must be 'amplitude', 'phase', 'csi_ratio_amplitude', or 'csi_ratio_phase'")
 
     p = resolve_capture_path(path)
 

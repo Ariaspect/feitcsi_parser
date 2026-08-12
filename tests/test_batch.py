@@ -44,7 +44,7 @@ def reference():
 def test_decode_matches_load_capture(index: FrameIndex, reference) -> None:
     """Full batch decode matches CSIKit's whole-file parse within float32 tolerance."""
     all_ids = np.arange(index.count)
-    amp, phase = decode_frames(CAPTURE, index, all_ids, scaled=True, interpolate=True)
+    amp, phase, _, _ = decode_frames(CAPTURE, index, all_ids, scaled=True, interpolate=True)
 
     assert amp.shape == (index.count, index.num_subcarriers)
     assert phase.shape == (index.count, index.num_subcarriers)
@@ -53,6 +53,28 @@ def test_decode_matches_load_capture(index: FrameIndex, reference) -> None:
 
     assert_matrices_close(amp, reference.amplitude)
     assert_matrices_close(phase, reference.phase)
+
+
+def test_ratio_matches_load_capture(index: FrameIndex, reference) -> None:
+    """Batch CSI ratio decode matches load_capture's ratio within float32 tolerance."""
+    all_ids = np.arange(index.count)
+    _, _, ratio_amp, ratio_phase = decode_frames(CAPTURE, index, all_ids)
+
+    assert ratio_amp.shape == (index.count, index.num_subcarriers)
+    assert ratio_phase.shape == (index.count, index.num_subcarriers)
+    assert ratio_amp.dtype == np.float32
+    assert ratio_phase.dtype == np.float32
+
+    assert_matrices_close(ratio_amp, reference.ratio_amplitude)
+
+    # Phase wraps at ±π; at the seam, batch and load_capture can flip sign
+    # (differ by 2π) due to floating-point reconstruction order. exp(1j*x)
+    # is invariant to this flip, so compare via the complex exponential.
+    np.testing.assert_allclose(
+        np.exp(1j * ratio_phase.astype(np.float64)),
+        np.exp(1j * reference.ratio_phase.astype(np.float64)),
+        rtol=1e-5, atol=1e-6,
+    )
 
 
 def test_decode_times_match(index: FrameIndex, reference) -> None:
@@ -65,7 +87,7 @@ def test_decode_times_match(index: FrameIndex, reference) -> None:
 def test_decode_unscaled_matches(index: FrameIndex) -> None:
     """Unscaled decode produces consistent (finite) output."""
     all_ids = np.arange(index.count)
-    amp, phase = decode_frames(
+    amp, phase, _, _ = decode_frames(
         CAPTURE, index, all_ids, scaled=False, interpolate=True
     )
     assert amp.dtype == np.float32
@@ -78,7 +100,7 @@ def test_decode_unscaled_matches(index: FrameIndex) -> None:
 def test_decode_no_interpolation(index: FrameIndex) -> None:
     """Decode without interpolation still produces valid output."""
     all_ids = np.arange(index.count)
-    amp, phase = decode_frames(
+    amp, phase, _, _ = decode_frames(
         CAPTURE, index, all_ids, scaled=True, interpolate=False
     )
     assert amp.shape == (index.count, index.num_subcarriers)
@@ -93,11 +115,11 @@ def test_decode_no_interpolation(index: FrameIndex) -> None:
 def test_strided_selection_matches_full(index: FrameIndex) -> None:
     """A non-contiguous frame_ids selection equals the same rows of a full decode."""
     all_ids = np.arange(index.count)
-    amp_full, phase_full = decode_frames(CAPTURE, index, all_ids)
+    amp_full, phase_full, _, _ = decode_frames(CAPTURE, index, all_ids)
 
     # Strided selection: every 7th frame.
     strided = np.arange(0, index.count, 7)
-    amp_strided, phase_strided = decode_frames(CAPTURE, index, strided)
+    amp_strided, phase_strided, _, _ = decode_frames(CAPTURE, index, strided)
 
     assert amp_strided.shape == (len(strided), index.num_subcarriers)
     np.testing.assert_allclose(
@@ -111,11 +133,11 @@ def test_strided_selection_matches_full(index: FrameIndex) -> None:
 def test_arbitrary_selection_matches_full(index: FrameIndex) -> None:
     """An arbitrary (unsorted, non-contiguous) selection matches full decode rows."""
     all_ids = np.arange(index.count)
-    amp_full, phase_full = decode_frames(CAPTURE, index, all_ids)
+    amp_full, phase_full, _, _ = decode_frames(CAPTURE, index, all_ids)
 
     rng = np.random.default_rng(42)
     picks = rng.choice(index.count, size=50, replace=False)
-    amp_pick, phase_pick = decode_frames(CAPTURE, index, picks)
+    amp_pick, phase_pick, _, _ = decode_frames(CAPTURE, index, picks)
 
     np.testing.assert_allclose(
         amp_pick, amp_full[picks], rtol=1e-6, atol=1e-7
@@ -127,14 +149,14 @@ def test_arbitrary_selection_matches_full(index: FrameIndex) -> None:
 
 def test_single_frame_decode(index: FrameIndex) -> None:
     """A single-frame selection produces one row."""
-    amp, phase = decode_frames(CAPTURE, index, np.array([42]))
+    amp, phase, _, _ = decode_frames(CAPTURE, index, np.array([42]))
     assert amp.shape == (1, index.num_subcarriers)
     assert phase.shape == (1, index.num_subcarriers)
 
 
 def test_empty_selection(index: FrameIndex) -> None:
     """An empty frame_ids selection returns empty arrays."""
-    amp, phase = decode_frames(CAPTURE, index, np.array([], dtype=np.int64))
+    amp, phase, _, _ = decode_frames(CAPTURE, index, np.array([], dtype=np.int64))
     assert amp.shape == (0, index.num_subcarriers)
     assert phase.shape == (0, index.num_subcarriers)
     assert amp.dtype == np.float32
@@ -152,7 +174,7 @@ def test_decode_mixed_geometry_does_not_raise(
     """Interleaved 2x1/2x2 frames decode without the varying-csi_length error."""
     idx = FrameIndex(mixed_geometry_file)
     all_ids = np.arange(idx.count)
-    amp, phase = decode_frames(mixed_geometry_file, idx, all_ids)
+    amp, phase, _, _ = decode_frames(mixed_geometry_file, idx, all_ids)
 
     assert amp.shape == (6, idx.num_subcarriers)
     assert phase.shape == (6, idx.num_subcarriers)
@@ -173,11 +195,11 @@ def test_decode_mixed_geometry_matches_grouped(
 
     ids_2x1 = np.array([0, 1, 3, 4, 5])
     ids_2x2 = np.array([2])
-    amp_2x1, phase_2x1 = decode_frames(mixed_geometry_file, idx, ids_2x1)
-    amp_2x2, phase_2x2 = decode_frames(mixed_geometry_file, idx, ids_2x2)
+    amp_2x1, phase_2x1, _, _ = decode_frames(mixed_geometry_file, idx, ids_2x1)
+    amp_2x2, phase_2x2, _, _ = decode_frames(mixed_geometry_file, idx, ids_2x2)
 
     all_ids = np.arange(6)
-    amp_all, phase_all = decode_frames(mixed_geometry_file, idx, all_ids)
+    amp_all, phase_all, _, _ = decode_frames(mixed_geometry_file, idx, all_ids)
 
     np.testing.assert_allclose(amp_all[ids_2x1], amp_2x1, rtol=1e-6, atol=1e-7)
     np.testing.assert_allclose(phase_all[ids_2x1], phase_2x1, rtol=1e-6, atol=1e-7)

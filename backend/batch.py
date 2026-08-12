@@ -195,11 +195,23 @@ def _decode_chunk(
         _batch_scale(matrix, index, frame_ids, num_sc)
 
     # --- Extract first stream and compute amplitude/phase ---
-    stream = matrix[:, :, 0, 0]  # (n, num_sc)
-    amplitude = db(np.abs(stream)).astype(np.float32)
-    phase = np.angle(stream).astype(np.float32)
+    stream0 = matrix[:, :, 0, 0]  # (n, num_sc) — rx0, tx0
+    amplitude = db(np.abs(stream0)).astype(np.float32)
+    phase = np.angle(stream0).astype(np.float32)
 
-    return amplitude, phase
+    # --- CSI ratio: rx1/rx0 (same tx), complex division ---
+    # Requires num_rx >= 2. Frames with only 1 rx antenna get NaN — the MIMO
+    # filter lets users isolate 2x1/2x2, so this is the natural fallback.
+    if num_rx >= 2:
+        stream1 = matrix[:, :, 1, 0]  # rx1, tx0
+        ratio = stream1 / stream0
+        ratio_amplitude = db(np.abs(ratio)).astype(np.float32)
+        ratio_phase = np.angle(ratio).astype(np.float32)
+    else:
+        ratio_amplitude = np.full((n, num_sc), np.nan, dtype=np.float32)
+        ratio_phase = np.full((n, num_sc), np.nan, dtype=np.float32)
+
+    return amplitude, phase, ratio_amplitude, ratio_phase
 
 
 def decode_frames(
@@ -209,13 +221,14 @@ def decode_frames(
     *,
     scaled: bool = True,
     interpolate: bool = True,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Decode a selection of frames in one vectorised pass.
 
-    Returns (amplitude, phase), both float32, shape (len(frame_ids), num_subcarriers).
-    Processes internally in chunks of ``CHUNK_SIZE`` frames to keep peak memory
-    bounded. When ``frame_ids`` is a contiguous run under a uniform stride, the
-    mmap is sliced directly rather than gathering row by row.
+    Returns (amplitude, phase, ratio_amplitude, ratio_phase), all float32,
+    shape (len(frame_ids), num_subcarriers). Processes internally in chunks
+    of ``CHUNK_SIZE`` frames to keep peak memory bounded. When ``frame_ids``
+    is a contiguous run under a uniform stride, the mmap is sliced directly
+    rather than gathering row by row.
 
     Frames with varying (csi_length, num_rx, num_tx) are grouped by geometry
     and each group is decoded independently through ``_decode_chunk``. Results
@@ -231,6 +244,8 @@ def decode_frames(
         return (
             np.empty((0, num_sc), dtype=np.float32),
             np.empty((0, num_sc), dtype=np.float32),
+            np.empty((0, num_sc), dtype=np.float32),
+            np.empty((0, num_sc), dtype=np.float32),
         )
 
     csi_lengths = index.csi_lengths[frame_ids]
@@ -242,6 +257,8 @@ def decode_frames(
 
     amp_out = np.empty((n, num_sc), dtype=np.float32)
     phase_out = np.empty((n, num_sc), dtype=np.float32)
+    ratio_amp_out = np.empty((n, num_sc), dtype=np.float32)
+    ratio_phase_out = np.empty((n, num_sc), dtype=np.float32)
 
     for gi in range(len(unique_keys)):
         mask = inverse == gi
@@ -250,7 +267,7 @@ def decode_frames(
         cl, nrx, ntx = int(cl), int(nrx), int(ntx)
 
         if len(group_ids) <= CHUNK_SIZE:
-            amp_g, phase_g = _decode_chunk(
+            amp_g, phase_g, ratio_amp_g, ratio_phase_g = _decode_chunk(
                 path, index, group_ids, cl, num_sc, nrx, ntx,
                 scaled=scaled, interpolate=interpolate,
                 contiguous_fast=index.stride is not None and _is_contiguous(group_ids),
@@ -258,19 +275,27 @@ def decode_frames(
         else:
             amps_g: list[np.ndarray] = []
             phases_g: list[np.ndarray] = []
+            ratio_amps_g: list[np.ndarray] = []
+            ratio_phases_g: list[np.ndarray] = []
             for s in range(0, len(group_ids), CHUNK_SIZE):
                 chunk_ids = group_ids[s : s + CHUNK_SIZE]
-                a, p = _decode_chunk(
+                a, p, ra, rp = _decode_chunk(
                     path, index, chunk_ids, cl, num_sc, nrx, ntx,
                     scaled=scaled, interpolate=interpolate,
                     contiguous_fast=index.stride is not None and _is_contiguous(chunk_ids),
                 )
                 amps_g.append(a)
                 phases_g.append(p)
+                ratio_amps_g.append(ra)
+                ratio_phases_g.append(rp)
             amp_g = np.concatenate(amps_g)
             phase_g = np.concatenate(phases_g)
+            ratio_amp_g = np.concatenate(ratio_amps_g)
+            ratio_phase_g = np.concatenate(ratio_phases_g)
 
         amp_out[mask] = amp_g
         phase_out[mask] = phase_g
+        ratio_amp_out[mask] = ratio_amp_g
+        ratio_phase_out[mask] = ratio_phase_g
 
-    return amp_out, phase_out
+    return amp_out, phase_out, ratio_amp_out, ratio_phase_out

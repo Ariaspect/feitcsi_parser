@@ -4,7 +4,7 @@ import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from "d3-zoom
 import { scaleLinear, type ScaleLinear } from "d3-scale";
 import { VIRIDIS, buildLut } from "./colormap";
 import { renderTileToImageData, subcarrierSourceRect, tileSourceRect } from "./render";
-import { fetchTile, type Tile } from "./api";
+import { fetchTile, type Tile, type Metric } from "./api";
 import { type TimeLink } from "./timelink";
 import {
   advanceView,
@@ -17,10 +17,8 @@ import {
 } from "./view";
 
 interface HeatmapProps {
-  /** Path to the .dat file, used for /api/tile requests. */
   path: string;
-  metric: "amplitude" | "phase";
-  /** Basename from /api/meta — drives capture identity (shouldResetView). */
+  metric: Metric;
   filename: string;
   numSubcarriers: number;
   captureTMin: number;
@@ -69,7 +67,7 @@ interface Geometry {
  * mount-once effect's draw/listeners never close over stale props. */
 interface PropsMirror {
   path: string;
-  metric: "amplitude" | "phase";
+  metric: Metric;
   filename: string;
   numSubcarriers: number;
   halfN: number;
@@ -359,7 +357,8 @@ export function Heatmap({
       // lock unset, and NaN bounds would send lutIndex to NaN, index the LUT
       // with it, and paint the entire plot transparent with "NaN" on the
       // colorbar -- a blank screen with nothing to explain it.
-      const locked = props.metric === "amplitude" ? ampScaleRef.current : null;
+      const isAmpLike = props.metric === "amplitude" || props.metric === "csi_ratio_amplitude";
+      const locked = isAmpLike ? ampScaleRef.current : null;
       const min = locked ? locked.lo : props.minValue ?? tile.vmin;
       const max = locked ? locked.hi : props.maxValue ?? tile.vmax;
 
@@ -694,7 +693,7 @@ export function Heatmap({
         // Prefer percentile bounds (robust to outliers); fall back to extrema
         // if the percentile band is degenerate (pHigh === pLow); leave unset
         // if both are degenerate — draw() then uses the current tile's vmin/vmax.
-        if (props.metric === "amplitude" && ampScaleRef.current === null) {
+        if ((props.metric === "amplitude" || props.metric === "csi_ratio_amplitude") && ampScaleRef.current === null) {
           if (tile.pHigh > tile.pLow) {
             ampScaleRef.current = { lo: tile.pLow, hi: tile.pHigh };
           } else if (tile.vmax > tile.vmin) {

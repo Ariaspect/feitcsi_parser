@@ -202,6 +202,39 @@ export function App() {
             mimo={mimo}
             sourceMac={sourceMac}
           />
+          <div style={{ height: "1.5rem" }} />
+          <Heatmap
+            path={path}
+            metric="csi_ratio_amplitude"
+            filename={meta.filename}
+            numSubcarriers={meta.num_subcarriers}
+            captureTMin={meta.t_min}
+            captureTMax={meta.t_max}
+            title="FeitCSI — CSI ratio amplitude (rx1/rx0)"
+            colorLabel="Ratio amp (dB)"
+            height={400}
+            timeLink={timeLink}
+            mimo={mimo}
+            sourceMac={sourceMac}
+          />
+          <div style={{ height: "1.5rem" }} />
+          <Heatmap
+            path={path}
+            metric="csi_ratio_phase"
+            filename={meta.filename}
+            numSubcarriers={meta.num_subcarriers}
+            captureTMin={meta.t_min}
+            captureTMax={meta.t_max}
+            minValue={-Math.PI}
+            maxValue={Math.PI}
+            title="FeitCSI — CSI ratio phase (rx1/rx0)"
+            colorLabel="Ratio phase (rad)"
+            height={400}
+            palette={TWILIGHT}
+            timeLink={timeLink}
+            mimo={mimo}
+            sourceMac={sourceMac}
+          />
         </>
       ) : (
         !error && (

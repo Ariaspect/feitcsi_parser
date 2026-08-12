@@ -93,6 +93,8 @@ class CaptureStream:
         self._index = FrameIndex(self.path)
         self._amplitude: deque[np.ndarray] = deque(maxlen=max_frames)
         self._phase: deque[np.ndarray] = deque(maxlen=max_frames)
+        self._ratio_amplitude: deque[np.ndarray] = deque(maxlen=max_frames)
+        self._ratio_phase: deque[np.ndarray] = deque(maxlen=max_frames)
         self._times: deque[float] = deque(maxlen=max_frames)
         self._decoded_count = 0
         self._num_subcarriers = self._index.num_subcarriers
@@ -115,6 +117,8 @@ class CaptureStream:
         if self._index.count < old_decoded:
             self._amplitude.clear()
             self._phase.clear()
+            self._ratio_amplitude.clear()
+            self._ratio_phase.clear()
             self._times.clear()
             self._bandwidth = None
             self._decoded_count = 0
@@ -135,7 +139,7 @@ class CaptureStream:
             start = end - self.max_frames
 
         frame_ids = np.arange(start, end)
-        amp, phase = decode_frames(
+        amp, phase, ratio_amp, ratio_phase = decode_frames(
             self.path,
             self._index,
             frame_ids,
@@ -146,6 +150,8 @@ class CaptureStream:
         for i in range(len(frame_ids)):
             self._amplitude.append(amp[i])
             self._phase.append(phase[i])
+            self._ratio_amplitude.append(ratio_amp[i])
+            self._ratio_phase.append(ratio_phase[i])
             self._times.append(float(times[i]))
 
         self._decoded_count = end
@@ -162,6 +168,8 @@ class CaptureStream:
                 return FeitCSICapture(
                     amplitude=empty,
                     phase=empty,
+                    ratio_amplitude=empty,
+                    ratio_phase=empty,
                     time_seconds=np.empty(0, dtype=float),
                     bandwidth=self._bandwidth or "unknown",
                     chipset="Intel AX2xx",
@@ -173,6 +181,8 @@ class CaptureStream:
             start = count - take
             amplitude = np.stack(list(self._amplitude)[start:])
             phase = np.stack(list(self._phase)[start:])
+            ratio_amplitude = np.stack(list(self._ratio_amplitude)[start:])
+            ratio_phase = np.stack(list(self._ratio_phase)[start:])
             times = np.fromiter(
                 list(self._times)[start:], dtype=float, count=take
             )
@@ -180,6 +190,8 @@ class CaptureStream:
             return FeitCSICapture(
                 amplitude=amplitude,
                 phase=phase,
+                ratio_amplitude=ratio_amplitude,
+                ratio_phase=ratio_phase,
                 time_seconds=times,
                 bandwidth=self._bandwidth or "unknown",
                 chipset="Intel AX2xx",

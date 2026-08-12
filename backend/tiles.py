@@ -162,15 +162,20 @@ def _decode_block_cached(
     block_start = block_idx * BLOCK_SIZE
     block_end = min(block_start + BLOCK_SIZE, index.count)
     block_ids = np.arange(block_start, block_end)
-    amp, phase = decode_frames(path, index, block_ids)
+    amp, phase, ratio_amp, ratio_phase = decode_frames(path, index, block_ids)
 
-    # Cache both metrics so a subsequent request for the other one hits.
-    _block_cache.put((str(path), "amplitude", block_idx, file_size), amp)
-    _block_cache.put((str(path), "phase", block_idx, file_size), phase)
+    _metrics = {
+        "amplitude": amp,
+        "phase": phase,
+        "csi_ratio_amplitude": ratio_amp,
+        "csi_ratio_phase": ratio_phase,
+    }
+    for m, arr in _metrics.items():
+        _block_cache.put((str(path), m, block_idx, file_size), arr)
     with _block_cache._lock:
         _block_cache.frames_decoded += len(block_ids)
 
-    return amp if metric == "amplitude" else phase
+    return _metrics[metric]
 
 
 def _decode_via_blocks(
@@ -302,8 +307,13 @@ def compute_tile(
     elif exact and not filtered:
         data = _decode_via_blocks(path, index, frame_ids, metric, file_size)
     else:
-        amp, phase = decode_frames(path, index, frame_ids)
-        data = amp if metric == "amplitude" else phase
+        amp, phase, ratio_amp, ratio_phase = decode_frames(path, index, frame_ids)
+        data = {
+            "amplitude": amp,
+            "phase": phase,
+            "csi_ratio_amplitude": ratio_amp,
+            "csi_ratio_phase": ratio_phase,
+        }[metric]
 
     decoded_times = times[frame_ids] if n_decoded > 0 else np.zeros(0)
     span = t1 - t0
@@ -321,7 +331,7 @@ def compute_tile(
             e = int(col_ends[x])
             if e <= s:
                 continue
-            if metric == "amplitude":
+            if metric in ("amplitude", "csi_ratio_amplitude"):
                 grid[:, x] = data[s:e].max(axis=0)
             else:
                 centre = t0 + (x + 0.5) / width * span

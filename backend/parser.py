@@ -10,6 +10,7 @@ import numpy as np
 
 from CSIKit.reader import FeitCSIBeamformReader
 from CSIKit.util import csitools
+from CSIKit.util.matlab import db
 
 
 def mimo_safe_interpolate(upstream: Callable[[dict], dict], csi: dict) -> dict:
@@ -40,6 +41,8 @@ def mimo_safe_interpolate(upstream: Callable[[dict], dict], csi: dict) -> dict:
 class FeitCSICapture:
     amplitude: np.ndarray
     phase: np.ndarray
+    ratio_amplitude: np.ndarray
+    ratio_phase: np.ndarray
     time_seconds: np.ndarray
     bandwidth: str
     chipset: str
@@ -81,24 +84,41 @@ def load_capture(
         interpolate=interpolate,
     )
 
-    amplitude, _, _ = csitools.get_CSI(
-        csi_data, metric="amplitude", extract_as_dBm=True, squeeze_output=True
+    # squeeze_output=False keeps (frames, subcarriers, rx, tx) so we can
+    # access rx1 for the CSI ratio. The existing code squeezed then took
+    # [..., 0, 0]; indexing the unsqueezed array is equivalent for rx0tx0.
+    amplitude_full, _, _ = csitools.get_CSI(
+        csi_data, metric="amplitude", extract_as_dBm=True, squeeze_output=False
     )
-    phase, _, _ = csitools.get_CSI(
-        csi_data, metric="phase", extract_as_dBm=False, squeeze_output=True
+    phase_full, _, _ = csitools.get_CSI(
+        csi_data, metric="phase", extract_as_dBm=False, squeeze_output=False
     )
     time_seconds = np.asarray(csi_data.timestamps, dtype=float)
 
-    # csitools.get_CSI returns (frames, subcarriers, rx, tx). squeeze_output
-    # only drops rx/tx axes for SISO. Force SISO slice for MIMO captures so
-    # downstream code can assume 2D (frames, subcarriers).
-    while amplitude.ndim > 2:
-        amplitude = amplitude[..., 0]
-    while phase.ndim > 2:
-        phase = phase[..., 0]
+    amplitude = amplitude_full[..., 0, 0]
+    phase = phase_full[..., 0, 0]
+
+    # CSI ratio: rx1/rx0 (same tx0). Reconstruct complex CSI from amplitude
+    # (dB, 20*log10) and phase, then divide — matching batch.py's complex
+    # division so the ±π phase wrapping is identical across both paths.
+    # 10**(dB/20) inverts db(|csi|)=20*log10(|csi|) back to |csi|. dbinv
+    # cannot be used here: it is 10^(x/10), the inverse of 10*log10 (power),
+    # not 20*log10 (amplitude).
+    num_rx = amplitude_full.shape[-2] if amplitude_full.ndim >= 4 else 1
+    if num_rx >= 2:
+        csi_rx0 = 10 ** (amplitude_full[..., 0, 0] / 20) * np.exp(1j * phase_full[..., 0, 0])
+        csi_rx1 = 10 ** (amplitude_full[..., 1, 0] / 20) * np.exp(1j * phase_full[..., 1, 0])
+        ratio = csi_rx1 / csi_rx0
+        ratio_amplitude = db(np.abs(ratio))
+        ratio_phase = np.angle(ratio)
+    else:
+        ratio_amplitude = np.full_like(amplitude, np.nan)
+        ratio_phase = np.full_like(phase, np.nan)
 
     amplitude = np.atleast_2d(amplitude)
     phase = np.atleast_2d(phase)
+    ratio_amplitude = np.atleast_2d(ratio_amplitude)
+    ratio_phase = np.atleast_2d(ratio_phase)
 
     bandwidth = str(csi_data.bandwidth) if csi_data.bandwidth is not None else "unknown"
     chipset = str(csi_data.chipset) if csi_data.chipset else "unknown"
@@ -106,6 +126,8 @@ def load_capture(
     return FeitCSICapture(
         amplitude=amplitude,
         phase=phase,
+        ratio_amplitude=ratio_amplitude,
+        ratio_phase=ratio_phase,
         time_seconds=time_seconds,
         bandwidth=bandwidth,
         chipset=chipset,
@@ -125,6 +147,8 @@ def tail_window(
 
     amp = capture.amplitude
     phase = capture.phase
+    ratio_amp = capture.ratio_amplitude
+    ratio_phase = capture.ratio_phase
     t = capture.time_seconds
 
     if start_time is not None and t.size > 0:
@@ -133,6 +157,8 @@ def tail_window(
             return FeitCSICapture(
                 amplitude=amp[0:0],
                 phase=phase[0:0],
+                ratio_amplitude=ratio_amp[0:0],
+                ratio_phase=ratio_phase[0:0],
                 time_seconds=t[0:0],
                 bandwidth=capture.bandwidth,
                 chipset=capture.chipset,
@@ -141,16 +167,22 @@ def tail_window(
             )
         amp = amp[mask]
         phase = phase[mask]
+        ratio_amp = ratio_amp[mask]
+        ratio_phase = ratio_phase[mask]
         t = t[mask]
 
     if max_packets > 0 and amp.shape[0] > max_packets:
         amp = amp[-max_packets:]
         phase = phase[-max_packets:]
+        ratio_amp = ratio_amp[-max_packets:]
+        ratio_phase = ratio_phase[-max_packets:]
         t = t[-max_packets:]
 
     return FeitCSICapture(
         amplitude=amp,
         phase=phase,
+        ratio_amplitude=ratio_amp,
+        ratio_phase=ratio_phase,
         time_seconds=t,
         bandwidth=capture.bandwidth,
         chipset=capture.chipset,

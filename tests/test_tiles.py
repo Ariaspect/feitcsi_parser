@@ -95,7 +95,7 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
     assert meta["exact"] is True
 
     all_ids = np.arange(index.count)
-    amp, _ = decode_frames(CAPTURE, index, all_ids)
+    amp, _, _, _ = decode_frames(CAPTURE, index, all_ids)
 
     # Independently compute the expected grid using the same column logic.
     times = index.times
@@ -154,7 +154,7 @@ def test_max_hold_two_frames_one_column(index: FrameIndex) -> None:
     t1 = float(index.times[11]) + (float(index.times[12]) - float(index.times[11])) / 2
     grid, meta = compute_tile(CAPTURE, t0, t1, 1, "amplitude")
 
-    amp, _ = decode_frames(CAPTURE, index, np.array([10, 11]))
+    amp, _, _, _ = decode_frames(CAPTURE, index, np.array([10, 11]))
     expected = np.max(amp, axis=0)[::-1].astype(np.float32).reshape(-1, 1)
 
     _assert_grids_equal(grid, expected)
@@ -180,7 +180,7 @@ def test_phase_nearest_to_centre(index: FrameIndex) -> None:
     dists = np.abs(index.times[candidates] - centre)
     nearest = int(candidates[np.argmin(dists)])
 
-    _, phase = decode_frames(CAPTURE, index, np.array([nearest]))
+    _, phase, _, _ = decode_frames(CAPTURE, index, np.array([nearest]))
     expected = phase[0][::-1].astype(np.float32).reshape(-1, 1)
 
     _assert_grids_equal(grid, expected)
@@ -212,7 +212,7 @@ def test_neg_inf_preserved(index: FrameIndex) -> None:
     grid, _ = compute_tile(CAPTURE, t0, t1, width, "amplitude")
 
     all_ids = np.arange(index.count)
-    amp, _ = decode_frames(CAPTURE, index, all_ids)
+    amp, _, _, _ = decode_frames(CAPTURE, index, all_ids)
 
     # If the decoded data has -inf, the tile must have -inf at the
     # corresponding positions (for single-frame columns).
@@ -249,7 +249,7 @@ def test_row_zero_is_highest_subcarrier(index: FrameIndex) -> None:
     t1 = float(index.times[5]) + 1e-9  # exactly one frame
     grid, _ = compute_tile(CAPTURE, t0, t1, 1, "amplitude")
 
-    amp, _ = decode_frames(CAPTURE, index, np.array([5]))
+    amp, _, _, _ = decode_frames(CAPTURE, index, np.array([5]))
 
     # Row 0 should be subcarrier num_sc - 1 (highest).
     np.testing.assert_allclose(grid[0, 0], amp[0, -1], rtol=1e-5)
@@ -379,7 +379,7 @@ def test_truncation_invalidates_cache(index: FrameIndex, raw: bytes) -> None:
         # Decode the truncated file independently for comparison.
         trunc_ids = np.arange(trunc_idx.count)
         if len(trunc_ids) > 0:
-            amp_trunc, _ = decode_frames(target, trunc_idx, trunc_ids)
+            amp_trunc, _, _, _ = decode_frames(target, trunc_idx, trunc_ids)
             # The grid should not equal the full-capture grid.
             assert not np.array_equal(
                 np.isfinite(grid_trunc), np.isfinite(grid_full)
@@ -542,7 +542,7 @@ def test_final_frame_reaches_the_last_column(index: FrameIndex) -> None:
     everywhere, and equals it exactly where the frame is the maximum.
     """
     t0, t1 = _full_range(index)
-    amp, _ = decode_frames(CAPTURE, index, np.arange(index.count))
+    amp, _, _, _ = decode_frames(CAPTURE, index, np.arange(index.count))
     final = amp[-1]
 
     for width in (index.count, 800, 137, 1):
@@ -560,7 +560,7 @@ def test_final_frame_reaches_the_last_column(index: FrameIndex) -> None:
 def test_frame_at_t0_is_in_range(index: FrameIndex) -> None:
     """The left edge is closed too -- the first frame is not dropped."""
     t0, t1 = _full_range(index)
-    amp, _ = decode_frames(CAPTURE, index, np.arange(index.count))
+    amp, _, _, _ = decode_frames(CAPTURE, index, np.arange(index.count))
     grid, _ = compute_tile(CAPTURE, t0, t1, index.count, "amplitude")
     assert np.all(grid[:, 0][::-1] >= amp[0])
 
@@ -846,7 +846,7 @@ def test_filled_column_carries_nearest_frame(
 
     # Decode that frame independently and compare.  The grid is row-flipped
     # (row 0 = highest subcarrier), so undo the flip before comparing.
-    amp, _ = decode_frames(path, idx, np.array([nearest_frame]))
+    amp, _, _, _ = decode_frames(path, idx, np.array([nearest_frame]))
     np.testing.assert_array_equal(grid[:, col][::-1], amp[0])
 
 

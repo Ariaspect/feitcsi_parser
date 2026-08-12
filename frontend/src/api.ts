@@ -67,12 +67,14 @@ export interface Tile {
   pHigh: number; // 99th percentile — amplitude locks to this, not vmin/vmax
 }
 
+export type Metric = "amplitude" | "phase" | "csi_ratio_amplitude" | "csi_ratio_phase";
+
 export async function fetchTile(
   path: string,
   t0: number,
   t1: number,
   width: number,
-  metric: "amplitude" | "phase",
+  metric: Metric,
   signal?: AbortSignal,
   mimo?: string | null,
   sourceMac?: string | null,
