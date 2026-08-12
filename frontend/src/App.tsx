@@ -120,6 +120,7 @@ export function App() {
       {snapshot && snapshot.window_packets > 0 ? (
         <>
           <Heatmap
+            filename={snapshot.filename}
             timeSeconds={snapshot.time_seconds}
             matrix={snapshot.amplitude}
             subcarrierCount={snapshot.num_subcarriers}
@@ -131,6 +132,7 @@ export function App() {
           />
           <div style={{ height: "1.5rem" }} />
           <Heatmap
+            filename={snapshot.filename}
             timeSeconds={snapshot.time_seconds}
             matrix={snapshot.phase}
             subcarrierCount={snapshot.num_subcarriers}
@@ -138,6 +140,7 @@ export function App() {
             maxValue={snapshot.phase_max}
             title="FeitCSI — phase"
             colorLabel="Phase (rad)"
+            aggregation="nearest"
             height={400}
           />
         </>
