@@ -122,20 +122,6 @@ class CaptureStream:
         start = self._decoded_count
         end = self._index.count
 
-        # Geometry change: new frames have a different csi_length. Clear the
-        # buffer so the newer geometry wins, matching the old per-frame behavior.
-        if end > start and start > 0:
-            old_cl = int(self._index.csi_lengths[start - 1])
-            new_cl = int(self._index.csi_lengths[start])
-            if old_cl != new_cl:
-                self._amplitude.clear()
-                self._phase.clear()
-                self._times.clear()
-                self._bandwidth = None
-                self._decoded_count = 0
-                start = 0
-                end = self._index.count
-
         if end <= start:
             return
 

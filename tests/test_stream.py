@@ -282,3 +282,22 @@ def test_capped_window_matches_the_reference_tail(reference) -> None:
     np.testing.assert_allclose(
         snap.time_seconds, reference.time_seconds[-25:], rtol=1e-12, atol=1e-12
     )
+
+
+def test_geometry_transition_does_not_clear_buffer(
+    mixed_geometry_file: Path,
+) -> None:
+    """An interleaved 2x2 frame must not clear the decoded buffer.
+
+    The old code cleared the buffer whenever consecutive decoded frames had
+    different csi_lengths. With hundreds of transitions in a real capture,
+    every poll landing on a 2x2 frame would clear and re-decode everything.
+    The output shape (num_sc,) is constant per frame, so no clear is needed.
+    """
+    stream = CaptureStream(mixed_geometry_file)
+    stream.update()
+
+    assert stream.total_frames == 6
+    snap = stream.snapshot(max_packets=0)
+    assert snap.amplitude.shape == (6, snap.num_subcarriers)
+    assert np.all(np.isfinite(snap.amplitude[2]))

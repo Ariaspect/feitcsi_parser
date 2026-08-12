@@ -168,6 +168,13 @@ class FrameIndex:
 
         mm._mmap.close()
 
+        # Verify geometry is constant; fall back if num_rx/num_tx vary. The
+        # fast path broadcasts the first frame's scalars to all frames, so a
+        # file with mixed 2x1/2x2 streams would be mislabelled.
+        if not (np.all(num_rx_arr == num_rx_arr[0]) and np.all(num_tx_arr == num_tx_arr[0])):
+            self._scan_sequential(size)
+            return
+
         offsets = np.arange(count, dtype=np.int64) * stride
         times = _compute_timestamps(ftm, mu)
 
@@ -186,6 +193,8 @@ class FrameIndex:
         self.num_subcarriers = int(num_sc_arr[0])
         self.num_rx = int(num_rx_arr[0])
         self.num_tx = int(num_tx_arr[0])
+        self.num_rx_arr = num_rx_arr
+        self.num_tx_arr = num_tx_arr
         self.bandwidth = channel_widths[0]
         self.stride = stride
         self._uniform = True
@@ -237,6 +246,8 @@ class FrameIndex:
         self.rssi_1 = np.array(rssi_list, dtype=np.int64)
         self.rate_flags = np.array(rate_flags_list, dtype=np.int64)
         self.csi_lengths = np.array(csi_lengths, dtype=np.int64)
+        self.num_rx_arr = np.array(num_rx_list, dtype=np.int64)
+        self.num_tx_arr = np.array(num_tx_list, dtype=np.int64)
         self.times = _compute_timestamps(self.ftm_clocks, self.mu_clocks)
 
         rate_formats, channel_widths = _decode_rate_flags(self.rate_flags)
@@ -267,6 +278,8 @@ class FrameIndex:
         self.mu_clocks = np.zeros(0, dtype=np.int64)
         self.rssi_1 = np.zeros(0, dtype=np.int64)
         self.rate_flags = np.zeros(0, dtype=np.int64)
+        self.num_rx_arr = np.zeros(0, dtype=np.int64)
+        self.num_tx_arr = np.zeros(0, dtype=np.int64)
         self.rate_formats = []
         self.channel_widths = []
         self.count = 0
@@ -360,6 +373,12 @@ class FrameIndex:
         self.rssi_1 = np.concatenate([self.rssi_1, rssi_new])
         self.rate_flags = np.concatenate([self.rate_flags, rate_flags_new])
         self.csi_lengths = np.concatenate([self.csi_lengths, csi_lengths_new])
+        self.num_rx_arr = np.concatenate([
+            self.num_rx_arr, np.full(new_count - lo, self.num_rx, dtype=np.int64)
+        ])
+        self.num_tx_arr = np.concatenate([
+            self.num_tx_arr, np.full(new_count - lo, self.num_tx, dtype=np.int64)
+        ])
         self.rate_formats.extend(rf_new)
         self.channel_widths.extend(cw_new)
         self.count = new_count
@@ -437,6 +456,8 @@ class FrameIndex:
         self.rssi_1 = np.concatenate([self.rssi_1, np.array(rssi_list, dtype=np.int64)])
         self.rate_flags = np.concatenate([self.rate_flags, np.array(rate_flags_list, dtype=np.int64)])
         self.csi_lengths = np.concatenate([self.csi_lengths, np.array(csi_lengths, dtype=np.int64)])
+        self.num_rx_arr = np.concatenate([self.num_rx_arr, np.array(num_rx_list, dtype=np.int64)])
+        self.num_tx_arr = np.concatenate([self.num_tx_arr, np.array(num_tx_list, dtype=np.int64)])
         self.rate_formats.extend(rf_new)
         self.channel_widths.extend(cw_new)
         self.count += len(offsets)

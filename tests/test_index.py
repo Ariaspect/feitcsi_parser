@@ -264,5 +264,49 @@ def test_empty_file_index() -> None:
         assert idx.times.shape == (0,)
         assert idx.num_subcarriers == 0
         assert idx.bandwidth == "unknown"
+        assert idx.num_rx_arr.shape == (0,)
+        assert idx.num_tx_arr.shape == (0,)
     finally:
         target.unlink(missing_ok=True)
+
+
+# ----------------------------------------------------------------------- #
+#  Per-frame geometry arrays                                              #
+# ----------------------------------------------------------------------- #
+
+
+def test_uniform_scan_exposes_geometry_arrays(index: FrameIndex) -> None:
+    """Uniform fast path exposes num_rx_arr / num_tx_arr (all-equal)."""
+    assert index._uniform is True
+    assert index.num_rx_arr.shape == (index.count,)
+    assert index.num_tx_arr.shape == (index.count,)
+    assert np.all(index.num_rx_arr == index.num_rx)
+    assert np.all(index.num_tx_arr == index.num_tx)
+
+
+def test_mixed_geometry_sequential_scan_exposes_per_frame_arrays(
+    mixed_geometry_file: Path,
+) -> None:
+    """A file with interleaved 2x1/2x2 frames records per-frame geometry.
+
+    The scalar num_rx/num_tx (from the first frame) cannot represent the
+    whole file. num_rx_arr / num_tx_arr must carry the per-frame truth so
+    the batch decoder can group by geometry.
+    """
+    idx = FrameIndex(mixed_geometry_file)
+    assert idx._uniform is False
+    assert idx.stride is None
+    assert idx.count == 6
+
+    assert idx.num_rx_arr.shape == (6,)
+    assert idx.num_tx_arr.shape == (6,)
+
+    expected_tx = np.array([1, 1, 2, 1, 1, 1], dtype=np.int64)
+    np.testing.assert_array_equal(idx.num_tx_arr, expected_tx)
+
+    expected_rx = np.full(6, idx.num_rx, dtype=np.int64)
+    np.testing.assert_array_equal(idx.num_rx_arr, expected_rx)
+
+    expected_cl = np.full(6, idx.csi_lengths[0], dtype=np.int64)
+    expected_cl[2] = idx.csi_lengths[0] * 2
+    np.testing.assert_array_equal(idx.csi_lengths, expected_cl)

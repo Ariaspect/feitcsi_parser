@@ -139,3 +139,47 @@ def test_empty_selection(index: FrameIndex) -> None:
     assert phase.shape == (0, index.num_subcarriers)
     assert amp.dtype == np.float32
     assert phase.dtype == np.float32
+
+
+# ----------------------------------------------------------------------- #
+#  Mixed-geometry decode (interleaved 2x1 / 2x2 frames)                   #
+# ----------------------------------------------------------------------- #
+
+
+def test_decode_mixed_geometry_does_not_raise(
+    mixed_geometry_file: Path,
+) -> None:
+    """Interleaved 2x1/2x2 frames decode without the varying-csi_length error."""
+    idx = FrameIndex(mixed_geometry_file)
+    all_ids = np.arange(idx.count)
+    amp, phase = decode_frames(mixed_geometry_file, idx, all_ids)
+
+    assert amp.shape == (6, idx.num_subcarriers)
+    assert phase.shape == (6, idx.num_subcarriers)
+    assert amp.dtype == np.float32
+    assert phase.dtype == np.float32
+
+
+def test_decode_mixed_geometry_matches_grouped(
+    mixed_geometry_file: Path,
+) -> None:
+    """Batch decode of mixed geometry matches per-group decode.
+
+    Decoding all 6 frames together must produce the same result as decoding
+    the 2x1 frames (0,1,3,4,5) and the 2x2 frame (2) separately. This proves
+    the group-by-geometry scatter preserves order and values.
+    """
+    idx = FrameIndex(mixed_geometry_file)
+
+    ids_2x1 = np.array([0, 1, 3, 4, 5])
+    ids_2x2 = np.array([2])
+    amp_2x1, phase_2x1 = decode_frames(mixed_geometry_file, idx, ids_2x1)
+    amp_2x2, phase_2x2 = decode_frames(mixed_geometry_file, idx, ids_2x2)
+
+    all_ids = np.arange(6)
+    amp_all, phase_all = decode_frames(mixed_geometry_file, idx, all_ids)
+
+    np.testing.assert_allclose(amp_all[ids_2x1], amp_2x1, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(phase_all[ids_2x1], phase_2x1, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(amp_all[ids_2x2], amp_2x2, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(phase_all[ids_2x2], phase_2x2, rtol=1e-6, atol=1e-7)

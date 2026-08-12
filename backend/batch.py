@@ -216,6 +216,11 @@ def decode_frames(
     Processes internally in chunks of ``CHUNK_SIZE`` frames to keep peak memory
     bounded. When ``frame_ids`` is a contiguous run under a uniform stride, the
     mmap is sliced directly rather than gathering row by row.
+
+    Frames with varying (csi_length, num_rx, num_tx) are grouped by geometry
+    and each group is decoded independently through ``_decode_chunk``. Results
+    are scattered back into the original ``frame_ids`` order. This handles
+    captures with interleaved 2x1 and 2x2 streams.
     """
     path = Path(path)
     frame_ids = np.asarray(frame_ids, dtype=np.int64)
@@ -229,29 +234,43 @@ def decode_frames(
         )
 
     csi_lengths = index.csi_lengths[frame_ids]
-    csi_length = int(csi_lengths[0])
-    if not np.all(csi_lengths == csi_length):
-        raise ValueError("Selected frames have varying csi_length; cannot batch-decode")
+    num_rx_arr = index.num_rx_arr[frame_ids]
+    num_tx_arr = index.num_tx_arr[frame_ids]
 
-    contiguous_fast = index.stride is not None and _is_contiguous(frame_ids)
-    num_rx = index.num_rx
-    num_tx = index.num_tx
+    keys = np.stack([csi_lengths, num_rx_arr, num_tx_arr], axis=1)
+    unique_keys, inverse = np.unique(keys, axis=0, return_inverse=True)
 
-    if n <= CHUNK_SIZE:
-        return _decode_chunk(
-            path, index, frame_ids, csi_length, num_sc, num_rx, num_tx,
-            scaled=scaled, interpolate=interpolate, contiguous_fast=contiguous_fast,
-        )
+    amp_out = np.empty((n, num_sc), dtype=np.float32)
+    phase_out = np.empty((n, num_sc), dtype=np.float32)
 
-    amps: list[np.ndarray] = []
-    phases: list[np.ndarray] = []
-    for start in range(0, n, CHUNK_SIZE):
-        chunk_ids = frame_ids[start : start + CHUNK_SIZE]
-        amp, phase = _decode_chunk(
-            path, index, chunk_ids, csi_length, num_sc, num_rx, num_tx,
-            scaled=scaled, interpolate=interpolate, contiguous_fast=contiguous_fast,
-        )
-        amps.append(amp)
-        phases.append(phase)
+    for gi in range(len(unique_keys)):
+        mask = inverse == gi
+        group_ids = frame_ids[mask]
+        cl, nrx, ntx = unique_keys[gi]
+        cl, nrx, ntx = int(cl), int(nrx), int(ntx)
 
-    return np.concatenate(amps), np.concatenate(phases)
+        if len(group_ids) <= CHUNK_SIZE:
+            amp_g, phase_g = _decode_chunk(
+                path, index, group_ids, cl, num_sc, nrx, ntx,
+                scaled=scaled, interpolate=interpolate,
+                contiguous_fast=index.stride is not None and _is_contiguous(group_ids),
+            )
+        else:
+            amps_g: list[np.ndarray] = []
+            phases_g: list[np.ndarray] = []
+            for s in range(0, len(group_ids), CHUNK_SIZE):
+                chunk_ids = group_ids[s : s + CHUNK_SIZE]
+                a, p = _decode_chunk(
+                    path, index, chunk_ids, cl, num_sc, nrx, ntx,
+                    scaled=scaled, interpolate=interpolate,
+                    contiguous_fast=index.stride is not None and _is_contiguous(chunk_ids),
+                )
+                amps_g.append(a)
+                phases_g.append(p)
+            amp_g = np.concatenate(amps_g)
+            phase_g = np.concatenate(phases_g)
+
+        amp_out[mask] = amp_g
+        phase_out[mask] = phase_g
+
+    return amp_out, phase_out
