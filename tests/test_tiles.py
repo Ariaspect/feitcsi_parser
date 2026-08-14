@@ -887,3 +887,108 @@ def test_fill_handles_zero_and_one_decoded(index: FrameIndex) -> None:
     assert grid1.shape == (index.num_subcarriers, 1)
     assert not np.all(np.isnan(grid1))
 
+
+
+# ----------------------------------------------------------------------- #
+#  Derived phase metrics (unwrap / detrend)                               #
+# ----------------------------------------------------------------------- #
+
+
+def test_derived_metrics_are_served(index: FrameIndex) -> None:
+    """Every derived metric produces a grid of the same shape as its base."""
+    from backend.tiles import DERIVED_METRICS
+
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+    for metric, spec in DERIVED_METRICS.items():
+        grid, _ = compute_tile(CAPTURE, t0, t1, 64, metric)
+        base_grid, _ = compute_tile(CAPTURE, t0, t1, 64, spec.bases[0])
+        assert grid.shape == base_grid.shape, metric
+        # Same cells have data; the transform must not create or destroy
+        # coverage, only change the values inside it.
+        assert np.array_equal(np.isnan(grid), np.isnan(base_grid)), metric
+
+
+def test_derived_metric_matches_transform_of_decoded_frames(index: FrameIndex) -> None:
+    """The tile path and a direct transform of decoded frames agree.
+
+    Guards the ordering rule: the transform runs per frame on full subcarrier
+    vectors before column aggregation. Transforming after aggregation would
+    unwrap across frames rather than across subcarriers and diverge here.
+    """
+    from backend.phase import unwrap_subcarrier
+
+    # A window small enough that every frame in it is decoded exactly.
+    t0 = float(index.times[0])
+    t1 = float(index.times[min(50, index.count - 1)])
+    grid, meta = compute_tile(CAPTURE, t0, t1, 8, "phase_unwrapped")
+    assert meta["exact"]
+
+    lo = int(np.searchsorted(index.times, t0, side="left"))
+    hi = int(np.searchsorted(index.times, t1, side="right"))
+    _, phase, _, _ = decode_frames(CAPTURE, index, np.arange(lo, hi))
+    expected = unwrap_subcarrier(phase)
+
+    # Each column holds one frame verbatim (nearest-frame aggregation), so
+    # every column must appear among the transformed frames.
+    for x in range(grid.shape[1]):
+        col = grid[::-1, x]  # undo the row flip applied by compute_tile
+        if np.isnan(col).all():
+            continue
+        assert np.isclose(expected, col, atol=1e-4, equal_nan=True).all(axis=1).any()
+
+
+def test_derived_metric_reuses_the_base_block_decode(index: FrameIndex) -> None:
+    """Asking for a derived metric after its base decodes no extra frames."""
+    reset_tile_caches()
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+
+    compute_tile(CAPTURE, t0, t1, 64, "phase")
+    after_base = _block_cache.frames_decoded
+    assert after_base > 0
+
+    compute_tile(CAPTURE, t0, t1, 64, "phase_unwrapped")
+    compute_tile(CAPTURE, t0, t1, 64, "phase_detrended")
+    assert _block_cache.frames_decoded == after_base
+
+
+def test_derived_metric_is_not_computed_until_requested(index: FrameIndex) -> None:
+    """A block decode must not populate derived entries nobody asked for."""
+    reset_tile_caches()
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+    compute_tile(CAPTURE, t0, t1, 64, "phase")
+
+    file_size = CAPTURE.stat().st_size
+    keys = {k[1] for k in _block_cache._entries}
+    assert "phase" in keys
+    assert "phase_unwrapped" not in keys
+    assert "phase_detrended" not in keys
+    del file_size
+
+
+def test_derived_metrics_survive_the_sampled_path(index: FrameIndex) -> None:
+    """The stride-sampled branch (filtered/over-budget) also derives correctly."""
+    t0, t1 = float(index.times[0]), float(index.times[-1])
+    grid, meta = compute_tile(CAPTURE, t0, t1, 128, "phase_detrended", mimo=(2, 1))
+    finite = grid[np.isfinite(grid)]
+    if finite.size:
+        # Detrended phase is centred by construction: the fit removes the mean.
+        assert abs(float(np.nanmean(finite))) < 1.0
+
+
+def test_tile_endpoint_serves_derived_metrics(index: FrameIndex) -> None:
+    """/api/tile accepts the new metric names and returns a float32 grid."""
+    from fastapi.testclient import TestClient
+    from backend.app import app
+    from backend.tiles import DERIVED_METRICS
+
+    client = TestClient(app)
+    for metric in DERIVED_METRICS:
+        resp = client.get("/api/tile", params={
+            "path": str(CAPTURE),
+            "t0": float(index.times[0]), "t1": float(index.times[0]) + 1.0,
+            "width": 32, "metric": metric,
+        })
+        assert resp.status_code == 200, (metric, resp.text)
+        w = int(resp.headers["X-Tile-Width"])
+        h = int(resp.headers["X-Tile-Height"])
+        assert len(resp.content) == w * h * 4

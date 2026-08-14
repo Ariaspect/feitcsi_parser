@@ -330,3 +330,55 @@ def test_captures_endpoint_missing_dir(tmp_path: Path, monkeypatch: pytest.Monke
     r = client.get("/api/captures")
     assert r.status_code == 200
     assert r.json() == []
+
+
+# ----------------------------------------------------------------------- #
+#  'all' means no filter, symmetrically for both filters                  #
+# ----------------------------------------------------------------------- #
+
+
+def test_parse_mac_filter_treats_all_as_no_filter() -> None:
+    """'all' must mean 'every sender', not a literal address to match."""
+    from backend.index import parse_mac_filter
+
+    assert parse_mac_filter("all") is None
+    assert parse_mac_filter(None) is None
+    assert parse_mac_filter("") is None
+    assert parse_mac_filter("   ") is None
+    assert parse_mac_filter("d8:3a:dd:29:22:f5") == "d8:3a:dd:29:22:f5"
+
+
+def test_endpoints_treat_source_mac_all_like_mimo_all(mixed_file: Path) -> None:
+    """source_mac=all returns the whole capture, matching mimo=all.
+
+    Regression: 'all' used to be matched as a literal MAC, so a direct API
+    call asking for every sender got zero frames back. The frontend strips
+    'all' before building the query and so never saw it.
+    """
+    from fastapi.testclient import TestClient
+    from backend.app import app
+
+    client = TestClient(app)
+    unfiltered = client.get("/api/meta", params={"path": str(mixed_file)})
+    all_macs = client.get("/api/meta", params={"path": str(mixed_file), "source_mac": "all"})
+    all_mimo = client.get("/api/meta", params={"path": str(mixed_file), "mimo": "all"})
+
+    assert unfiltered.status_code == 200
+    assert all_macs.json()["total_frames"] == unfiltered.json()["total_frames"]
+    assert all_mimo.json()["total_frames"] == unfiltered.json()["total_frames"]
+    assert all_macs.json()["total_frames"] > 0
+
+
+def test_tile_endpoint_source_mac_all_is_unfiltered(mixed_file: Path) -> None:
+    """The same symmetry on /api/tile: 'all' must not empty the grid."""
+    from fastapi.testclient import TestClient
+    from backend.app import app
+
+    client = TestClient(app)
+    params = {"path": str(mixed_file), "t0": 0.0, "t1": 1e9, "width": 16, "metric": "amplitude"}
+    plain = client.get("/api/tile", params=params)
+    with_all = client.get("/api/tile", params={**params, "source_mac": "all"})
+
+    assert plain.status_code == with_all.status_code == 200
+    assert with_all.headers["X-Tile-Width"] == plain.headers["X-Tile-Width"]
+    assert with_all.content == plain.content

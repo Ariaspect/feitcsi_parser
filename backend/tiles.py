@@ -21,12 +21,80 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
 from .batch import decode_frames
 from .index import FrameIndex
+from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
+from .ratio import correct_ratio_amplitude, correct_ratio_phase
+
+
+class Derived(NamedTuple):
+    """How a derived metric is built from other metrics.
+
+    ``bases`` may name base metrics or other derived ones — they are resolved
+    recursively, so the time-unwrapped ratio can be built on the corrected
+    ratio without either knowing about the other.
+
+    ``needs_times`` metrics receive the decoded frames' timestamps as a
+    keyword argument. Anything segmenting on capture gaps needs them, and the
+    frame values alone cannot supply them.
+    """
+
+    bases: tuple[str, ...]
+    transform: Callable[..., np.ndarray]
+    needs_times: bool = False
+
+# Metrics decoded straight out of a frame payload.
+BASE_METRICS = ("amplitude", "phase", "csi_ratio_amplitude", "csi_ratio_phase")
+
+# Metrics derived from base metrics by a transform, mapped to
+# (base metrics, transform). The transform receives the named base blocks as
+# positional arguments, so a metric can be derived from more than one — the
+# swap correction needs the ratio phase to decide which frames to flip even
+# when it is the amplitude being corrected.
+#
+# Derived blocks are computed from decoded blocks rather than from the
+# payload, and only when actually requested — an unopened derived panel costs
+# nothing.
+#
+# The ratio gets unwrap but no detrend: rx1/rx0 already cancels the common
+# per-packet offset and slope, so fitting and subtracting a line there would
+# remove signal rather than nuisance. See backend/phase.py.
+DERIVED_METRICS: dict[str, Derived] = {
+    "phase_unwrapped": Derived(("phase",), unwrap_subcarrier),
+    "phase_detrended": Derived(("phase",), detrend_subcarrier),
+    "csi_ratio_phase_unwrapped": Derived(("csi_ratio_phase",), unwrap_subcarrier),
+    # Both corrected metrics take phase *and* amplitude. The swap negates both,
+    # and only the amplitude says which side of a boundary is the right way up
+    # — its profile shape is fixed by the antennas, not by the moving channel.
+    "csi_ratio_phase_corrected": Derived(
+        ("csi_ratio_phase", "csi_ratio_amplitude"), correct_ratio_phase
+    ),
+    "csi_ratio_amplitude_corrected": Derived(
+        ("csi_ratio_amplitude", "csi_ratio_phase"),
+        correct_ratio_amplitude,
+    ),
+    # Time-axis unwrapping is built on the *corrected* ratio, never the raw
+    # one. Uncorrected, 1.2% of frame-to-frame steps exceed pi outright, and
+    # each one an unwrapper misreads offsets everything after it by 2*pi for
+    # good. Corrected, the 99th percentile step is 0.328 rad — a tenth of pi.
+    "csi_ratio_phase_time_unwrapped": Derived(
+        ("csi_ratio_phase_corrected",), unwrap_time, needs_times=True
+    ),
+}
+
+TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS)
+
+# Metrics aggregated by max-hold within a display column. Everything else is
+# nearest-frame: a maximum over angles is meaningless, and that holds for the
+# unwrapped views too — an unwrapped row is still a phase curve, just one
+# whose branch cuts have been removed.
+MAX_HOLD_METRICS = ("amplitude", "csi_ratio_amplitude", "csi_ratio_amplitude_corrected")
 
 # Maximum frames decoded per /api/tile request. When the requested time range
 # holds more frames than this, stride-sample approximately BUDGET frames evenly
@@ -150,14 +218,34 @@ def _decode_block_cached(
 ) -> np.ndarray:
     """Return the decoded block for one metric, from cache or by decoding.
 
-    On a cache miss, decodes the full block (both amplitude and phase) and
-    caches both under their respective keys, so a later request for the other
-    metric hits.
+    On a cache miss, decodes the full block (all base metrics) and caches them
+    under their respective keys, so a later request for another metric hits.
+
+    A derived metric (see ``DERIVED_METRICS``) is computed from its base
+    metric's block — itself fetched through this function, so the base decode
+    is shared — and cached under its own key. Deriving lazily rather than
+    alongside the base decode keeps the cache from carrying transforms of
+    blocks nobody asked to see.
     """
     key = (str(path), metric, block_idx, file_size)
     cached = _block_cache.get(key)
     if cached is not None:
         return cached
+
+    derived = DERIVED_METRICS.get(metric)
+    if derived is not None:
+        bases = [
+            _decode_block_cached(path, index, block_idx, m, file_size)
+            for m in derived.bases
+        ]
+        if derived.needs_times:
+            start = block_idx * BLOCK_SIZE
+            stop = min(start + BLOCK_SIZE, index.count)
+            block = derived.transform(*bases, times=index.times[start:stop])
+        else:
+            block = derived.transform(*bases)
+        _block_cache.put(key, block)
+        return block
 
     block_start = block_idx * BLOCK_SIZE
     block_end = min(block_start + BLOCK_SIZE, index.count)
@@ -176,6 +264,30 @@ def _decode_block_cached(
         _block_cache.frames_decoded += len(block_ids)
 
     return _metrics[metric]
+
+
+def _materialise(
+    metric: str, available: dict[str, np.ndarray], times: np.ndarray
+) -> np.ndarray:
+    """Resolve *metric* from already-decoded base arrays, deriving as needed.
+
+    Used on the paths that decode a frame selection directly (filtered or
+    stride-sampled requests), where the block cache does not apply. Results
+    are memoised into *available* so a metric derived from another derived
+    metric computes each stage once.
+    """
+    cached = available.get(metric)
+    if cached is not None:
+        return cached
+
+    derived = DERIVED_METRICS[metric]
+    bases = [_materialise(m, available, times) for m in derived.bases]
+    if derived.needs_times:
+        out = derived.transform(*bases, times=times)
+    else:
+        out = derived.transform(*bases)
+    available[metric] = out
+    return out
 
 
 def _decode_via_blocks(
@@ -308,12 +420,13 @@ def compute_tile(
         data = _decode_via_blocks(path, index, frame_ids, metric, file_size)
     else:
         amp, phase, ratio_amp, ratio_phase = decode_frames(path, index, frame_ids)
-        data = {
+        available = {
             "amplitude": amp,
             "phase": phase,
             "csi_ratio_amplitude": ratio_amp,
             "csi_ratio_phase": ratio_phase,
-        }[metric]
+        }
+        data = _materialise(metric, available, times[frame_ids])
 
     decoded_times = times[frame_ids] if n_decoded > 0 else np.zeros(0)
     span = t1 - t0
@@ -331,7 +444,7 @@ def compute_tile(
             e = int(col_ends[x])
             if e <= s:
                 continue
-            if metric in ("amplitude", "csi_ratio_amplitude"):
+            if metric in MAX_HOLD_METRICS:
                 grid[:, x] = data[s:e].max(axis=0)
             else:
                 centre = t0 + (x + 0.5) / width * span

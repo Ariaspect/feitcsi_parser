@@ -82,12 +82,19 @@ Open http://localhost:8000
 3. Every `refresh_ms` the frontend polls `/api/meta`, which reads the frame
    index only and never decodes payloads. Pixels come from `/api/tile`, which
    is fetched only when the view actually changes.
-4. Frontend renders two heatmaps: amplitude (dBm) and phase (rad).
+4. Frontend renders seven heatmaps: amplitude (dBm), phase (rad), CSI ratio
+   amplitude and phase, then the swap-corrected CSI ratio pair, then the
+   time-unwrapped ratio phase. See [Phase views](#phase-views) and
+   [Swapped rx streams](#swapped-rx-streams).
 
 Controls:
 - **.dat file** — path to a capture, growing or finished.
 - **Refresh (ms)** — polling interval.
 - **Run realtime** — toggle polling.
+- **Source MAC** — required for the corrected and time-unwrapped views, which
+  judge frames against their neighbours. Defaults to a single transmitter.
+
+The four base plots are never modified by any derived view.
 
 Navigation:
 - **Wheel** / **drag** — zoom and pan the time axis. Both heatmaps share it, so
@@ -121,7 +128,11 @@ Query params:
 - `path` — path to `.dat` file
 - `t0`, `t1` — time window in seconds, **closed at both ends**
 - `width` — output columns, normally the plot width in pixels
-- `metric` — `amplitude` or `phase`
+- `metric` — one of `amplitude`, `phase`, `csi_ratio_amplitude`,
+  `csi_ratio_phase`, `phase_unwrapped`, `phase_detrended`,
+  `csi_ratio_phase_unwrapped`, `csi_ratio_phase_time_unwrapped`
+  (see [Phase views](#phase-views)), `csi_ratio_phase_corrected`,
+  `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams))
 
 Returns a bare `(num_subcarriers, width)` little-endian float32 array,
 row-major, row 0 = highest subcarrier. The body stays a buffer the client wraps
@@ -175,6 +186,209 @@ Returns JSON:
 ### `GET /api/health`
 
 Returns `{"status": "ok"}`.
+
+## Phase views
+
+Everything the decoder produces comes out of `np.angle`, so the four base
+metrics are **wrapped** to (−π, π]. The ±π banding in those plots is the
+branch cut, not structure in the channel. They use a cyclic colormap
+(matplotlib's twilight) so a wrap does not paint a false hard edge.
+
+Three derived metrics undo parts of that. They are computed per frame on full
+subcarrier vectors, before tile column aggregation — aggregation drops frames,
+and a phase sequence with holes cannot be unwrapped.
+
+| Metric | Transform | What it fixes |
+|---|---|---|
+| `phase_unwrapped` | unwrap along subcarriers | Removes the 2π sawtooth *within* a frame. Does nothing across frames. |
+| `phase_detrended` | unwrap + per-frame least-squares line removal | Removes the random per-packet offset (CFO/PLL) and the sampling-time-offset slope. This is what makes raw phase comparable across packets. |
+| `csi_ratio_phase_unwrapped` | unwrap along subcarriers | Same sawtooth removal for rx1/rx0. |
+| `csi_ratio_phase_time_unwrapped` | unwrap along **time**, on the corrected ratio | Removes the sawtooth as the channel moves, so each subcarrier's trace is continuous accumulated phase. This is the motion view. |
+
+The subcarrier-axis metrics remain available over the API but are no longer
+plotted; the UI shows the time-unwrapped ratio instead.
+
+Measured on `captures/capture.dat`, mean across-frame standard deviation per
+subcarrier: wrapped 1.81 rad → unwrapped **11.60** rad → detrended 0.68 rad.
+Unwrapping alone makes raw phase *worse* across frames, because the per-packet
+offset and slope are no longer folded back into (−π, π] — which is why the
+detrend is a toggle and not applied silently.
+
+Two things the detrend is deliberately not applied to:
+
+- **The CSI ratio.** rx1/rx0 shares an oscillator and clock between the two
+  chains, so the division already cancels the common offset and most of the
+  slope. Fitting a line there removes signal, not nuisance.
+- **Anything needing absolute time-of-flight.** The fit takes any genuinely
+  linear-in-frequency component with it. Standard sanitization in the
+  SpotFi/PhaseFi lineage, fine for motion sensing, fatal for ranging.
+
+Unwrapped metrics are not angles on a circle any more, so the frontend gives
+them a sequential palette and fits the color scale to the first tile's
+1st/99th percentile band, exactly as amplitude does. One caveat inherent to
+unwrapping: `np.unwrap` anchors each row on its first subcarrier, so a frame
+whose lowest subcarrier sits near the branch cut can shift by a whole 2π
+relative to its neighbours, appearing as an isolated column jump. The wrapped
+panels above are unaffected — that is part of why they stay.
+
+## Swapped rx streams
+
+Two independent corruptions hit the CSI ratio, and they have different
+signatures. Both render as inverted-looking colour on a cyclic colormap,
+which is why they are easy to confuse by eye:
+
+| | what happens to the ratio | phase | dB amplitude | looks like |
+|---|---|---|---|---|
+| **swap** | reciprocal (`rx0/rx1`) | negated | negated | isolated columns |
+| **rotation** | multiplied by −1 | shifted by π | unchanged | multi-second blocks |
+
+Together they give four states (`r`, `−r`, `1/r`, `−1/r`), and both are
+corrected. Measured on one transmitter over 8000 frames of
+`csi_20260813_030001.dat`, rotations occur at 62 of 7999 transitions — rare
+events, but each one flips a whole block until the next one flips it back.
+One such block spanned 2127.9–2135.9 s; correcting it removed all 79 affected
+columns from the tile.
+
+The swap's signature is exact: the complex ratio is inverted, which
+**negates the phase and negates the dB amplitude** together. On screen it
+reads as an isolated column in mirrored colours — visually distinct from
+the transparent columns where no frame exists at all.
+
+Measured on one transmitter over 6000 frames, an affected frame deviates from
+the mean of its two neighbours by 1.664 rad where a normal frame deviates by
+0.116; negating it gives 0.103, back at baseline. The dB amplitude agrees
+(5.034 → 0.625). Only the ratio metrics are affected — rx0's own amplitude and
+phase are undisturbed.
+
+`csi_ratio_phase_corrected` and `csi_ratio_amplitude_corrected` put them back.
+Detection runs on the ratio phase for both, so the two panels always agree
+about which frames were flipped.
+
+Effect at short inter-packet gaps, where the channel cannot physically have
+moved and any large step is therefore an artefact:
+
+| gap | transitions > 0.5 rad, before | after |
+|---|---|---|
+| < 2 ms | 4.55% | **1.14%** |
+| 80–150 ms | 19.85% | 13.57% |
+| > 150 ms | 30.02% | 24.94% |
+
+The residual at longer gaps is largely genuine channel evolution, not missed
+swaps.
+
+### The algorithm
+
+Orientation is not observable from a single frame, so every decision is made
+by comparing frames against each other. Three phase passes run in a loop, each
+covering the others' blind spot, followed by an amplitude anchor:
+
+1. **Chain.** Every adjacent pair is fitted twice — `phi_i` against
+   `phi_prev`, and `-phi_prev` — and the better fit wins. Its *offset* then
+   says whether a π rotation came along too. Both decisions accumulate as
+   parities, so a run of affected frames needs no special handling.
+   *Blind spot:* it propagates. One unreadable transition — a dropout, or a
+   stride-sampled view where neighbours sit 400 ms apart instead of 100 —
+   and everything downstream stays inverted until another miss undoes it.
+2. **Refine.** Each frame is re-decided against the circular mean of its
+   neighbours, a consensus no single frame can move, so mistakes stay local.
+   *Blind spot:* a large inverted region agrees with itself, and the
+   symmetric window straddles a boundary and goes incoherent right where it
+   matters.
+3. **Merge.** Each candidate split point is judged by comparing the mean of
+   the frames *before* it against the mean of those *after*. Averaging many
+   frames per side lifts the signal far above what any single pair carries,
+   so a boundary no adjacent comparison could resolve becomes obvious.
+   Non-maximum suppression keeps one detection per boundary.
+
+Scoring uses the correlation's **magnitude** to choose the orientation and
+its **angle** to choose the rotation — magnitude alone is offset-blind and
+cannot see a rotation at all.
+
+4. **Amplitude anchor.** Everything above compares frames only to other
+   frames, which can place a boundary perfectly and still leave the entire
+   region *between* two of them inverted — internally consistent, so no
+   phase-based check ever objects. The dB ratio amplitude settles it: a swap
+   negates it too, and its shape across the band is fixed by the antennas
+   rather than the moving channel. Every 2000-frame chunk of an hourly
+   capture correlates +0.955 to +0.999 with the file's median profile, so a
+   stretch that anti-correlates is simply wrong. Only runs of ≥200 frames are
+   re-oriented; isolated frames stay with the phase passes, which resolve
+   them far more sharply than a smoothed correlation can.
+
+   This pass exists because the phase-only version shipped a regression: it
+   removed the real isolated swaps and then inverted a 1400-second block on
+   top. Across the 20 hourly captures it took frames sitting in the wrong
+   orientation from a mean of 4.1% (44.4% on the worst file) to **0.0%**.
+
+   It needs a profile with real shape — below `MIN_PROFILE_STD` it declines
+   rather than acting on noise.
+
+5. **Rotation anchor.** The amplitude cannot settle the *rotation* parity,
+   because multiplying the ratio by −1 leaves the dB amplitude exactly where
+   it was. And rotations are not rare — on an hourly capture ~24% of
+   transitions carry a π offset (the distribution is sharply bimodal: 6174
+   transitions below 0.3 rad, 1955 between 2.90 and π, only 28 in between),
+   so the parity toggles thousands of times and one miscount flips everything
+   after it.
+
+   What anchors it is the phase's own mean direction. Each frame's circular
+   mean over subcarriers points somewhere, and that direction is set by the
+   fixed offset between the antennas rather than the moving channel: measured
+   over an hour it holds at +1.3 rad end to end, while a wrongly-rotated
+   stretch sits at −1.8. A full π apart, separable by sign. Across the 20
+   captures this took columns sitting a π from the capture mean from 14.2% to
+   **0.3%**.
+
+Measured across all 20 hourly captures at the full-file view (the worst case,
+where stride sampling puts adjacent columns ~4.5 s apart), inverted column
+*transitions* fall from **2514 to 4** — and 3 of those 4 are confirmed genuine
+channel rotations at full resolution, not misses.
+
+That transition count is a trap worth flagging, because it was believed for
+longer than it should have been: a uniformly inverted block has only **two**
+boundaries no matter how wide it is, and transitions touching a NaN gap are
+skipped entirely. A count of 4 was therefore perfectly consistent with two
+enormous inverted regions. The honest metric is the fraction of *frames* whose
+orientation disagrees with the amplitude profile, which is what the anchor
+above is measured on. Cost is ~0.5 s per round on
+a full 8192-frame tile and ~0.04 s on a typical zoomed view.
+
+### Properties worth knowing
+
+Three properties of the method are worth knowing before relying on it:
+
+- **It needs a single transmitter selected.** Detection is relative — a frame
+  is judged against its neighbours. On `source_mac=all`, consecutive frames
+  come from different senders, nothing is comparable, and the confidence gate
+  declines to act rather than flipping at random.
+- **The flag means "opposite orientation to frame 0", not "anomalous".**
+  Parity accumulates along the sequence, so roughly half the frames in a long
+  batch carry the flag even though individual swaps are rare.
+- **Orientation is only ever relative.** Which of the two states is "correct"
+  is not observable from a single frame, so a majority vote fixes the
+  convention per batch.
+- **A genuine π channel rotation is indistinguishable from an artificial
+  one** when it lands between two sampled instants. At heavy zoom-out the
+  remaining handful of inverted-looking transitions are real events in the
+  room, and correcting them would be destroying data. Zoom in and they
+  resolve into ordinary continuous motion.
+
+A note on the fitting metric, because it is a trap worth documenting: the
+alignment score `|mean(exp(i(x - y)))|` is **invariant to a constant phase
+offset**, so a π-rotated block scores a perfect 1.0 against its neighbours
+and reads as "identical". That is exactly why rotations went unnoticed at
+first. `_fit` therefore returns the offset alongside the quality, and the
+rotation decision reads the offset while the swap decision reads the
+quality — scoring with the offset folded in would rate a perfectly-explained
+rotated frame as unrelated and hide it completely.
+
+The cause of either is unidentified. All 272 header bytes were scanned and
+none separates affected frames from normal ones; the documented `antenna_a`
+and `antenna_b` bits in `rate_flags` are constant, and bit 20 — the only bit
+that varies — does not correlate (its two groups align at 0.999 *as-is*).
+No per-frame property identifies them either. Note that CSIKit parses only
+about eight fields out of the 272 header bytes, so most of the header has no
+known semantics: "nothing found" is not "nothing there".
 
 ## Data Format
 

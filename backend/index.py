@@ -120,6 +120,19 @@ def _mimo_label(num_rx: int, num_tx: int) -> str:
     return f"{num_rx}x{num_tx}"
 
 
+def parse_mac_filter(value: str | None) -> str | None:
+    """Parse a source MAC filter, or None for 'all'/blank.
+
+    Mirrors ``parse_mimo_filter``'s treatment of 'all' so both filters mean
+    the same thing over the wire. Without this, ``source_mac=all`` is matched
+    as a literal address and selects nothing — the frontend never sends it,
+    but a script driving the API directly would silently get an empty result.
+    """
+    if not value or not value.strip() or value == "all":
+        return None
+    return value
+
+
 def parse_mimo_filter(value: str | None) -> tuple[int, int] | None:
     """Parse a 'NxM' MIMO filter string into (num_rx, num_tx), or None for 'all'."""
     if not value or value == "all":
