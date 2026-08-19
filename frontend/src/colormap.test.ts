@@ -64,8 +64,14 @@ describe("lutIndex", () => {
 });
 
 describe("special colors", () => {
-  it("NO_DATA_COLOR is fully transparent", () => {
-    expect(unpack(NO_DATA_COLOR)).toEqual([0, 0, 0, 0]);
+  it("NO_DATA_COLOR is an opaque neutral grey, in neither palette", () => {
+    const [r, g, b, a] = unpack(NO_DATA_COLOR);
+    expect(a).toBe(255); // opaque: a gap must not read as the canvas behind it
+    expect([g, b]).toEqual([r, r]); // unsaturated
+    for (const palette of [VIRIDIS, TWILIGHT]) {
+      expect(buildLut(palette, 256)).not.toContain(NO_DATA_COLOR);
+    }
+    expect(NO_DATA_COLOR).not.toBe(NON_FINITE_COLOR);
   });
 
   it("NON_FINITE_COLOR is opaque black", () => {

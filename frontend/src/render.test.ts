@@ -140,7 +140,7 @@ describe("renderTileToImageData — LUT mapping", () => {
 });
 
 describe("renderTileToImageData — non-finite values", () => {
-  it("NaN maps to NO_DATA_COLOR (transparent)", () => {
+  it("NaN maps to NO_DATA_COLOR (no data)", () => {
     const grid = new Float32Array([NaN]);
     const lut = buildLut(STOPS, 256);
     const target = new ImageData(1, 1);
