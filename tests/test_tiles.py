@@ -1018,37 +1018,34 @@ def test_tile_endpoint_serves_derived_metrics(index: FrameIndex) -> None:
 
 
 def test_time_gap_is_linear_not_nearest() -> None:
-    """A gap exactly halfway between two frames must land halfway between
-    their values, not snap to either one (that would be the old nearest-
-    frame behaviour, and this is the regression it must not repeat)."""
+    """A gap must land at its actual linear weight between the two
+    bracketing frames -- not snap to either one (that would be the old
+    nearest-frame behaviour), and not just "closer to hi" but the specific
+    proportional blend."""
     grid = np.full((1, 3), np.nan, dtype=np.float32)
     empty = np.array([False, True, False])
     data = np.array([[0.0], [10.0]], dtype=np.float32)
     decoded_times = np.array([0.0, 2.0])
-
     filled = _interpolate_time_gaps(
         grid, empty, data, decoded_times,
         t0=0.0, span=2.0, width=3, gap_limit=10.0, circular=False,
     )
     assert filled == 1
-    np.testing.assert_allclose(grid[0, 1], 5.0)
+    np.testing.assert_allclose(grid[0, 1], 5.0)  # exact midpoint -> mu=0.5
 
-
-def test_time_gap_weights_toward_the_nearer_frame() -> None:
-    """A column 3/4 of the way from t_lo to t_hi must be 3/4 of the way from
-    lo_val to hi_val -- not just "closer to hi", the actual linear weight."""
-    grid = np.full((1, 4), np.nan, dtype=np.float32)
-    empty = np.array([False, False, True, False])
-    data = np.array([[0.0], [8.0]], dtype=np.float32)
-    decoded_times = np.array([0.0, 4.0])
-
-    # width=4 over span=4 puts column 2's centre at t=2.5 -> mu=(2.5-0)/4.
-    filled = _interpolate_time_gaps(
-        grid, empty, data, decoded_times,
+    # A second, asymmetric case pins down the weight itself, not just the
+    # midpoint (where a coincidental formula could still pass by accident).
+    grid2 = np.full((1, 4), np.nan, dtype=np.float32)
+    empty2 = np.array([False, False, True, False])
+    data2 = np.array([[0.0], [8.0]], dtype=np.float32)
+    decoded_times2 = np.array([0.0, 4.0])
+    # width=4 over span=4 puts column 2's centre at t=2.5 -> mu=2.5/4.
+    filled2 = _interpolate_time_gaps(
+        grid2, empty2, data2, decoded_times2,
         t0=0.0, span=4.0, width=4, gap_limit=10.0, circular=False,
     )
-    assert filled == 1
-    np.testing.assert_allclose(grid[0, 2], 8.0 * (2.5 / 4.0))
+    assert filled2 == 1
+    np.testing.assert_allclose(grid2[0, 2], 8.0 * (2.5 / 4.0))
 
 
 def test_time_gap_beyond_the_limit_is_not_filled() -> None:
