@@ -17,7 +17,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { PlayIcon, PauseIcon, SunIcon, MoonIcon } from "lucide-react";
+import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -45,6 +45,12 @@ export function App() {
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
   const [sourceMac, setSourceMac] = useState<string>(DEFAULT_SOURCE_MAC);
+  // Linear interpolation of gaps in both axes: structural nulls (pilots,
+  // DC/guard band) along subcarrier, and sampling gaps along time. On by
+  // default to match the backend. Off shows the data exactly as decoded off
+  // the wire, NaN gaps included -- useful for judging what interpolation is
+  // actually doing to a given capture.
+  const [interpolate, setInterpolate] = useState<boolean>(true);
   const [dark, setDark] = useState<boolean>(() => {
     const stored = localStorage.getItem(DARK_KEY);
     return stored === null ? true : stored === "true";
@@ -248,6 +254,17 @@ export function App() {
             </Select>
           </div>
 
+          <Button
+            variant={interpolate ? "default" : "outline"}
+            size="sm"
+            onClick={() => setInterpolate((v) => !v)}
+            className="h-8"
+            title="Linearly interpolate gaps in subcarrier (structural nulls) and time (sampling gaps)"
+          >
+            <SplineIcon data-icon="inline-start" />
+            Interpolate {interpolate ? "On" : "Off"}
+          </Button>
+
           <Button variant="outline" size="icon" onClick={toggleDark} className="h-8 w-8">
             {dark ? <SunIcon /> : <MoonIcon />}
           </Button>
@@ -303,6 +320,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
             <Heatmap
@@ -321,6 +339,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
             <Heatmap
@@ -336,6 +355,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
             <Heatmap
@@ -354,6 +374,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
 
@@ -380,6 +401,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
             <Heatmap
@@ -398,6 +420,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
 
@@ -425,6 +448,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
 
@@ -454,6 +478,7 @@ export function App() {
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
           </div>

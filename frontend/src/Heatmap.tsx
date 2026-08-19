@@ -46,6 +46,11 @@ interface HeatmapProps {
   mimo?: string | null;
   /** Source MAC filter passed to /api/tile. 'all' or a MAC string. */
   sourceMac?: string | null;
+  /** Linearly interpolate gaps in both axes: structural nulls (pilots,
+   * DC/guard band) along subcarrier, and sampling gaps along time. False
+   * shows the data as decoded off the wire, NaN gaps and all. Defaults to
+   * true, matching the backend's own default. */
+  interpolate?: boolean;
   /** Dark mode: canvas text/axes/crosshair colors adapt. */
   dark?: boolean;
 }
@@ -100,6 +105,7 @@ interface PropsMirror {
   timeLink?: TimeLink;
   mimo?: string | null;
   sourceMac?: string | null;
+  interpolate: boolean;
   dark?: boolean;
 }
 
@@ -117,6 +123,7 @@ interface FetchKey {
   width: number;
   mimo?: string | null;
   sourceMac?: string | null;
+  interpolate: boolean;
 }
 
 export function Heatmap({
@@ -136,6 +143,7 @@ export function Heatmap({
   timeLink,
   mimo,
   sourceMac,
+  interpolate = true,
   dark,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -206,6 +214,7 @@ export function Heatmap({
     timeLink,
     mimo,
     sourceMac,
+    interpolate,
     dark,
   };
 
@@ -706,7 +715,8 @@ export function Heatmap({
         lastKey.t1 === t1 &&
         lastKey.width === width &&
         lastKey.mimo === props.mimo &&
-        lastKey.sourceMac === props.sourceMac
+        lastKey.sourceMac === props.sourceMac &&
+        lastKey.interpolate === props.interpolate
       ) {
         return;
       }
@@ -718,6 +728,7 @@ export function Heatmap({
         width,
         mimo: props.mimo,
         sourceMac: props.sourceMac,
+        interpolate: props.interpolate,
       };
 
       abortRef.current?.abort();
@@ -735,6 +746,7 @@ export function Heatmap({
           controller.signal,
           props.mimo,
           props.sourceMac,
+          props.interpolate,
         );
         // Drop stale responses — a newer request may have been issued while
         // this one was in flight. Aborting alone is not sufficient: the fetch

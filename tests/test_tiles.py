@@ -18,6 +18,7 @@ from backend.tiles import (
     TILE_FRAME_BUDGET,
     _base_with_context,
     _block_cache,
+    _interpolate_time_gaps,
     _needs_reference,
     _ref_cache,
     compute_tile,
@@ -116,11 +117,12 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
         if e > s:
             expected[:, x] = amp[s:e].max(axis=0)
 
-    # Reproduce the sampling-gap fill: empty columns borrow the nearest
-    # decoded frame's values when within the self-tuned gap_limit.  This
-    # mirrors the fill in compute_tile exactly -- the bimodal timing of the
-    # real capture means many columns receive no frame at width=frame_count,
-    # and those within gap_limit are now filled rather than NaN.
+    # Reproduce the sampling-gap fill: empty columns are linearly
+    # interpolated between their two bracketing decoded frames when within
+    # the self-tuned gap_limit. This mirrors the fill in compute_tile
+    # exactly -- the bimodal timing of the real capture means many columns
+    # receive no frame at width=frame_count, and those within gap_limit are
+    # now filled rather than NaN.
     decoded_times = times
     empty = col_ends <= col_starts
     if len(decoded_times) >= 2:
@@ -134,14 +136,17 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
         j = np.searchsorted(decoded_times, ec)
         j_lo = np.clip(j - 1, 0, len(decoded_times) - 1)
         j_hi = np.clip(j, 0, len(decoded_times) - 1)
-        d_lo = np.abs(decoded_times[j_lo] - ec)
-        d_hi = np.abs(decoded_times[j_hi] - ec)
-        nearest = np.where(d_lo <= d_hi, j_lo, j_hi)
-        dist = np.minimum(d_lo, d_hi)
+        t_lo = decoded_times[j_lo]
+        t_hi = decoded_times[j_hi]
+        dist = np.minimum(np.abs(t_lo - ec), np.abs(t_hi - ec))
         ok = dist <= gap_limit
         cols = np.flatnonzero(empty)[ok]
         if cols.size > 0:
-            expected[:, cols] = amp[nearest[ok]].T
+            span_t = t_hi[ok] - t_lo[ok]
+            mu = np.where(span_t > 0, (ec[ok] - t_lo[ok]) / np.where(span_t > 0, span_t, 1.0), 0.0)
+            mu = mu[:, None]
+            blended = (1 - mu) * amp[j_lo[ok]] + mu * amp[j_hi[ok]]
+            expected[:, cols] = blended.T
 
     expected = np.ascontiguousarray(expected[::-1, :])
 
@@ -1008,6 +1013,184 @@ def test_tile_endpoint_serves_derived_metrics(index: FrameIndex) -> None:
 
 
 # ----------------------------------------------------------------------- #
+#  Time-axis gap interpolation                                            #
+# ----------------------------------------------------------------------- #
+
+
+def test_time_gap_is_linear_not_nearest() -> None:
+    """A gap exactly halfway between two frames must land halfway between
+    their values, not snap to either one (that would be the old nearest-
+    frame behaviour, and this is the regression it must not repeat)."""
+    grid = np.full((1, 3), np.nan, dtype=np.float32)
+    empty = np.array([False, True, False])
+    data = np.array([[0.0], [10.0]], dtype=np.float32)
+    decoded_times = np.array([0.0, 2.0])
+
+    filled = _interpolate_time_gaps(
+        grid, empty, data, decoded_times,
+        t0=0.0, span=2.0, width=3, gap_limit=10.0, circular=False,
+    )
+    assert filled == 1
+    np.testing.assert_allclose(grid[0, 1], 5.0)
+
+
+def test_time_gap_weights_toward_the_nearer_frame() -> None:
+    """A column 3/4 of the way from t_lo to t_hi must be 3/4 of the way from
+    lo_val to hi_val -- not just "closer to hi", the actual linear weight."""
+    grid = np.full((1, 4), np.nan, dtype=np.float32)
+    empty = np.array([False, False, True, False])
+    data = np.array([[0.0], [8.0]], dtype=np.float32)
+    decoded_times = np.array([0.0, 4.0])
+
+    # width=4 over span=4 puts column 2's centre at t=2.5 -> mu=(2.5-0)/4.
+    filled = _interpolate_time_gaps(
+        grid, empty, data, decoded_times,
+        t0=0.0, span=4.0, width=4, gap_limit=10.0, circular=False,
+    )
+    assert filled == 1
+    np.testing.assert_allclose(grid[0, 2], 8.0 * (2.5 / 4.0))
+
+
+def test_time_gap_beyond_the_limit_is_not_filled() -> None:
+    grid = np.full((1, 3), np.nan, dtype=np.float32)
+    empty = np.array([False, True, False])
+    data = np.array([[0.0], [10.0]], dtype=np.float32)
+    decoded_times = np.array([0.0, 2.0])
+
+    filled = _interpolate_time_gaps(
+        grid, empty, data, decoded_times,
+        t0=0.0, span=2.0, width=3, gap_limit=0.1, circular=False,
+    )
+    assert filled == 0
+    assert np.isnan(grid[0, 1])
+
+
+def test_time_gap_circular_takes_the_short_way_round() -> None:
+    """+3.1 rad and -3.1 rad are 0.08 rad apart across the branch cut. Plain
+    linear interpolation walks the long way and lands near 0; circular
+    interpolation must land near +-pi instead."""
+    empty = np.array([False, True, False])
+    data = np.array([[3.1], [-3.1]], dtype=np.float32)
+    decoded_times = np.array([0.0, 2.0])
+
+    circular = np.full((1, 3), np.nan, dtype=np.float32)
+    filled = _interpolate_time_gaps(
+        circular, empty, data, decoded_times,
+        t0=0.0, span=2.0, width=3, gap_limit=10.0, circular=True,
+    )
+    assert filled == 1
+    assert abs(circular[0, 1]) > 3.0, "must land near the branch cut, not near 0"
+
+    # The non-circular path is the bug this guards against: plain averaging
+    # of the same two values walks the long way and lands near 0.
+    plain = np.full((1, 3), np.nan, dtype=np.float32)
+    _interpolate_time_gaps(
+        plain, empty, data, decoded_times,
+        t0=0.0, span=2.0, width=3, gap_limit=10.0, circular=False,
+    )
+    assert abs(plain[0, 1]) < 0.1, "sanity check: plain averaging does land near 0"
+
+
+def test_time_gap_at_the_edge_falls_back_to_the_nearest_frame() -> None:
+    """A gap outside [t_lo, t_hi] on both sides clamps j_lo == j_hi, so mu is
+    moot and the divide-by-zero guard must not produce NaN or garbage."""
+    grid = np.full((1, 3), np.nan, dtype=np.float32)
+    empty = np.array([True, False, False])
+    data = np.array([[7.0], [10.0]], dtype=np.float32)
+    decoded_times = np.array([1.0, 2.0])
+
+    filled = _interpolate_time_gaps(
+        grid, empty, data, decoded_times,
+        t0=0.0, span=3.0, width=3, gap_limit=10.0, circular=False,
+    )
+    assert filled == 1
+    np.testing.assert_allclose(grid[0, 0], 7.0)
+
+
+# ----------------------------------------------------------------------- #
+#  Interpolate toggle                                                     #
+# ----------------------------------------------------------------------- #
+
+
+def test_interpolate_toggle_changes_the_grid(index: FrameIndex) -> None:
+    """The flag must actually reach the decode, not just be accepted."""
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 5.0
+    reset_tile_caches()
+    on, _ = compute_tile(CAPTURE, t0, t1, 32, "amplitude", interpolate=True)
+    reset_tile_caches()
+    off, _ = compute_tile(CAPTURE, t0, t1, 32, "amplitude", interpolate=False)
+    assert not np.allclose(
+        np.nan_to_num(on, nan=-999.0), np.nan_to_num(off, nan=-999.0)
+    )
+
+
+def test_interpolate_off_leaves_time_gaps_as_nan(index: FrameIndex) -> None:
+    """Off must mean off on both axes: a sampling gap that gets linearly
+    filled when interpolate=True must come back NaN when it is False."""
+    t0, t1 = _full_range(index)
+    width = index.count  # forces some columns empty, per test_full_range_*
+    reset_tile_caches()
+    on, meta_on = compute_tile(CAPTURE, t0, t1, width, "amplitude", interpolate=True)
+    reset_tile_caches()
+    off, meta_off = compute_tile(CAPTURE, t0, t1, width, "amplitude", interpolate=False)
+
+    assert meta_on["filled_columns"] > 0
+    assert meta_off["filled_columns"] == 0
+
+    filled_only = np.isfinite(on) & ~np.isfinite(off)
+    assert filled_only.any(), "interpolate=True must fill columns interpolate=False leaves NaN"
+
+
+def test_interpolate_toggle_does_not_share_the_block_cache(index: FrameIndex) -> None:
+    """Flipping the flag must decode fresh blocks, not serve the other
+    setting's cached ones — the two would silently look identical."""
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+    reset_tile_caches()
+
+    compute_tile(CAPTURE, t0, t1, 32, "amplitude", interpolate=True)
+    after_true = _block_cache.frames_decoded
+    assert after_true > 0
+
+    compute_tile(CAPTURE, t0, t1, 32, "amplitude", interpolate=False)
+    after_false = _block_cache.frames_decoded
+    assert after_false > after_true, "the second call must decode, not hit cache"
+
+    # Now both are warm: neither setting should decode anything further.
+    compute_tile(CAPTURE, t0, t1, 32, "amplitude", interpolate=True)
+    compute_tile(CAPTURE, t0, t1, 32, "amplitude", interpolate=False)
+    assert _block_cache.frames_decoded == after_false
+
+
+def test_interpolate_toggle_does_not_share_the_reference_cache(
+    index: FrameIndex,
+) -> None:
+    reset_tile_caches()
+    size = CAPTURE.stat().st_size
+    mac = index.source_macs[0]
+
+    get_reference(CAPTURE, index, size, source_mac=mac, interpolate=True)
+    get_reference(CAPTURE, index, size, source_mac=mac, interpolate=False)
+    assert (str(CAPTURE), size, None, mac, True) in _ref_cache
+    assert (str(CAPTURE), size, None, mac, False) in _ref_cache
+
+
+def test_tile_endpoint_accepts_the_interpolate_param(index: FrameIndex) -> None:
+    from fastapi.testclient import TestClient
+    from backend.app import app
+
+    client = TestClient(app)
+    params = {
+        "path": str(CAPTURE),
+        "t0": float(index.times[0]), "t1": float(index.times[0]) + 5.0,
+        "width": 32, "metric": "amplitude",
+    }
+    on = client.get("/api/tile", params=params)
+    off = client.get("/api/tile", params={**params, "interpolate": "false"})
+    assert on.status_code == 200 and off.status_code == 200
+    assert on.content != off.content
+
+
+# ----------------------------------------------------------------------- #
 #  Orientation reference wiring                                           #
 # ----------------------------------------------------------------------- #
 
@@ -1033,7 +1216,7 @@ def test_reference_is_built_once_per_capture_and_filter():
     # A different filter is a different transmitter, so a different reference.
     mac = index.source_macs[0]
     other = get_reference(CAPTURE, index, size, source_mac=mac)
-    assert (str(CAPTURE), size, None, mac) in _ref_cache
+    assert (str(CAPTURE), size, None, mac, True) in _ref_cache
 
     reset_tile_caches()
     assert not _ref_cache

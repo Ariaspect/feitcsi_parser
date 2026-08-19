@@ -135,6 +135,8 @@ Query params:
   (see [Phase views](#phase-views)), `csi_ratio_phase_corrected`,
   `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams)),
   `csi_ratio_cir` (see [Channel impulse response](#channel-impulse-response))
+- `mimo`, `source_mac` — optional filters, `'all'` or a specific value
+- `interpolate` — default `true`; see [Interpolation](#interpolation) below
 
 Returns a bare `(num_subcarriers, width)` little-endian float32 array,
 row-major, row 0 = highest subcarrier. The body stays a buffer the client wraps
@@ -152,9 +154,11 @@ in a `Float32Array`; metadata rides in headers:
 | `X-Tile-Filled` | Columns filled from a neighbouring frame across a sampling gap. |
 
 Columns are max-hold for amplitude and nearest-frame for phase (a maximum of an
-angle is meaningless). A column that receives no frame borrows the nearest one
-within 2x the 95th-percentile inter-frame interval; beyond that it stays NaN, so
-a real capture dropout stays visible instead of being painted over.
+angle is meaningless). A column that receives no frame is linearly
+interpolated between its two bracketing frames when within 2x the
+95th-percentile inter-frame interval; beyond that, or with `interpolate=false`,
+it stays NaN, so a real capture dropout stays visible instead of being painted
+over. See [Interpolation](#interpolation).
 
 ### `GET /api/snapshot`
 
@@ -188,6 +192,40 @@ Returns JSON:
 ### `GET /api/health`
 
 Returns `{"status": "ok"}`.
+
+## Interpolation
+
+One flag, `interpolate` (default `true`), governs filling gaps in two
+different axes, and the frontend's **Interpolate** toolbar button toggles
+both together:
+
+- **Subcarrier axis.** Structural nulls — pilots, the DC/guard band — are
+  filled by interpolation across neighbouring subcarriers within a frame.
+  This is `backend.batch.decode_frames`'/`backend.mtk.decode_frames`'
+  `interpolate` parameter; see their docstrings for the null-run and
+  MAX_NULL_RUN details.
+- **Time axis.** A display column with no decoded frame in it — a gap
+  between samples, not a real capture dropout — is filled by linear
+  interpolation between the two frames bracketing it, weighted by how far
+  the column's centre sits between their timestamps. Only gaps within 2x the
+  95th-percentile inter-frame interval are touched; a real dropout is wider
+  than that and stays NaN regardless of the flag, so turning interpolation
+  off never hides one.
+
+`false` leaves both axes exactly as decoded off the wire — every structural
+null and every sampling gap NaN. This is the honest view of what the hardware
+actually reported; `true` (the default) is the smoothed one most panels are
+easier to read in.
+
+The time-axis fill is a plain weighted average for every metric except the
+three wrapped-phase ones (`phase`, `csi_ratio_phase`,
+`csi_ratio_phase_corrected`). Averaging a wrapped angle directly is wrong at
+the branch cut: a frame at +3.1 rad and its neighbour at -3.1 rad are 0.08 rad
+apart on the circle, and a plain average lands near 0 rad — the long way
+round. Those three metrics are blended as `exp(i*phase)` and converted back
+with `atan2`, which follows the circle instead. Every other metric, including
+the `*_unwrapped` and `*_detrended` views, is by construction no longer an
+angle on a circle and takes the plain average.
 
 ## Phase views
 

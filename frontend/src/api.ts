@@ -125,11 +125,16 @@ export async function fetchTile(
   signal?: AbortSignal,
   mimo?: string | null,
   sourceMac?: string | null,
+  interpolate?: boolean,
 ): Promise<Tile> {
   const url =
     `/api/tile?path=${encodeURIComponent(path)}` +
     `&t0=${t0}&t1=${t1}&width=${width}&metric=${metric}` +
-    filterParams(mimo, sourceMac);
+    filterParams(mimo, sourceMac) +
+    // Omit when true: that is the backend's own default, and every existing
+    // caller that never heard of this parameter must keep building the same
+    // URL it always has.
+    (interpolate === false ? "&interpolate=false" : "");
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text();
