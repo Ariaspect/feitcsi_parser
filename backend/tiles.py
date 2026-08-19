@@ -29,7 +29,7 @@ import numpy as np
 
 from . import mtk
 from .batch import decode_frames as _decode_feitcsi
-from .cir import ratio_to_cir_centred
+from .cir import csi_to_cir_centred
 from .index import FrameIndex
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
 from .ratio import (
@@ -110,15 +110,15 @@ DERIVED_METRICS: dict[str, Derived] = {
     "csi_ratio_phase_time_unwrapped": Derived(
         ("csi_ratio_phase_corrected",), unwrap_time, needs_times=True
     ),
-    # Delay-domain view of the swap-corrected ratio. Built on the corrected
-    # pair rather than the raw one for the same reason the time-unwrap is:
-    # an uncorrected swap flips the ratio's phase, and IFFT would turn that
-    # flip into a spurious second echo rather than leaving it as a single
-    # clean peak. needs_reference is left False here and picked up through
-    # the recursive lookup in _needs_reference, same as the time-unwrap.
-    "csi_ratio_cir": Derived(
-        ("csi_ratio_amplitude_corrected", "csi_ratio_phase_corrected"),
-        ratio_to_cir_centred,
+    # Delay-domain view of the raw channel (rx0/tx0), not the ratio: no
+    # correction applies because there is no second chain to have been
+    # swapped with, so this is built straight on the base amplitude/phase
+    # and needs no Reference. See backend.cir for why this is deliberately
+    # the uncorrected channel rather than the ratio's own IFFT — the two
+    # answer different questions and are not interchangeable.
+    "csi_cir": Derived(
+        ("amplitude", "phase"),
+        csi_to_cir_centred,
         preserves_coverage=False,
     ),
 }
@@ -150,7 +150,7 @@ MAX_HOLD_METRICS = (
     # non-negative, meaningfully peaked — so the same peak-preserving
     # aggregation applies rather than nearest-frame, which would just pick
     # one frame's echo pattern and discard the rest of a zoomed-out column.
-    "csi_ratio_cir",
+    "csi_cir",
 )
 
 # Metrics whose values are angles wrapped to (-pi, pi] — the ones the

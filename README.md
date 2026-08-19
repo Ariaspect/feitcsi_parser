@@ -84,9 +84,10 @@ Open http://localhost:8000
    is fetched only when the view actually changes.
 4. Frontend renders eight heatmaps: amplitude (dBm), phase (rad), CSI ratio
    amplitude and phase, then the swap-corrected CSI ratio pair, then the
-   time-unwrapped ratio phase, then its channel impulse response (CIR). See
-   [Phase views](#phase-views), [Swapped rx streams](#swapped-rx-streams),
-   and [Channel impulse response](#channel-impulse-response).
+   time-unwrapped ratio phase, then the raw channel's impulse response
+   (CIR). See [Phase views](#phase-views),
+   [Swapped rx streams](#swapped-rx-streams), and
+   [Channel impulse response](#channel-impulse-response).
 
 Controls:
 - **.dat file** — path to a capture, growing or finished.
@@ -134,7 +135,7 @@ Query params:
   `csi_ratio_phase_unwrapped`, `csi_ratio_phase_time_unwrapped`
   (see [Phase views](#phase-views)), `csi_ratio_phase_corrected`,
   `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams)),
-  `csi_ratio_cir` (see [Channel impulse response](#channel-impulse-response))
+  `csi_cir` (see [Channel impulse response](#channel-impulse-response))
 - `mimo`, `source_mac` — optional filters, `'all'` or a specific value
 - `interpolate` — default `true`; see [Interpolation](#interpolation) below
 
@@ -499,16 +500,34 @@ known semantics: "nothing found" is not "nothing there".
 
 ## Channel impulse response
 
-`csi_ratio_cir` takes the swap-corrected ratio (`backend.ratio`) and inverse-
-FFTs it along the subcarrier axis into delay: `backend.cir.ratio_to_cir`.
-Where every other panel reads the channel in frequency, this one reads it in
-time-of-flight — echoes at different path lengths separate into different
-delay taps instead of showing up as ripples across subcarriers.
+`csi_cir` takes the raw channel — `amplitude`/`phase`, i.e. rx0/tx0, not the
+rx1/rx0 ratio — and inverse-FFTs it along the subcarrier axis into delay:
+`backend.cir.csi_to_cir`. Where every other panel reads the channel in
+frequency, this one reads it in time-of-flight — echoes at different path
+lengths separate into different delay taps instead of showing up as ripples
+across subcarriers.
 
-It is built on the *corrected* ratio for the same reason the time-unwrap is
-(see above): an uncorrected swap negates the ratio's phase, and an IFFT would
-turn that negation into a spurious second peak rather than leaving a single
-clean one.
+**Deliberately the raw channel, not the ratio.** An earlier version of this
+metric was built on the swap-corrected ratio instead, which cancels the
+receiver's CFO/SFO and packet-detection timing offset because both chains
+share them — that is exactly why *that* IFFT centred so cleanly on zero
+delay. There is no second chain here to cancel anything against, so this CIR
+is **not zero-referenced**: what it shows is real propagation delay plus
+whatever uncalibrated hardware/timing offset the receiver adds on top of it,
+and that combined offset drifts a little between frames as CFO/SFO drift.
+Measured on 1500 frames of a single sender on each capture on hand:
+
+```
+                  peak offset from centre     frame-to-frame spread (std)
+MTK  (256 taps)          13 taps                        3.1 taps
+FeitCSI (242 taps)        8 taps                         1.7 taps
+```
+
+The offset is real and roughly stable — not noise splashed across the row —
+so the panel is still meaningful, just not for absolute time-of-flight. Read
+it for **relative** delay between echoes: a second, smaller peak next to the
+main one is a reflection arriving that many taps later than the direct path,
+regardless of where the main peak itself happens to sit.
 
 Two things have to be undone before the IFFT means anything, both because
 every metric in this pipeline is already laid out DC-centred rather than in
@@ -520,25 +539,22 @@ raw FFT bin order (see [Data Format](#data-format) below):
   result, it relocates every echo to the wrong delay.
 - **`fftshift` after it, for display.** Raw IFFT output puts delay 0 at
   index 0, ascending — the ordinary DSP convention, and what
-  `backend.cir.ratio_to_cir` returns. But a real channel's true delay rarely
-  lands on an exact sample, so the peak's energy splits between tap 0 and
-  the *last* tap (a fractional delay just before zero wraps circularly to
-  the far end). Measured on both a FeitCSI and an MTK capture, that split
-  carries 15-30% of the peak's neighbourhood weight into the wrong-looking
-  place — one physical peak rendered as two. `ratio_to_cir_centred`
-  (fftshift, delay 0 in the middle) is what `csi_ratio_cir` actually serves,
-  and what reunites it: measured the same way, 95-100% of frames then land
-  their peak within two taps of the row's centre. It also means the CIR
-  panel reuses the same centred axis the frequency-domain panels already
-  have — the frontend needs a different *label* (`Delay tap`, via
-  `Heatmap`'s `axisLabel` prop) but no different axis logic.
+  `backend.cir.csi_to_cir` returns. `csi_to_cir_centred` (fftshift, delay 0
+  where index 0 *would* be, now at the row's middle) is what `csi_cir`
+  actually serves. This lets the CIR panel reuse the same centred axis the
+  frequency-domain panels already have — the frontend needs a different
+  *label* (`Delay tap`, via `Heatmap`'s `axisLabel` prop) but no different
+  axis logic — and it still matters here even though the real peak is not
+  at centre: a fractional-tap delay splits its energy across the row's two
+  edges in the raw layout (tap 0 and the *last* tap), and centring reunites
+  that split wherever in the row it lands.
 
 Null subcarriers — the MTK guard band, whatever CSIKit dropped as unusable on
 a FeitCSI capture — arrive as NaN and are read as zero energy on that tone
 before the transform, which is the standard reading for a punctured
 spectrum and is exactly what the MTK hardware's own null-tone encoding
-already means. A frame with *no* ratio at all (single-stream) is left NaN
-rather than computed as a confident flat zero, which would otherwise be
+already means. A frame with no primary stream decoded is left NaN rather
+than computed as a confident flat zero, which would otherwise be
 indistinguishable from "measured, no echoes".
 
 One asymmetry between the two capture formats is worth knowing before
@@ -550,16 +566,16 @@ unusable subcarriers *deleted* by CSIKit rather than zeroed in place, so the
 is still peaked at the true delay but carries extra sidelobe smearing from
 the gaps. Good enough to read off relative timing, not to trust to the last
 dB, and not comparable dB-for-dB between the two formats in any case — see
-[MediaTek captures](#mediatek-captures) for why their ratios are not the
-same physical quantity to begin with.
+[MediaTek captures](#mediatek-captures) for why their raw channels are not
+directly comparable to begin with.
 
-`csi_ratio_cir` uses max-hold aggregation like the other magnitude metrics
+`csi_cir` uses max-hold aggregation like the other magnitude metrics
 (peak-preserving when a display column spans several native frames), and is
 exempt from the tile layer's usual "same cells have data" invariant for
 derived metrics: a CIR row is a delay tap, not a subcarrier, so there is no
 per-cell correspondence to a subcarrier-indexed base to preserve. What does
-still hold, cell for cell, is *frame* coverage — a column the base ratio had
-no data for gets no CIR either.
+still hold, cell for cell, is *frame* coverage — a column the base channel
+had no data for gets no CIR either.
 
 ## Data Format
 

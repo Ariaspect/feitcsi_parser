@@ -111,10 +111,13 @@ export type Metric =
   // Unwrapped along time on the corrected ratio: accumulated phase, so it
   // leaves [-pi, pi] and takes a fitted scale like the amplitude metrics.
   | "csi_ratio_phase_time_unwrapped"
-  // Delay-domain view of the corrected ratio: abs(IFFT(ratio)) per frame.
-  // Row 0 is not a subcarrier here, it is a delay tap, fftshifted so the
-  // zero-delay peak sits in the row centre alongside DC on the other panels.
-  | "csi_ratio_cir";
+  // Delay-domain view of the raw channel (rx0/tx0), not the ratio:
+  // abs(IFFT(amplitude, phase)) per frame. Row 0 is not a subcarrier here,
+  // it is a delay tap, fftshifted onto the same centred axis the other
+  // panels use -- but unlike the ratio's own CIR, the peak is not
+  // zero-referenced (no CFO/SFO cancellation for a single channel), so it
+  // sits off-centre by this capture's own uncalibrated timing offset.
+  | "csi_cir";
 
 export async function fetchTile(
   path: string,

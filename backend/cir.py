@@ -1,12 +1,30 @@
-"""CSI ratio -> channel impulse response: IFFT along the subcarrier axis.
+"""Raw CSI -> channel impulse response: IFFT along the subcarrier axis.
 
-The ratio metrics are a complex frequency response split into a dB
-magnitude and a phase, both taken per subcarrier. An inverse FFT of that
-response gives the channel impulse response (CIR): a row per frame, delay
-tap along the columns instead of subcarrier. Echoes at increasing
-round-trip delay show up as separated peaks — a different read on the same
-ratio than anything the frequency-domain panels give, and one the
-frequency-axis unwrapping in ``backend.phase`` cannot answer.
+``amplitude``/``phase`` are a complex frequency response — rx0/tx0's
+measured channel, split into a dB magnitude and a phase, one value per
+subcarrier. An inverse FFT of that response gives the channel impulse
+response (CIR): a row per frame, delay tap along the columns instead of
+subcarrier. Echoes at increasing round-trip delay show up as separated
+peaks — a different read on the same data than anything the
+frequency-domain panels give, and one the frequency-axis unwrapping in
+``backend.phase`` cannot answer.
+
+This is deliberately the *raw* channel, not the rx1/rx0 ratio ``backend.ratio``
+corrects: dividing two chains cancels the receiver's CFO/SFO and per-packet
+timing offset, which is exactly why the ratio's own IFFT (an earlier version
+of this module) came out so cleanly centred on zero delay. A single channel
+has none of that cancellation, so this CIR is not zero-referenced: it shows
+propagation delay plus whatever uncalibrated hardware/timing offset the
+receiver adds on top, and that combined offset moves a little from frame to
+frame as CFO/SFO drift. Measured on both captures on hand — 1500 frames of
+a single sender, no swap-correction applicable since there is no second
+chain to be swapped with — the peak sits at a roughly constant offset from
+centre (13 taps out of 256 on an MTK capture, 8 out of 242 on a FeitCSI one)
+with a few taps of frame-to-frame spread (std 3.1 and 1.7 taps
+respectively). Read *relative* delay between echoes off this panel — where
+the second bump sits relative to the main peak — not absolute time-of-flight
+from the row's centre; that is what the ratio-based CIR was for; a single
+channel's cancellation-free timing offset makes an absolute read unsound.
 
 Two things about the array must be respected before an IFFT means anything:
 
@@ -37,11 +55,12 @@ Two things about the array must be respected before an IFFT means anything:
   sidelobe smearing from the gaps. Good enough to read off timing, not to
   trust to the last dB.
 
-A frame with no ratio at all (single-stream) has every subcarrier NaN, not
-just the null bins. Zero-filling that row would compute the IFFT of silence
-and report it as a flat, confident zero — indistinguishable from "measured
-and found nothing". It is reported as NaN instead, matching the coverage
-the frame's ratio already had.
+A frame with no primary stream decoded (e.g. rx0 absent on a group missing
+that slot) has every subcarrier NaN, not just the null bins. Zero-filling
+that row would compute the IFFT of silence and report it as a flat,
+confident zero — indistinguishable from "measured and found nothing". It is
+reported as NaN instead, matching the coverage the frame's own amplitude/
+phase already had.
 """
 
 from __future__ import annotations
@@ -49,21 +68,21 @@ from __future__ import annotations
 import numpy as np
 
 
-def ratio_to_cir(ratio_amplitude_db: np.ndarray, ratio_phase: np.ndarray) -> np.ndarray:
-    """abs(IFFT(ratio)) along the subcarrier axis, one row per frame.
+def csi_to_cir(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarray:
+    """abs(IFFT(H)) along the subcarrier axis, one row per frame.
 
-    Inputs are what ``decode_frames`` and the swap correction produce:
-    ``ratio_amplitude_db`` in 20*log10 dB, ``ratio_phase`` in radians. The
-    output has the same shape, one magnitude per delay tap, in the ratio's
-    own linear (dimensionless) units — never dB, since a delay-domain
-    response is genuinely zero between echoes and dB cannot show that.
+    Inputs are what ``decode_frames`` produces for the primary channel:
+    ``amplitude_db`` in 20*log10 dB, ``phase`` in radians. The output has
+    the same shape, one magnitude per delay tap, in the channel's own
+    linear (dimensionless) units — never dB, since a delay-domain response
+    is genuinely zero between echoes and dB cannot show that.
     """
-    amp = np.asarray(ratio_amplitude_db, dtype=np.float64)
-    phase = np.asarray(ratio_phase, dtype=np.float64)
-    live = np.isfinite(amp) & np.isfinite(phase)
+    amp = np.asarray(amplitude_db, dtype=np.float64)
+    ph = np.asarray(phase, dtype=np.float64)
+    live = np.isfinite(amp) & np.isfinite(ph)
 
     magnitude = np.where(live, 10.0 ** (amp / 20.0), 0.0)
-    h = magnitude * np.exp(1j * np.where(live, phase, 0.0))
+    h = magnitude * np.exp(1j * np.where(live, ph, 0.0))
     cir = np.fft.ifft(np.fft.ifftshift(h, axes=1), axis=1)
 
     out = np.abs(cir).astype(np.float32)
@@ -71,30 +90,20 @@ def ratio_to_cir(ratio_amplitude_db: np.ndarray, ratio_phase: np.ndarray) -> np.
     return out
 
 
-def ratio_to_cir_centred(
-    ratio_amplitude_db: np.ndarray, ratio_phase: np.ndarray
-) -> np.ndarray:
-    """``ratio_to_cir``, re-centred for display on this app's axis convention.
+def csi_to_cir_centred(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarray:
+    """``csi_to_cir``, re-centred for display on this app's axis convention.
 
-    Raw ``ratio_to_cir`` puts the zero-delay tap first (index 0) and delay
-    ascends from there — the ordinary DSP convention, and the right one for
-    anything that wants to *index* a specific delay. It is also the wrong
-    shape for a plot: a channel whose true delay sits a fraction of a tap
-    before zero wraps circularly to the *last* tap, so the single strongest
-    peak in a LOS-dominated capture shows up split across the two opposite
-    edges of the row instead of together. Measured on both captures on hand,
-    that split carries 15-30% of the peak's neighbourhood weight — visibly
-    two peaks where there is physically one.
-
-    Every frequency-domain metric in this pipeline is already plotted DC-
-    centred (see the FeitCSI and MTK parser docstrings), so an
-    ``np.fft.fftshift`` here — moving the zero-delay tap from index 0 to the
-    row's centre — reunites the split peak *and* lets the CIR panel reuse
-    that existing centred axis without the frontend needing to know delay
-    from subcarrier. Taps to one side of centre are positive delay (real
-    echoes); taps to the other are small negative delay, an artifact of the
-    DFT's circularity rather than a physical acausal path, exactly mirroring
-    how negative subcarrier index is not a second physical band on the
-    frequency-domain panels.
+    Raw ``csi_to_cir`` puts delay 0 first (index 0) and ascends from there —
+    the ordinary DSP convention, and the right one for anything that wants
+    to *index* a specific delay. Every frequency-domain metric in this
+    pipeline is already plotted DC-centred (see the FeitCSI and MTK parser
+    docstrings), so an ``np.fft.fftshift`` here lets the CIR panel reuse
+    that same centred axis without the frontend needing to know delay from
+    subcarrier — the peak lands off-centre by this channel's own timing
+    offset (see the module docstring) rather than at the centre itself, but
+    the axis machinery is shared either way. Taps that wrap past the row's
+    far edge are the DFT's circularity, not a physical acausal path, exactly
+    mirroring how negative subcarrier index is not a second physical band
+    on the frequency-domain panels.
     """
-    return np.fft.fftshift(ratio_to_cir(ratio_amplitude_db, ratio_phase), axes=1)
+    return np.fft.fftshift(csi_to_cir(amplitude_db, phase), axes=1)
