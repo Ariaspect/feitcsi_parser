@@ -562,7 +562,7 @@ def _decode_via_blocks(
 
 def _interpolate_time_gaps(
     grid: np.ndarray,
-    empty: np.ndarray,
+    fillable: np.ndarray,
     data: np.ndarray,
     decoded_times: np.ndarray,
     t0: float,
@@ -572,12 +572,14 @@ def _interpolate_time_gaps(
     *,
     circular: bool,
 ) -> int:
-    """Fill NaN columns of *grid* by linearly interpolating between the two
-    decoded frames bracketing each one; return how many columns were filled.
+    """Fill the *fillable* columns of *grid* by linearly interpolating between
+    the two decoded frames bracketing each one; return how many were filled.
 
-    Only columns within *gap_limit* of both neighbours are touched — this is
-    the sampling-gap/dropped-packet distinction from ``compute_tile``, not
-    repeated here. *circular* selects the interpolation itself: a plain
+    *fillable* marks the columns eligible for the fill — empty ones that are
+    genuine sampling gaps rather than filter omissions; ``compute_tile`` makes
+    that call. Of those, only columns within *gap_limit* of both neighbours
+    are touched — the sampling-gap/dropped-packet distinction, also from
+    ``compute_tile`` and not repeated here. *circular* selects the interpolation itself: a plain
     weighted average is correct for a magnitude or an unwrapped/accumulated
     phase, but wrong for an angle wrapped to (-pi, pi] — averaging +3.1 rad
     and -3.1 rad directly walks the long way around the circle and lands
@@ -587,7 +589,7 @@ def _interpolate_time_gaps(
     """
     n_decoded = len(decoded_times)
     centres = t0 + (np.arange(width) + 0.5) / width * span
-    ec = centres[empty]
+    ec = centres[fillable]
     j = np.searchsorted(decoded_times, ec)
     j_lo = np.clip(j - 1, 0, n_decoded - 1)
     j_hi = np.clip(j, 0, n_decoded - 1)
@@ -595,7 +597,7 @@ def _interpolate_time_gaps(
     t_hi = decoded_times[j_hi]
     dist = np.minimum(np.abs(t_lo - ec), np.abs(t_hi - ec))
     ok = dist <= gap_limit
-    cols = np.flatnonzero(empty)[ok]
+    cols = np.flatnonzero(fillable)[ok]
     if cols.size == 0:
         return 0
 
@@ -658,7 +660,9 @@ def compute_tile(
     ``mimo`` and ``source_mac`` restrict which frames are eligible for
     decoding. Filtered-out frames leave NaN holes — they are NOT filled from
     neighbours, so a 2x2 burst excluded by a '2x1 only' filter stays visible
-    as a transparent stripe. The capture's full extent (``t_min``/``t_max``
+    as a stripe. A filter narrows which columns the gap fill may touch; it
+    does not switch the fill off, so a column that held no frames at all is
+    still filled as the sampling gap it is. The capture's full extent (``t_min``/``t_max``
     in metadata) is the unfiltered range so the live view keeps tracking
     growth; the tile window itself reflects the request.
     """
@@ -801,22 +805,41 @@ def compute_tile(
     # linear interpolation in time between the two decoded frames bracketing
     # the gap — not a nearest-frame copy, which would hold each value flat
     # until the next real sample and understate how fast the channel moves
-    # between them. When a filter is active, frames excluded by the filter
-    # must stay NaN — they are not sampling gaps, they are intentional
-    # omissions. So skip the fill entirely while filtered, and skip it
-    # entirely when *interpolate* is off — the whole point of turning it off
-    # is to see gaps as gaps, not smoothed over by a guess.
+    # between them. Skipped entirely when *interpolate* is off — the whole
+    # point of turning it off is to see gaps as gaps, not smoothed over by a
+    # guess.
+    #
+    # A filter narrows *which* columns are eligible, and does not switch the
+    # fill off. Frames a filter excluded must stay NaN: a 2x2 burst dropped by
+    # a '2x1 only' filter is an intentional omission and has to remain a
+    # visible stripe, not get painted over from its neighbours. But a column
+    # holding no frames at all is a sampling gap whether or not a filter is
+    # set, and there is no reason a sender selection should stop it being
+    # filled. The two are told apart by asking the unfiltered frame times
+    # whether anything was ever there — without that distinction the only safe
+    # move was to disable the fill wholesale, which is what made the
+    # interpolate toggle inert as soon as any filter was chosen.
     empty = col_ends <= col_starts
-    if not filtered and n_decoded >= 2:
+    if filtered:
+        all_starts = np.searchsorted(times, col_edges[:-1], side="left")
+        all_ends = np.searchsorted(times, col_edges[1:], side="left")
+        all_ends[-1] = int(np.searchsorted(times, col_edges[-1], side="right"))
+        kept_starts = np.searchsorted(filtered_times, col_edges[:-1], side="left")
+        kept_ends = np.searchsorted(filtered_times, col_edges[1:], side="left")
+        kept_ends[-1] = int(np.searchsorted(filtered_times, col_edges[-1], side="right"))
+        # Frames were there, none of them passed: an omission, not a gap.
+        filter_emptied = (all_ends > all_starts) & (kept_ends <= kept_starts)
+        fillable = empty & ~filter_emptied
+    else:
+        fillable = empty
+    if n_decoded >= 2:
         gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
-    elif not filtered:
-        gap_limit = 0.0
     else:
         gap_limit = 0.0
     gap_limit = max(gap_limit, span / width)
-    if interpolate and not filtered and n_decoded > 0 and empty.any():
+    if interpolate and n_decoded > 0 and fillable.any():
         filled_columns = _interpolate_time_gaps(
-            grid, empty, data, decoded_times, t0, span, width, gap_limit,
+            grid, fillable, data, decoded_times, t0, span, width, gap_limit,
             circular=metric in CIRCULAR_METRICS,
         )
     else:

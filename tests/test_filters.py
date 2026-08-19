@@ -196,10 +196,42 @@ def test_tile_filtered_leaves_holes(mixed_file: Path) -> None:
 
     grid, meta = compute_tile(mixed_file, t0, t1, 200, "amplitude", mimo=(2, 2))
     assert meta["frames_decoded"] == 1
-    assert meta["filled_columns"] == 0  # filter disables gap fill
+    assert meta["filled_columns"] == 0  # nothing here is a sampling gap
     # Most columns should be NaN (only the one with the 2x2 frame is finite).
     finite_cols = np.isfinite(grid).any(axis=0).sum()
     assert finite_cols <= 1
+
+
+def test_filtered_tile_fills_gaps_but_not_filter_holes() -> None:
+    """A filter narrows which columns the time-gap fill may touch, and no
+    longer switches the fill off.
+
+    A column the filter emptied — frames were there, none passed — stays NaN:
+    an intentional omission, not a sampling gap. A column holding no frames at
+    all is a sampling gap and gets filled like any other. capture.dat
+    interleaves two senders, so filtering to one produces both kinds at once.
+    """
+    reset_tile_caches()
+    idx = FrameIndex(CAPTURE)
+    mac = "08:bf:b8:95:80:04"
+    t0, t1 = float(idx.times[0]), float(idx.times[-1])
+    width = 500
+
+    grid, meta = compute_tile(CAPTURE, t0, t1, width, "amplitude", source_mac=mac)
+
+    times = np.asarray(idx.times)
+    kept = times[np.array([m == mac for m in idx.source_macs])]
+    edges = t0 + np.arange(width + 1) / width * (t1 - t0)
+    # Last column closed on the right, matching compute_tile's col_ends[-1].
+    any_frame = np.histogram(times, edges)[0] > 0
+    any_kept = np.histogram(kept, edges)[0] > 0
+    finite = np.isfinite(grid).any(axis=0)
+
+    filter_emptied = any_frame & ~any_kept
+    assert filter_emptied.any(), "fixture no longer produces filter holes"
+    assert not finite[filter_emptied].any(), "filter omission was painted over"
+    assert (~any_frame).any(), "fixture no longer produces sampling gaps"
+    assert meta["filled_columns"] > 0, "filter still suppresses the gap fill"
 
 
 def test_tile_unfiltered_fills_sampling_gaps(mixed_file: Path) -> None:
