@@ -27,7 +27,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .batch import decode_frames
+from . import mtk
+from .batch import decode_frames as _decode_feitcsi
+from .cir import csi_to_cir_centred
 from .index import FrameIndex
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
 from .ratio import (
@@ -61,6 +63,12 @@ class Derived(NamedTuple):
     transform: Callable[..., np.ndarray]
     needs_times: bool = False
     needs_reference: bool = False
+    # False for a transform that changes what a row *is* — the CIR's rows are
+    # delay taps, not subcarriers, so a base's per-subcarrier NaN pattern
+    # (guard band, dropped pilots) has no counterpart to preserve. What must
+    # still hold, and does, is coverage per *frame*: a column the base has no
+    # ratio for gets no CIR either. See ``test_derived_metrics_are_served``.
+    preserves_coverage: bool = True
 
 # Metrics decoded straight out of a frame payload.
 BASE_METRICS = ("amplitude", "phase", "csi_ratio_amplitude", "csi_ratio_phase")
@@ -102,6 +110,17 @@ DERIVED_METRICS: dict[str, Derived] = {
     "csi_ratio_phase_time_unwrapped": Derived(
         ("csi_ratio_phase_corrected",), unwrap_time, needs_times=True
     ),
+    # Delay-domain view of the raw channel (rx0/tx0), not the ratio: no
+    # correction applies because there is no second chain to have been
+    # swapped with, so this is built straight on the base amplitude/phase
+    # and needs no Reference. See backend.cir for why this is deliberately
+    # the uncorrected channel rather than the ratio's own IFFT — the two
+    # answer different questions and are not interchangeable.
+    "csi_cir": Derived(
+        ("amplitude", "phase"),
+        csi_to_cir_centred,
+        preserves_coverage=False,
+    ),
 }
 
 TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS)
@@ -123,7 +142,28 @@ def _needs_reference(metric: str) -> bool:
 # nearest-frame: a maximum over angles is meaningless, and that holds for the
 # unwrapped views too — an unwrapped row is still a phase curve, just one
 # whose branch cuts have been removed.
-MAX_HOLD_METRICS = ("amplitude", "csi_ratio_amplitude", "csi_ratio_amplitude_corrected")
+MAX_HOLD_METRICS = (
+    "amplitude",
+    "csi_ratio_amplitude",
+    "csi_ratio_amplitude_corrected",
+    # A CIR magnitude is the same kind of quantity as an amplitude — real,
+    # non-negative, meaningfully peaked — so the same peak-preserving
+    # aggregation applies rather than nearest-frame, which would just pick
+    # one frame's echo pattern and discard the rest of a zoomed-out column.
+    "csi_cir",
+)
+
+# Metrics whose values are angles wrapped to (-pi, pi] — the ones the
+# frontend gives a fixed [-pi, pi] scale and the TWILIGHT palette. Averaging
+# two wrapped angles with plain arithmetic is wrong exactly at the branch
+# cut: a frame at +3.1 rad and its neighbour at -3.1 rad are 0.08 rad apart
+# on the circle, and linear interpolation would walk the *long* way around
+# and report something near 0. The gap-fill below detours through
+# exp(i*angle) for these so it interpolates along the circle instead of
+# through the cut. Every other metric here — including the *_unwrapped and
+# *_detrended views, whose whole point is to no longer be an angle on a
+# circle — is a plain number and takes ordinary linear interpolation.
+CIRCULAR_METRICS = ("phase", "csi_ratio_phase", "csi_ratio_phase_corrected")
 
 # Maximum frames decoded per /api/tile request. When the requested time range
 # holds more frames than this, stride-sample approximately BUDGET frames evenly
@@ -229,6 +269,7 @@ def get_reference(
     *,
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
+    interpolate: bool = True,
 ) -> Reference | None:
     """Return the cached orientation reference for this capture and filter.
 
@@ -253,7 +294,7 @@ def get_reference(
     if source_mac is None or not source_mac.strip():
         return None
 
-    key = (str(path), file_size, mimo, source_mac)
+    key = (str(path), file_size, mimo, source_mac, interpolate)
     with _ref_lock:
         if key in _ref_cache:
             return _ref_cache[key]
@@ -266,7 +307,9 @@ def get_reference(
         picks = np.unique(
             np.linspace(0, len(ids) - 1, min(REFERENCE_SAMPLE, len(ids))).astype(np.int64)
         )
-        _, _, ratio_amp, ratio_phase = decode_frames(path, index, ids[picks])
+        _, _, ratio_amp, ratio_phase = decode_frames(
+            path, index, ids[picks], interpolate=interpolate
+        )
         ref = build_reference(ratio_amp, ratio_phase)
 
     with _ref_lock:
@@ -274,8 +317,19 @@ def get_reference(
     return ref
 
 
-def get_index(path: Path) -> FrameIndex:
-    """Return the shared FrameIndex for *path*, extending it if it exists.
+def decode_frames(path, index, frame_ids, **kwargs):
+    """Decode via whichever reader owns *index*.
+
+    The two readers produce the same four float32 arrays; everything above
+    this line is format-blind.
+    """
+    if isinstance(index, mtk.MTKIndex):
+        return mtk.decode_frames(path, index, frame_ids, **kwargs)
+    return _decode_feitcsi(path, index, frame_ids, **kwargs)
+
+
+def get_index(path: Path) -> FrameIndex | mtk.MTKIndex:
+    """Return the shared index for *path*, extending it if it exists.
 
     Mirrors the ``get_stream`` registry pattern in ``backend.stream``: the
     first call builds a full FrameIndex, subsequent calls call ``extend()``
@@ -286,7 +340,7 @@ def get_index(path: Path) -> FrameIndex:
     with _index_lock:
         idx = _index_cache.get(path)
         if idx is None:
-            idx = FrameIndex(path)
+            idx = mtk.MTKIndex(path) if mtk.can_read(path) else FrameIndex(path)
             _index_cache[path] = idx
         else:
             idx.extend()
@@ -314,6 +368,7 @@ def _decode_block_cached(
     metric: str,
     file_size: int,
     reference: Reference | None = None,
+    interpolate: bool = True,
 ) -> np.ndarray:
     """Return the decoded block for one metric, from cache or by decoding.
 
@@ -332,7 +387,7 @@ def _decode_block_cached(
     boundary would be decided on half of them — visible as a speckled seam
     every BLOCK_SIZE frames.
     """
-    key = (str(path), metric, block_idx, file_size)
+    key = (str(path), metric, block_idx, file_size, interpolate)
     cached = _block_cache.get(key)
     if cached is not None:
         return cached
@@ -346,7 +401,8 @@ def _decode_block_cached(
             trail = min(CONTEXT_FRAMES, index.count - stop)
             bases = [
                 _base_with_context(
-                    path, index, block_idx, m, file_size, lead, trail, reference
+                    path, index, block_idx, m, file_size, lead, trail, reference,
+                    interpolate=interpolate,
                 )
                 for m in derived.bases
             ]
@@ -357,7 +413,10 @@ def _decode_block_cached(
             )[lead : lead + (stop - start)]
         else:
             bases = [
-                _decode_block_cached(path, index, block_idx, m, file_size, reference)
+                _decode_block_cached(
+                    path, index, block_idx, m, file_size, reference,
+                    interpolate=interpolate,
+                )
                 for m in derived.bases
             ]
             if derived.needs_times:
@@ -370,7 +429,9 @@ def _decode_block_cached(
     block_start = block_idx * BLOCK_SIZE
     block_end = min(block_start + BLOCK_SIZE, index.count)
     block_ids = np.arange(block_start, block_end)
-    amp, phase, ratio_amp, ratio_phase = decode_frames(path, index, block_ids)
+    amp, phase, ratio_amp, ratio_phase = decode_frames(
+        path, index, block_ids, interpolate=interpolate
+    )
 
     _metrics = {
         "amplitude": amp,
@@ -379,7 +440,7 @@ def _decode_block_cached(
         "csi_ratio_phase": ratio_phase,
     }
     for m, arr in _metrics.items():
-        _block_cache.put((str(path), m, block_idx, file_size), arr)
+        _block_cache.put((str(path), m, block_idx, file_size, interpolate), arr)
     with _block_cache._lock:
         _block_cache.frames_decoded += len(block_ids)
 
@@ -395,6 +456,8 @@ def _base_with_context(
     lead: int,
     trail: int,
     reference: Reference | None,
+    *,
+    interpolate: bool = True,
 ) -> np.ndarray:
     """One block of *metric* with *lead*/*trail* frames of its neighbours.
 
@@ -405,15 +468,20 @@ def _base_with_context(
     parts = []
     if lead:
         prev = _decode_block_cached(
-            path, index, block_idx - 1, metric, file_size, reference
+            path, index, block_idx - 1, metric, file_size, reference,
+            interpolate=interpolate,
         )
         parts.append(prev[len(prev) - lead :])
     parts.append(
-        _decode_block_cached(path, index, block_idx, metric, file_size, reference)
+        _decode_block_cached(
+            path, index, block_idx, metric, file_size, reference,
+            interpolate=interpolate,
+        )
     )
     if trail:
         nxt = _decode_block_cached(
-            path, index, block_idx + 1, metric, file_size, reference
+            path, index, block_idx + 1, metric, file_size, reference,
+            interpolate=interpolate,
         )
         parts.append(nxt[:trail])
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
@@ -456,6 +524,8 @@ def _decode_via_blocks(
     metric: str,
     file_size: int,
     reference: Reference | None = None,
+    *,
+    interpolate: bool = True,
 ) -> np.ndarray:
     """Decode a contiguous range of frames through the block cache.
 
@@ -474,7 +544,8 @@ def _decode_via_blocks(
         block_start = block_idx * BLOCK_SIZE
 
         block = _decode_block_cached(
-            path, index, block_idx, metric, file_size, reference
+            path, index, block_idx, metric, file_size, reference,
+            interpolate=interpolate,
         )
 
         # How many of our frame_ids fall in this block?
@@ -487,6 +558,65 @@ def _decode_via_blocks(
         pos += take
 
     return out
+
+
+def _interpolate_time_gaps(
+    grid: np.ndarray,
+    fillable: np.ndarray,
+    data: np.ndarray,
+    decoded_times: np.ndarray,
+    t0: float,
+    span: float,
+    width: int,
+    gap_limit: float,
+    *,
+    circular: bool,
+) -> int:
+    """Fill the *fillable* columns of *grid* by linearly interpolating between
+    the two decoded frames bracketing each one; return how many were filled.
+
+    *fillable* marks the columns eligible for the fill — empty ones that are
+    genuine sampling gaps rather than filter omissions; ``compute_tile`` makes
+    that call. Of those, only columns within *gap_limit* of both neighbours
+    are touched — the sampling-gap/dropped-packet distinction, also from
+    ``compute_tile`` and not repeated here. *circular* selects the interpolation itself: a plain
+    weighted average is correct for a magnitude or an unwrapped/accumulated
+    phase, but wrong for an angle wrapped to (-pi, pi] — averaging +3.1 rad
+    and -3.1 rad directly walks the long way around the circle and lands
+    near 0 rad, when the two are 0.08 rad apart the short way. Blending
+    ``exp(i*angle)`` instead and taking the angle back out follows the
+    circle rather than the branch cut.
+    """
+    n_decoded = len(decoded_times)
+    centres = t0 + (np.arange(width) + 0.5) / width * span
+    ec = centres[fillable]
+    j = np.searchsorted(decoded_times, ec)
+    j_lo = np.clip(j - 1, 0, n_decoded - 1)
+    j_hi = np.clip(j, 0, n_decoded - 1)
+    t_lo = decoded_times[j_lo]
+    t_hi = decoded_times[j_hi]
+    dist = np.minimum(np.abs(t_lo - ec), np.abs(t_hi - ec))
+    ok = dist <= gap_limit
+    cols = np.flatnonzero(fillable)[ok]
+    if cols.size == 0:
+        return 0
+
+    lo_vals = data[j_lo[ok]]
+    hi_vals = data[j_hi[ok]]
+    # Position within [t_lo, t_hi], 0 at t_lo and 1 at t_hi. The denominator
+    # is only ever 0 when j_lo == j_hi (a gap past the first or last decoded
+    # frame, clamped to it on both sides) — lo_vals and hi_vals are then
+    # identical and mu is moot, so the divide-by-zero is masked rather than
+    # branched around.
+    span_t = t_hi[ok] - t_lo[ok]
+    mu = np.where(span_t > 0, (ec[ok] - t_lo[ok]) / np.where(span_t > 0, span_t, 1.0), 0.0)
+    mu = mu[:, None]
+    if circular:
+        blended = np.angle((1 - mu) * np.exp(1j * lo_vals) + mu * np.exp(1j * hi_vals))
+    else:
+        blended = (1 - mu) * lo_vals + mu * hi_vals
+    grid[:, cols] = blended.T
+    return int(cols.size)
 
 
 # ----------------------------------------------------------------------- #
@@ -503,6 +633,7 @@ def compute_tile(
     *,
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
+    interpolate: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Build a display-resolution grid for the requested time range.
 
@@ -515,10 +646,23 @@ def compute_tile(
     ``vmin``, ``vmax``, ``p_low``, ``p_high``, ``t_min``, ``t_max``,
     ``filled_columns``.
 
+    ``interpolate`` is one flag governing two different axes. Along
+    subcarrier, it controls whether structural nulls (pilots, the DC/guard
+    band) are filled or left ``NaN`` — see ``batch.decode_frames`` and
+    ``mtk.decode_frames``. It reaches every decode this function does,
+    including the orientation ``Reference``, and is part of the block and
+    reference cache keys, so toggling it never serves a block decoded under
+    the other setting. Along time, it controls whether a sampling gap (see
+    "Gap fill" below) is linearly interpolated between its two bracketing
+    frames or left ``NaN`` — off means every gap in the data, in either
+    axis, stays visible as a gap.
+
     ``mimo`` and ``source_mac`` restrict which frames are eligible for
     decoding. Filtered-out frames leave NaN holes — they are NOT filled from
     neighbours, so a 2x2 burst excluded by a '2x1 only' filter stays visible
-    as a transparent stripe. The capture's full extent (``t_min``/``t_max``
+    as a stripe. A filter narrows which columns the gap fill may touch; it
+    does not switch the fill off, so a column that held no frames at all is
+    still filled as the sampling gap it is. The capture's full extent (``t_min``/``t_max``
     in metadata) is the unfiltered range so the live view keeps tracking
     growth; the tile window itself reflects the request.
     """
@@ -587,7 +731,10 @@ def compute_tile(
     # did not get. On `source_mac=all` the ratio is passed through untouched.
     needs_reference = _needs_reference(metric)
     reference = (
-        get_reference(path, index, file_size, mimo=mimo, source_mac=source_mac)
+        get_reference(
+            path, index, file_size, mimo=mimo, source_mac=source_mac,
+            interpolate=interpolate,
+        )
         if needs_reference
         else None
     )
@@ -596,7 +743,10 @@ def compute_tile(
     if n_decoded == 0:
         data = np.empty((0, num_sc), dtype=np.float32)
     elif exact and not filtered:
-        data = _decode_via_blocks(path, index, frame_ids, metric, file_size, reference)
+        data = _decode_via_blocks(
+            path, index, frame_ids, metric, file_size, reference,
+            interpolate=interpolate,
+        )
     else:
         # A stride-sampled selection is not a frame sequence: its rows are
         # seconds apart, so the passes that compare a frame to its neighbour
@@ -613,7 +763,9 @@ def compute_tile(
             lead = int(sel_in_filtered[0]) - lo_ctx
         ctx_ids = filtered_idxs[ctx_sel] if filtered else ctx_sel.astype(np.int64)
 
-        amp, phase, ratio_amp, ratio_phase = decode_frames(path, index, ctx_ids)
+        amp, phase, ratio_amp, ratio_phase = decode_frames(
+            path, index, ctx_ids, interpolate=interpolate
+        )
         available = {
             "amplitude": amp,
             "phase": phase,
@@ -649,34 +801,49 @@ def compute_tile(
                 nearest = s + int(np.argmin(np.abs(decoded_times[s:e] - centre)))
                 grid[:, x] = data[nearest]
 
-    # Gap fill: only sampling gaps (sub-gap-limit intervals) get filled from
-    # the nearest decoded frame. When a filter is active, frames excluded by
-    # the filter must stay NaN — they are not sampling gaps, they are
-    # intentional omissions. So skip the fill entirely while filtered.
-    filled_columns = 0
+    # Gap fill: only sampling gaps (sub-gap-limit intervals) get filled, by
+    # linear interpolation in time between the two decoded frames bracketing
+    # the gap — not a nearest-frame copy, which would hold each value flat
+    # until the next real sample and understate how fast the channel moves
+    # between them. Skipped entirely when *interpolate* is off — the whole
+    # point of turning it off is to see gaps as gaps, not smoothed over by a
+    # guess.
+    #
+    # A filter narrows *which* columns are eligible, and does not switch the
+    # fill off. Frames a filter excluded must stay NaN: a 2x2 burst dropped by
+    # a '2x1 only' filter is an intentional omission and has to remain a
+    # visible stripe, not get painted over from its neighbours. But a column
+    # holding no frames at all is a sampling gap whether or not a filter is
+    # set, and there is no reason a sender selection should stop it being
+    # filled. The two are told apart by asking the unfiltered frame times
+    # whether anything was ever there — without that distinction the only safe
+    # move was to disable the fill wholesale, which is what made the
+    # interpolate toggle inert as soon as any filter was chosen.
     empty = col_ends <= col_starts
-    if not filtered and n_decoded >= 2:
+    if filtered:
+        all_starts = np.searchsorted(times, col_edges[:-1], side="left")
+        all_ends = np.searchsorted(times, col_edges[1:], side="left")
+        all_ends[-1] = int(np.searchsorted(times, col_edges[-1], side="right"))
+        kept_starts = np.searchsorted(filtered_times, col_edges[:-1], side="left")
+        kept_ends = np.searchsorted(filtered_times, col_edges[1:], side="left")
+        kept_ends[-1] = int(np.searchsorted(filtered_times, col_edges[-1], side="right"))
+        # Frames were there, none of them passed: an omission, not a gap.
+        filter_emptied = (all_ends > all_starts) & (kept_ends <= kept_starts)
+        fillable = empty & ~filter_emptied
+    else:
+        fillable = empty
+    if n_decoded >= 2:
         gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
-    elif not filtered:
-        gap_limit = 0.0
     else:
         gap_limit = 0.0
     gap_limit = max(gap_limit, span / width)
-    if not filtered and n_decoded > 0 and empty.any():
-        centres = t0 + (np.arange(width) + 0.5) / width * span
-        ec = centres[empty]
-        j = np.searchsorted(decoded_times, ec)
-        j_lo = np.clip(j - 1, 0, n_decoded - 1)
-        j_hi = np.clip(j, 0, n_decoded - 1)
-        d_lo = np.abs(decoded_times[j_lo] - ec)
-        d_hi = np.abs(decoded_times[j_hi] - ec)
-        nearest = np.where(d_lo <= d_hi, j_lo, j_hi)
-        dist = np.minimum(d_lo, d_hi)
-        ok = dist <= gap_limit
-        cols = np.flatnonzero(empty)[ok]
-        if cols.size > 0:
-            grid[:, cols] = data[nearest[ok]].T
-            filled_columns = int(cols.size)
+    if interpolate and n_decoded > 0 and fillable.any():
+        filled_columns = _interpolate_time_gaps(
+            grid, fillable, data, decoded_times, t0, span, width, gap_limit,
+            circular=metric in CIRCULAR_METRICS,
+        )
+    else:
+        filled_columns = 0
 
     # Flip subcarrier axis so row 0 = highest subcarrier index, matching the
     # frontend's image convention (subcarrierSourceRect in render.ts).
@@ -689,9 +856,23 @@ def compute_tile(
     # the colormap. The 1st/99th percentile bounds are the robust scale the
     # frontend locks to. -inf from db(0) is excluded by the finite mask, not
     # clamped into the percentile — clamping would drag p_low to -inf.
-    finite_mask = np.isfinite(grid)
+    #
+    # Measured on *data*, not on *grid*: grid is the wrong population. Each of
+    # its columns reduces the ~len(data)/width frames that fall in it, and for
+    # a MAX_HOLD_METRICS metric that reduction is a maximum — an order
+    # statistic whose distribution depends on how many frames share a column,
+    # i.e. on the caller's pixel width. Bounds taken from it move with the
+    # browser window: on a 2285-frame capture, p_low reads 39.4 at width 900
+    # against 38.0 at 2560 (true 37.8), and vmin 17.2 against 0.0, while vmax
+    # stays pinned because max-of-max is the one statistic the reduction
+    # cannot bias. Two laptops would lock to different color scales for the
+    # same capture. *data* holds the frames themselves, whose selection is a
+    # function of TILE_FRAME_BUDGET alone, so these bounds are width-invariant.
+    # Gap-filled columns would not have added extrema either way — they are
+    # convex blends of data rows.
+    finite_mask = np.isfinite(data)
     if finite_mask.any():
-        finite_vals = grid[finite_mask]
+        finite_vals = data[finite_mask]
         vmin = float(finite_vals.min())
         vmax = float(finite_vals.max())
         p_low = float(np.nanpercentile(finite_vals, 1))

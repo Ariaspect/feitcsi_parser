@@ -82,10 +82,12 @@ Open http://localhost:8000
 3. Every `refresh_ms` the frontend polls `/api/meta`, which reads the frame
    index only and never decodes payloads. Pixels come from `/api/tile`, which
    is fetched only when the view actually changes.
-4. Frontend renders seven heatmaps: amplitude (dBm), phase (rad), CSI ratio
+4. Frontend renders eight heatmaps: amplitude (dBm), phase (rad), CSI ratio
    amplitude and phase, then the swap-corrected CSI ratio pair, then the
-   time-unwrapped ratio phase. See [Phase views](#phase-views) and
-   [Swapped rx streams](#swapped-rx-streams).
+   time-unwrapped ratio phase, then the raw channel's impulse response
+   (CIR). See [Phase views](#phase-views),
+   [Swapped rx streams](#swapped-rx-streams), and
+   [Channel impulse response](#channel-impulse-response).
 
 Controls:
 - **.dat file** — path to a capture, growing or finished.
@@ -132,7 +134,10 @@ Query params:
   `csi_ratio_phase`, `phase_unwrapped`, `phase_detrended`,
   `csi_ratio_phase_unwrapped`, `csi_ratio_phase_time_unwrapped`
   (see [Phase views](#phase-views)), `csi_ratio_phase_corrected`,
-  `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams))
+  `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams)),
+  `csi_cir` (see [Channel impulse response](#channel-impulse-response))
+- `mimo`, `source_mac` — optional filters, `'all'` or a specific value
+- `interpolate` — default `true`; see [Interpolation](#interpolation) below
 
 Returns a bare `(num_subcarriers, width)` little-endian float32 array,
 row-major, row 0 = highest subcarrier. The body stays a buffer the client wraps
@@ -150,9 +155,11 @@ in a `Float32Array`; metadata rides in headers:
 | `X-Tile-Filled` | Columns filled from a neighbouring frame across a sampling gap. |
 
 Columns are max-hold for amplitude and nearest-frame for phase (a maximum of an
-angle is meaningless). A column that receives no frame borrows the nearest one
-within 2x the 95th-percentile inter-frame interval; beyond that it stays NaN, so
-a real capture dropout stays visible instead of being painted over.
+angle is meaningless). A column that receives no frame is linearly
+interpolated between its two bracketing frames when within 2x the
+95th-percentile inter-frame interval; beyond that, or with `interpolate=false`,
+it stays NaN, so a real capture dropout stays visible instead of being painted
+over. See [Interpolation](#interpolation).
 
 ### `GET /api/snapshot`
 
@@ -187,6 +194,40 @@ Returns JSON:
 
 Returns `{"status": "ok"}`.
 
+## Interpolation
+
+One flag, `interpolate` (default `true`), governs filling gaps in two
+different axes, and the frontend's **Interpolate** toolbar button toggles
+both together:
+
+- **Subcarrier axis.** Structural nulls — pilots, the DC/guard band — are
+  filled by interpolation across neighbouring subcarriers within a frame.
+  This is `backend.batch.decode_frames`'/`backend.mtk.decode_frames`'
+  `interpolate` parameter; see their docstrings for the null-run and
+  MAX_NULL_RUN details.
+- **Time axis.** A display column with no decoded frame in it — a gap
+  between samples, not a real capture dropout — is filled by linear
+  interpolation between the two frames bracketing it, weighted by how far
+  the column's centre sits between their timestamps. Only gaps within 2x the
+  95th-percentile inter-frame interval are touched; a real dropout is wider
+  than that and stays NaN regardless of the flag, so turning interpolation
+  off never hides one.
+
+`false` leaves both axes exactly as decoded off the wire — every structural
+null and every sampling gap NaN. This is the honest view of what the hardware
+actually reported; `true` (the default) is the smoothed one most panels are
+easier to read in.
+
+The time-axis fill is a plain weighted average for every metric except the
+three wrapped-phase ones (`phase`, `csi_ratio_phase`,
+`csi_ratio_phase_corrected`). Averaging a wrapped angle directly is wrong at
+the branch cut: a frame at +3.1 rad and its neighbour at -3.1 rad are 0.08 rad
+apart on the circle, and a plain average lands near 0 rad — the long way
+round. Those three metrics are blended as `exp(i*phase)` and converted back
+with `atan2`, which follows the circle instead. Every other metric, including
+the `*_unwrapped` and `*_detrended` views, is by construction no longer an
+angle on a circle and takes the plain average.
+
 ## Phase views
 
 Everything the decoder produces comes out of `np.angle`, so the four base
@@ -218,7 +259,10 @@ Two things the detrend is deliberately not applied to:
 
 - **The CSI ratio.** rx1/rx0 shares an oscillator and clock between the two
   chains, so the division already cancels the common offset and most of the
-  slope. Fitting a line there removes signal, not nuisance.
+  slope. Fitting a line there removes signal, not nuisance. (On a MediaTek
+  capture the two halves are transmit chains rather than receive ones, which
+  cancels the same offsets but leaves a deliberate ramp behind — see
+  [MediaTek captures](#mediatek-captures).)
 - **Anything needing absolute time-of-flight.** The fit takes any genuinely
   linear-in-frequency component with it. Standard sanitization in the
   SpotFi/PhaseFi lineage, fine for motion sensing, fatal for ranging.
@@ -454,6 +498,85 @@ No per-frame property identifies them either. Note that CSIKit parses only
 about eight fields out of the 272 header bytes, so most of the header has no
 known semantics: "nothing found" is not "nothing there".
 
+## Channel impulse response
+
+`csi_cir` takes the raw channel — `amplitude`/`phase`, i.e. rx0/tx0, not the
+rx1/rx0 ratio — and inverse-FFTs it along the subcarrier axis into delay:
+`backend.cir.csi_to_cir`. Where every other panel reads the channel in
+frequency, this one reads it in time-of-flight — echoes at different path
+lengths separate into different delay taps instead of showing up as ripples
+across subcarriers.
+
+**Deliberately the raw channel, not the ratio.** An earlier version of this
+metric was built on the swap-corrected ratio instead, which cancels the
+receiver's CFO/SFO and packet-detection timing offset because both chains
+share them — that is exactly why *that* IFFT centred so cleanly on zero
+delay. There is no second chain here to cancel anything against, so this CIR
+is **not zero-referenced**: what it shows is real propagation delay plus
+whatever uncalibrated hardware/timing offset the receiver adds on top of it,
+and that combined offset drifts a little between frames as CFO/SFO drift.
+Measured on 1500 frames of a single sender on each capture on hand:
+
+```
+                  peak offset from centre     frame-to-frame spread (std)
+MTK  (256 taps)          13 taps                        3.1 taps
+FeitCSI (242 taps)        8 taps                         1.7 taps
+```
+
+The offset is real and roughly stable — not noise splashed across the row —
+so the panel is still meaningful, just not for absolute time-of-flight. Read
+it for **relative** delay between echoes: a second, smaller peak next to the
+main one is a reflection arriving that many taps later than the direct path,
+regardless of where the main peak itself happens to sit.
+
+Two things have to be undone before the IFFT means anything, both because
+every metric in this pipeline is already laid out DC-centred rather than in
+raw FFT bin order (see [Data Format](#data-format) below):
+
+- **`ifftshift` before the transform.** `np.fft.ifft` expects index 0 at DC
+  with positive frequencies ascending and negative ones wrapped to the top;
+  the centred array has DC in the middle. Skipping this does not blur the
+  result, it relocates every echo to the wrong delay.
+- **`fftshift` after it, for display.** Raw IFFT output puts delay 0 at
+  index 0, ascending — the ordinary DSP convention, and what
+  `backend.cir.csi_to_cir` returns. `csi_to_cir_centred` (fftshift, delay 0
+  where index 0 *would* be, now at the row's middle) is what `csi_cir`
+  actually serves. This lets the CIR panel reuse the same centred axis the
+  frequency-domain panels already have — the frontend needs a different
+  *label* (`Delay tap`, via `Heatmap`'s `axisLabel` prop) but no different
+  axis logic — and it still matters here even though the real peak is not
+  at centre: a fractional-tap delay splits its energy across the row's two
+  edges in the raw layout (tap 0 and the *last* tap), and centring reunites
+  that split wherever in the row it lands.
+
+Null subcarriers — the MTK guard band, whatever CSIKit dropped as unusable on
+a FeitCSI capture — arrive as NaN and are read as zero energy on that tone
+before the transform, which is the standard reading for a punctured
+spectrum and is exactly what the MTK hardware's own null-tone encoding
+already means. A frame with no primary stream decoded is left NaN rather
+than computed as a confident flat zero, which would otherwise be
+indistinguishable from "measured, no echoes".
+
+One asymmetry between the two capture formats is worth knowing before
+reading fine structure into this panel: MTK's null bins sit at their true
+positions in a uniform 256-bin comb, so zero-filling them reconstructs the
+transmitted spectrum faithfully. FeitCSI's array has already had its
+unusable subcarriers *deleted* by CSIKit rather than zeroed in place, so the
+242-wide comb handed to the IFFT there is not perfectly uniform — the result
+is still peaked at the true delay but carries extra sidelobe smearing from
+the gaps. Good enough to read off relative timing, not to trust to the last
+dB, and not comparable dB-for-dB between the two formats in any case — see
+[MediaTek captures](#mediatek-captures) for why their raw channels are not
+directly comparable to begin with.
+
+`csi_cir` uses max-hold aggregation like the other magnitude metrics
+(peak-preserving when a display column spans several native frames), and is
+exempt from the tile layer's usual "same cells have data" invariant for
+derived metrics: a CIR row is a delay tap, not a subcarrier, so there is no
+per-cell correspondence to a subcarrier-indexed base to preserve. What does
+still hold, cell for cell, is *frame* coverage — a column the base channel
+had no data for gets no CIR either.
+
 ## Data Format
 
 FeitCSI `.dat` files are binary: sequence of `272-byte header + CSI block`
@@ -467,3 +590,63 @@ applied: it would split the contiguous spectrum and weld the two outer edges
 together.
 
 See https://feitcsi.kuskosoft.com/csi_format/ for the on-wire spec.
+
+### MediaTek captures
+
+Captures pulled off the LG webOS board (`/var/iwtools/iw-priv`, read from
+`/proc/net/wlan/csi_data`) are a different format entirely and are detected by
+sniffing, not by extension. Records are self-delimiting TLVs —
+`magic 0xAC | length u16 LE | tag(1) len(2 LE) value ...` — samples are 14-bit
+signed rather than `int16`, and subcarriers arrive in raw FFT bin order, so
+here `fftshift` **is** required, the exact opposite of the FeitCSI rule above.
+A frame is a *group* of up to four records closed by bit 15 of tag 18, never a
+run sharing a timestamp: the millisecond clock ticks mid-group.
+
+**The ratio is a transmit pair.** Records are indexed by `tpi` and `rpi`. The
+axes are told apart by the transmitter's cyclic shift, which 802.11 applies
+per transmit chain and to nothing else: dividing along `tpi` leaves a ramp,
+dividing along `rpi` leaves none. So `tpi` indexes the AP's transmit chains,
+and it is `tpi` that gets mapped onto the pipeline's rx axis, because
+everything downstream reads the ratio off `rx1/rx0`. **A MediaTek capture's
+"CSI ratio" therefore compares two antennas at the far end of the link**,
+where a FeitCSI capture's compares two on the receiver. Both cancel the
+receiver's CFO/SFO — the two halves come out of one packet, one receive chain
+and one timing recovery — but they are not the same physical quantity and
+should not be pooled or plotted on a shared scale.
+
+`rpi` plane 1 is real signal, not a dead chain (59.43 dB against plane 0's
+59.95 dB, smooth across frequency at 0.995), so it is not obvious from the
+file alone what it is on a board documented as 1x1. It is not used, because
+its ratio is far noisier per frame: at the shortest frame gap the `tpi` ratio
+moves 0.158 rad where the `rpi` ratio moves 0.896 rad, already most of the
+1.571 rad a uniformly random phase would give.
+
+**The cyclic shift is removed by default.** Because the two halves of the
+ratio are two different transmit chains, the fixed per-chain delay the
+standard mandates does not cancel; it survives as a pure linear phase ramp.
+It measures 396.6–402.7 ns across all six captures on hand — the −400 ns the
+standard specifies for a second stream — with no frame of any file dissenting
+on the sign. At 80 MHz that wraps the phase about 30 times across the band,
+which is enough to make any statistic taken along the subcarrier axis
+meaningless: the raw ratio phase of `capture1.bin` has a circular resultant of
+0.010, indistinguishable from uniform, where removing the ramp lifts it to
+0.842.
+
+The ramp is measured once per file — not per view, for the reason the
+orientation reference is also anchored to the file — and subtracted about each
+band's own DC bin, so a 20 MHz and an 80 MHz frame land on one phase
+reference. Only `csi_ratio_phase` is affected; `ratio_amp` is unchanged
+because the correction is a unit-magnitude rotation, and `amplitude`/`phase`
+read rx0 and never see it. Pass `deslope=False` to `mtk.decode_frames` for the
+ratio as decoded. A capture whose frames disagree on the ramp's sign, or whose
+ramp is shallower than 0.05 rad/subcarrier, gets no correction at all rather
+than a number not worth trusting.
+
+Two things to watch when using this ratio. It depends on the AP continuing to
+send two streams — 59 of `capture1.bin`'s 1290 groups are single-stream and
+have no ratio at all — where a genuine receive pair is always present because
+it is your own hardware. And no rate word exists in the format (tag 19 reads 0
+on every record), so there is no way to confirm from the file whether the AP
+ever applies beamforming; if it did, `tpi` would index precoded combinations
+rather than antennas. Nothing in the captures here suggests it happens — no
+frame-to-frame jump exceeds 0.664 rad — but it is not provable from the data.

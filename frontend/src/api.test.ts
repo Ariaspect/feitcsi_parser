@@ -183,6 +183,38 @@ describe("fetchTile", () => {
     expect(init.signal).toBe(controller.signal);
   });
 
+  it("omits interpolate from the URL when true or unset, matching the backend's own default", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockResponse({
+          body: float32Buf([1.0]),
+          headers: { "X-Tile-Width": "1", "X-Tile-Height": "1", "X-Tile-Exact": "1" },
+        }),
+      ),
+    );
+    await fetchTile("p", 0, 1, 1, "amplitude", undefined, null, null, true);
+    await fetchTile("p", 0, 1, 1, "amplitude");
+    const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0] as string).not.toContain("interpolate");
+    expect(calls[1][0] as string).not.toContain("interpolate");
+  });
+
+  it("adds interpolate=false to the URL when explicitly disabled", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockResponse({
+          body: float32Buf([1.0]),
+          headers: { "X-Tile-Width": "1", "X-Tile-Height": "1", "X-Tile-Exact": "1" },
+        }),
+      ),
+    );
+    await fetchTile("p", 0, 1, 1, "amplitude", undefined, null, null, false);
+    const url = (fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toContain("interpolate=false");
+  });
+
   it("throws on HTTP error", async () => {
     vi.stubGlobal(
       "fetch",

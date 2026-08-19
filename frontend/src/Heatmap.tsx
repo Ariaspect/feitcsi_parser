@@ -33,6 +33,11 @@ interface HeatmapProps {
   colorLabel: string;
   palette?: readonly string[];
   height?: number;
+  /** Y-axis caption. Every panel plots a subcarrier-indexed row except the
+   * CIR view, whose rows are delay taps — same centred axis machinery
+   * (scMin/scMax, halfN), different physical meaning, so only the label
+   * changes. */
+  axisLabel?: string;
   /** Link between stacked heatmaps' time axes. When the user zooms or resets
    * one plot, the other mirrors the time window (but not the subcarrier band).
    * Omit for a standalone heatmap. */
@@ -41,6 +46,11 @@ interface HeatmapProps {
   mimo?: string | null;
   /** Source MAC filter passed to /api/tile. 'all' or a MAC string. */
   sourceMac?: string | null;
+  /** Linearly interpolate gaps in both axes: structural nulls (pilots,
+   * DC/guard band) along subcarrier, and sampling gaps along time. False
+   * shows the data as decoded off the wire, NaN gaps and all. Defaults to
+   * true, matching the backend's own default. */
+  interpolate?: boolean;
   /** Dark mode: canvas text/axes/crosshair colors adapt. */
   dark?: boolean;
 }
@@ -91,9 +101,11 @@ interface PropsMirror {
   colorLabel: string;
   palette: readonly string[];
   height: number;
+  axisLabel: string;
   timeLink?: TimeLink;
   mimo?: string | null;
   sourceMac?: string | null;
+  interpolate: boolean;
   dark?: boolean;
 }
 
@@ -111,6 +123,7 @@ interface FetchKey {
   width: number;
   mimo?: string | null;
   sourceMac?: string | null;
+  interpolate: boolean;
 }
 
 export function Heatmap({
@@ -126,9 +139,11 @@ export function Heatmap({
   colorLabel,
   palette = VIRIDIS,
   height = 400,
+  axisLabel = "Subcarrier bin",
   timeLink,
   mimo,
   sourceMac,
+  interpolate = true,
   dark,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -195,9 +210,11 @@ export function Heatmap({
     colorLabel,
     palette,
     height,
+    axisLabel,
     timeLink,
     mimo,
     sourceMac,
+    interpolate,
     dark,
   };
 
@@ -493,7 +510,7 @@ export function Heatmap({
       ctx.save();
       ctx.translate(12, plot.y + plot.h / 2);
       ctx.rotate(-Math.PI / 2);
-      ctx.fillText("Subcarrier bin", 0, 0);
+      ctx.fillText(props.axisLabel, 0, 0);
       ctx.restore();
 
       // --- Colorbar ---
@@ -588,14 +605,21 @@ export function Heatmap({
     >()
       .scaleExtent([1, 10000])
       // Exclude shift so shift+wheel / shift+drag fall through to the hand-rolled
-      // subcarrier handlers. Keep ctrl+wheel (trackpad pinch) for d3.
+      // subcarrier handlers. A plain wheel is excluded too and left to the
+      // page's own scroll: eight stacked 400px panels leave almost no space
+      // between them for the cursor to land on to scroll past them, so a
+      // heatmap capturing every wheel tick under it made the page nearly
+      // unscrollable. Only ctrl+wheel -- a trackpad pinch gesture, or an
+      // explicit "I mean to zoom" -- drives time-zoom; drag-to-pan and
+      // dblclick-to-reset are unaffected, since neither is a wheel event.
       .filter(
         (event: unknown) => {
           const e = event as WheelEvent | MouseEvent | TouchEvent;
           const ctrl = "ctrlKey" in e && e.ctrlKey;
           const shift = "shiftKey" in e && e.shiftKey;
           const button = "button" in e ? e.button : 0;
-          return (!ctrl || e.type === "wheel") && !button && !shift;
+          if (e.type === "wheel") return ctrl && !shift;
+          return !ctrl && !button && !shift;
         },
       )
       .on("zoom", (event: D3ZoomEvent<HTMLCanvasElement, unknown>) => {
@@ -679,6 +703,12 @@ export function Heatmap({
       const geo = geometryRef.current;
       if (!props || !view || !geo) return;
       if (props.numSubcarriers === 0 || !(view.tMax > view.tMin)) return;
+      // A folded panel has no width to draw into. Its ResizeObserver still
+      // fires as it folds and unfolds, and a request made at that moment
+      // would decode the window's frames in full to fill a one-column tile
+      // nobody can see. Unfolding fires the observer again and fetches at the
+      // real width, so nothing is lost by declining here.
+      if (geo.plot.w < 1) return;
 
       const t0 = view.tMin;
       const t1 = view.tMax;
@@ -698,7 +728,8 @@ export function Heatmap({
         lastKey.t1 === t1 &&
         lastKey.width === width &&
         lastKey.mimo === props.mimo &&
-        lastKey.sourceMac === props.sourceMac
+        lastKey.sourceMac === props.sourceMac &&
+        lastKey.interpolate === props.interpolate
       ) {
         return;
       }
@@ -710,6 +741,7 @@ export function Heatmap({
         width,
         mimo: props.mimo,
         sourceMac: props.sourceMac,
+        interpolate: props.interpolate,
       };
 
       abortRef.current?.abort();
@@ -727,6 +759,7 @@ export function Heatmap({
           controller.signal,
           props.mimo,
           props.sourceMac,
+          props.interpolate,
         );
         // Drop stale responses — a newer request may have been issued while
         // this one was in flight. Aborting alone is not sufficient: the fetch

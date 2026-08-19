@@ -17,7 +17,12 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { PlayIcon, PauseIcon, SunIcon, MoonIcon } from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -34,6 +39,42 @@ const DARK_KEY = "feitcsi-dark";
 // and defaulting to one that is not there would show an empty plot.
 const DEFAULT_SOURCE_MAC = "08:bf:b8:95:80:04";
 
+/** A panel that starts folded away.
+ *
+ * The two secondary views are read occasionally, against the panels that stay
+ * open — not on every visit. Folded, they cost a header row instead of a
+ * screen of scrolling, and the reader chooses when to spend the space.
+ *
+ * `keepMounted` is load-bearing: the Heatmap inside subscribes to the shared
+ * time link on mount, so unmounting it on fold would leave it at full extent
+ * while its neighbours stayed zoomed, and unfolding would show a window that
+ * does not match the panel above it. Mounted but display:none it keeps
+ * tracking, and Heatmap declines to fetch at zero width, so a folded panel
+ * still costs nothing to hold open in the DOM.
+ */
+function FoldedPanel({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[panel-open]:rotate-90" />
+        <span className="text-sm font-medium">{title}</span>
+        <span className="ml-auto hidden truncate text-xs text-muted-foreground sm:inline">{hint}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent keepMounted className="pt-4 data-[closed]:hidden">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
   const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS);
@@ -45,10 +86,31 @@ export function App() {
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
   const [sourceMac, setSourceMac] = useState<string>(DEFAULT_SOURCE_MAC);
+  // Linear interpolation of gaps in both axes: structural nulls (pilots,
+  // DC/guard band) along subcarrier, and sampling gaps along time. On by
+  // default to match the backend. Off shows the data exactly as decoded off
+  // the wire, NaN gaps included -- useful for judging what interpolation is
+  // actually doing to a given capture.
+  const [interpolate, setInterpolate] = useState<boolean>(true);
+  // Swap correction on the CSI ratio panels. Some frames arrive with the rx
+  // streams exchanged (ratio reciprocal) or the ratio negated (phase +pi);
+  // correction puts them back. On by default because a capture read without
+  // it shows those frames as vertical discontinuities that are an artefact of
+  // the NIC, not the channel. Off is the escape hatch for judging what the
+  // correction is doing. Detection compares each frame against its
+  // neighbours, so it needs one transmitter's own sequence -- on `all` the
+  // backend declines to act and the panels say so themselves.
+  const [swapCorrected, setSwapCorrected] = useState<boolean>(true);
   const [dark, setDark] = useState<boolean>(() => {
     const stored = localStorage.getItem(DARK_KEY);
     return stored === null ? true : stored === "true";
   });
+
+  // What the ratio panels actually show. Correction needs one transmitter's
+  // own frame sequence to compare neighbours against, so on `all` it cannot
+  // act whatever the toggle says. Deriving metric, panel title and button
+  // label from this one flag keeps the three from disagreeing.
+  const swapActive = swapCorrected && sourceMac !== "all";
 
   const [timeLink] = useState(createTimeLink);
 
@@ -248,6 +310,33 @@ export function App() {
             </Select>
           </div>
 
+          <Button
+            variant={interpolate ? "default" : "outline"}
+            size="sm"
+            onClick={() => setInterpolate((v) => !v)}
+            className="h-8"
+            title="Linearly interpolate gaps in subcarrier (structural nulls) and time (sampling gaps)"
+          >
+            <SplineIcon data-icon="inline-start" />
+            Interpolate {interpolate ? "On" : "Off"}
+          </Button>
+
+          <Button
+            variant={swapActive ? "default" : "outline"}
+            size="sm"
+            onClick={() => setSwapCorrected((v) => !v)}
+            disabled={sourceMac === "all"}
+            className="h-8"
+            title={
+              sourceMac === "all"
+                ? "Select a single MAC to correct swaps. Detection compares each frame against its neighbours, and on all senders consecutive frames rarely come from the same one."
+                : "Put back frames whose rx streams arrived exchanged, or whose ratio arrived negated. Applies to the CSI ratio panels."
+            }
+          >
+            <ArrowLeftRightIcon data-icon="inline-start" />
+            Swap Correction {swapActive ? "On" : "Off"}
+          </Button>
+
           <Button variant="outline" size="icon" onClick={toggleDark} className="h-8 w-8">
             {dark ? <SunIcon /> : <MoonIcon />}
           </Button>
@@ -299,132 +388,137 @@ export function App() {
               captureTMax={meta.t_max}
               title="Amplitude"
               colorLabel="Amplitude (dBm)"
-              height={400}
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
+            <FoldedPanel
+              title="Phase (rx0)"
+              hint="raw wrapped phase — per-packet offset and slope not removed"
+            >
+              <Heatmap
+                path={path}
+                metric="phase"
+                filename={meta.filename}
+                numSubcarriers={meta.num_subcarriers}
+                captureTMin={meta.t_min}
+                captureTMax={meta.t_max}
+                minValue={-Math.PI}
+                maxValue={Math.PI}
+                title="Phase"
+                colorLabel="Phase (rad)"
+                height={320}
+                palette={TWILIGHT}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </FoldedPanel>
+
             <Heatmap
               path={path}
-              metric="phase"
+              metric={swapActive ? "csi_ratio_amplitude_corrected" : "csi_ratio_amplitude"}
               filename={meta.filename}
               numSubcarriers={meta.num_subcarriers}
               captureTMin={meta.t_min}
               captureTMax={meta.t_max}
-              minValue={-Math.PI}
-              maxValue={Math.PI}
-              title="Phase"
-              colorLabel="Phase (rad)"
-              height={400}
-              palette={TWILIGHT}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              dark={dark}
-            />
-            <Heatmap
-              path={path}
-              metric="csi_ratio_amplitude"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
-              title="CSI Ratio Amplitude (rx1/rx0)"
+              title={`CSI Ratio Amplitude (rx1/rx0)${swapActive ? " — Swap-Corrected" : ""}`}
               colorLabel="Ratio amp (dB)"
-              height={400}
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
             <Heatmap
               path={path}
-              metric="csi_ratio_phase"
+              metric={swapActive ? "csi_ratio_phase_corrected" : "csi_ratio_phase"}
               filename={meta.filename}
               numSubcarriers={meta.num_subcarriers}
               captureTMin={meta.t_min}
               captureTMax={meta.t_max}
               minValue={-Math.PI}
               maxValue={Math.PI}
-              title="CSI Ratio Phase (rx1/rx0)"
+              title={`CSI Ratio Phase (rx1/rx0)${swapActive ? " — Swap-Corrected" : ""}`}
               colorLabel="Ratio phase (rad)"
-              height={400}
+              height={320}
               palette={TWILIGHT}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
 
-            <Separator className="my-2" />
-            <p className="text-xs text-muted-foreground">
-              Derived views below. Some frames arrive with the rx streams
-              exchanged (ratio reciprocal) or the ratio negated (phase +π);
-              these put them back. Detection compares each frame against its
-              neighbours, so a single Source MAC must be selected — on{" "}
-              <code className="bg-muted px-1 py-0.5 rounded">all</code> the
-              correction declines to act rather than guessing.
-            </p>
-
-            <Heatmap
-              path={path}
-              metric="csi_ratio_amplitude_corrected"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
-              title="CSI Ratio Amplitude — Swap-Corrected (rx1/rx0)"
-              colorLabel="Ratio amp (dB)"
-              height={400}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              dark={dark}
-            />
-            <Heatmap
-              path={path}
-              metric="csi_ratio_phase_corrected"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
-              minValue={-Math.PI}
-              maxValue={Math.PI}
-              title="CSI Ratio Phase — Swap-Corrected (rx1/rx0)"
-              colorLabel="Ratio phase (rad)"
-              height={400}
-              palette={TWILIGHT}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              dark={dark}
-            />
-
-            <Separator className="my-2" />
-            <p className="text-xs text-muted-foreground">
-              Unwrapped along <i>time</i> on the corrected ratio: continuous
-              phase accumulated as the channel moves. Restarts after a capture
-              gap and anchors each segment at its own start, so the value is
-              phase change since that segment began — segments are not
-              comparable with one another. Shares the phase palette above for
-              comparison, though accumulated phase is not an angle.
-            </p>
-
-            <Heatmap
-              path={path}
-              metric="csi_ratio_phase_time_unwrapped"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
+            <FoldedPanel
               title="CSI Ratio Phase — Time-Unwrapped (rx1/rx0)"
-              colorLabel="Accumulated phase (rad)"
-              height={400}
-              palette={TWILIGHT}
+              hint="accumulated phase, per segment — not an angle"
+            >
+              <p className="pb-4 text-xs text-muted-foreground">
+                Unwrapped along <i>time</i> on the corrected ratio: continuous
+                phase accumulated as the channel moves. Restarts after a capture
+                gap and anchors each segment at its own start, so the value is
+                phase change since that segment began — segments are not
+                comparable with one another. Shares the phase palette above for
+                comparison, though accumulated phase is not an angle. Always
+                swap-corrected regardless of the toggle: uncorrected, 1.2% of
+                frame-to-frame steps exceed π, and each one the unwrapper
+                misreads offsets everything after it by 2π for good.
+              </p>
+              <Heatmap
+                path={path}
+                metric="csi_ratio_phase_time_unwrapped"
+                filename={meta.filename}
+                numSubcarriers={meta.num_subcarriers}
+                captureTMin={meta.t_min}
+                captureTMax={meta.t_max}
+                title="CSI Ratio Phase — Time-Unwrapped (rx1/rx0)"
+                colorLabel="Accumulated phase (rad)"
+                height={320}
+                palette={TWILIGHT}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </FoldedPanel>
+
+            <Separator className="my-2" />
+            <p className="text-xs text-muted-foreground">
+              Channel impulse response: the raw channel (rx0/tx0), not the
+              ratio, inverse-FFT'd from subcarrier into delay. Rows are delay
+              taps, not subcarriers — re-centred onto the same middle-of-row
+              axis the panels above use, but unlike those, the peak here is
+              <i>not</i> zero-delay: a single channel has no CFO/SFO
+              cancellation, so it sits off-centre by this capture's own
+              uncalibrated timing offset, fairly stable frame to frame.
+              Read it for <i>relative</i> delay between echoes — a second,
+              smaller peak next to the main one — not absolute time-of-flight
+              from the row's centre.
+            </p>
+
+            <Heatmap
+              path={path}
+              metric="csi_cir"
+              filename={meta.filename}
+              numSubcarriers={meta.num_subcarriers}
+              captureTMin={meta.t_min}
+              captureTMax={meta.t_max}
+              title="Channel Impulse Response — |IFFT| (rx0/tx0)"
+              colorLabel="CIR magnitude"
+              axisLabel="Delay tap"
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
+              interpolate={interpolate}
               dark={dark}
             />
           </div>

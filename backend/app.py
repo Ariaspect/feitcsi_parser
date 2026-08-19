@@ -147,7 +147,7 @@ def meta(
 
     return {
         "filename": p.name,
-        "chipset": "Intel AX2xx",
+        "chipset": idx.chipset,
         "bandwidth": idx.bandwidth,
         "num_subcarriers": idx.num_subcarriers,
         "total_frames": filtered_count,
@@ -190,6 +190,12 @@ def tile(
     metric: str = Query("amplitude", description=f"One of: {', '.join(TILE_METRICS)}"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM' (e.g. '2x1', '2x2')"),
     source_mac: str | None = Query(None, description="Source MAC filter, e.g. 'd8:3a:dd:29:22:f5'"),
+    interpolate: bool = Query(
+        True,
+        description="Linearly interpolate gaps in both axes: structural "
+        "nulls (pilots, DC/guard band) along subcarrier, and sampling gaps "
+        "along time. False leaves both as NaN, as decoded on the wire.",
+    ),
 ) -> Response:
     """Pre-aggregated grid at display resolution, as raw little-endian float32.
 
@@ -217,7 +223,10 @@ def tile(
 
     mac_filter = parse_mac_filter(source_mac)
 
-    grid, meta = compute_tile(p, t0, t1, width, metric, mimo=mimo_filter, source_mac=mac_filter)
+    grid, meta = compute_tile(
+        p, t0, t1, width, metric,
+        mimo=mimo_filter, source_mac=mac_filter, interpolate=interpolate,
+    )
 
     body = grid.astype("<f4", copy=False).tobytes()
 
@@ -250,21 +259,27 @@ def health() -> dict:
 
 
 CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
+# .dat = FeitCSI, .bin = MediaTek.
+CAPTURE_SUFFIXES = (".dat", ".bin")
 
 
 @app.get("/api/captures")
 def list_captures() -> list[dict]:
-    """List .dat files in the captures/ directory.
+    """List capture files in the captures/ directory.
 
-    Returns filename, size_bytes, and mtime (ISO 8601) for each .dat file,
+    Returns filename, size_bytes, and mtime (ISO 8601) for each capture,
     sorted by mtime descending (newest first). Missing dir → empty list.
+
+    ``.dat`` is FeitCSI, ``.bin`` is MediaTek. The extension only decides
+    what to *list*; which parser runs is decided by sniffing the bytes in
+    ``tiles.get_index``, so a misnamed file still reads correctly.
     """
     if not CAPTURES_DIR.is_dir():
         return []
 
     files: list[dict] = []
     for entry in CAPTURES_DIR.iterdir():
-        if entry.suffix == ".dat" and entry.is_file():
+        if entry.suffix in CAPTURE_SUFFIXES and entry.is_file():
             st = entry.stat()
             files.append({
                 "filename": entry.name,

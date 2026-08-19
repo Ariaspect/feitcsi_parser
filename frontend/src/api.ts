@@ -110,7 +110,14 @@ export type Metric =
   | "csi_ratio_amplitude_corrected"
   // Unwrapped along time on the corrected ratio: accumulated phase, so it
   // leaves [-pi, pi] and takes a fitted scale like the amplitude metrics.
-  | "csi_ratio_phase_time_unwrapped";
+  | "csi_ratio_phase_time_unwrapped"
+  // Delay-domain view of the raw channel (rx0/tx0), not the ratio:
+  // abs(IFFT(amplitude, phase)) per frame. Row 0 is not a subcarrier here,
+  // it is a delay tap, fftshifted onto the same centred axis the other
+  // panels use -- but unlike the ratio's own CIR, the peak is not
+  // zero-referenced (no CFO/SFO cancellation for a single channel), so it
+  // sits off-centre by this capture's own uncalibrated timing offset.
+  | "csi_cir";
 
 export async function fetchTile(
   path: string,
@@ -121,11 +128,16 @@ export async function fetchTile(
   signal?: AbortSignal,
   mimo?: string | null,
   sourceMac?: string | null,
+  interpolate?: boolean,
 ): Promise<Tile> {
   const url =
     `/api/tile?path=${encodeURIComponent(path)}` +
     `&t0=${t0}&t1=${t1}&width=${width}&metric=${metric}` +
-    filterParams(mimo, sourceMac);
+    filterParams(mimo, sourceMac) +
+    // Omit when true: that is the backend's own default, and every existing
+    // caller that never heard of this parameter must keep building the same
+    // URL it always has.
+    (interpolate === false ? "&interpolate=false" : "");
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text();
