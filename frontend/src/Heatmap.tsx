@@ -703,6 +703,12 @@ export function Heatmap({
       const geo = geometryRef.current;
       if (!props || !view || !geo) return;
       if (props.numSubcarriers === 0 || !(view.tMax > view.tMin)) return;
+      // A folded panel has no width to draw into. Its ResizeObserver still
+      // fires as it folds and unfolds, and a request made at that moment
+      // would decode the window's frames in full to fill a one-column tile
+      // nobody can see. Unfolding fires the observer again and fetches at the
+      // real width, so nothing is lost by declining here.
+      if (geo.plot.w < 1) return;
 
       const t0 = view.tMin;
       const t1 = view.tMax;

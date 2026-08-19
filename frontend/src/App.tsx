@@ -17,7 +17,12 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon } from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -33,6 +38,42 @@ const DARK_KEY = "feitcsi-dark";
 // see the filters effect. A capture from a different rig has different MACs,
 // and defaulting to one that is not there would show an empty plot.
 const DEFAULT_SOURCE_MAC = "08:bf:b8:95:80:04";
+
+/** A panel that starts folded away.
+ *
+ * The two secondary views are read occasionally, against the panels that stay
+ * open — not on every visit. Folded, they cost a header row instead of a
+ * screen of scrolling, and the reader chooses when to spend the space.
+ *
+ * `keepMounted` is load-bearing: the Heatmap inside subscribes to the shared
+ * time link on mount, so unmounting it on fold would leave it at full extent
+ * while its neighbours stayed zoomed, and unfolding would show a window that
+ * does not match the panel above it. Mounted but display:none it keeps
+ * tracking, and Heatmap declines to fetch at zero width, so a folded panel
+ * still costs nothing to hold open in the DOM.
+ */
+function FoldedPanel({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[panel-open]:rotate-90" />
+        <span className="text-sm font-medium">{title}</span>
+        <span className="ml-auto hidden truncate text-xs text-muted-foreground sm:inline">{hint}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent keepMounted className="pt-4 data-[closed]:hidden">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
 
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
@@ -354,25 +395,31 @@ export function App() {
               interpolate={interpolate}
               dark={dark}
             />
-            <Heatmap
-              path={path}
-              metric="phase"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
-              minValue={-Math.PI}
-              maxValue={Math.PI}
-              title="Phase"
-              colorLabel="Phase (rad)"
-              height={320}
-              palette={TWILIGHT}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              interpolate={interpolate}
-              dark={dark}
-            />
+            <FoldedPanel
+              title="Phase (rx0)"
+              hint="raw wrapped phase — per-packet offset and slope not removed"
+            >
+              <Heatmap
+                path={path}
+                metric="phase"
+                filename={meta.filename}
+                numSubcarriers={meta.num_subcarriers}
+                captureTMin={meta.t_min}
+                captureTMax={meta.t_max}
+                minValue={-Math.PI}
+                maxValue={Math.PI}
+                title="Phase"
+                colorLabel="Phase (rad)"
+                height={320}
+                palette={TWILIGHT}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </FoldedPanel>
+
             <Heatmap
               path={path}
               metric={swapActive ? "csi_ratio_amplitude_corrected" : "csi_ratio_amplitude"}
@@ -409,36 +456,39 @@ export function App() {
               dark={dark}
             />
 
-            <Separator className="my-2" />
-            <p className="text-xs text-muted-foreground">
-              Unwrapped along <i>time</i> on the corrected ratio: continuous
-              phase accumulated as the channel moves. Restarts after a capture
-              gap and anchors each segment at its own start, so the value is
-              phase change since that segment began — segments are not
-              comparable with one another. Shares the phase palette above for
-              comparison, though accumulated phase is not an angle. Always
-              swap-corrected regardless of the toggle: uncorrected, 1.2% of
-              frame-to-frame steps exceed π, and each one the unwrapper
-              misreads offsets everything after it by 2π for good.
-            </p>
-
-            <Heatmap
-              path={path}
-              metric="csi_ratio_phase_time_unwrapped"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
+            <FoldedPanel
               title="CSI Ratio Phase — Time-Unwrapped (rx1/rx0)"
-              colorLabel="Accumulated phase (rad)"
-              height={320}
-              palette={TWILIGHT}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              interpolate={interpolate}
-              dark={dark}
-            />
+              hint="accumulated phase, per segment — not an angle"
+            >
+              <p className="pb-4 text-xs text-muted-foreground">
+                Unwrapped along <i>time</i> on the corrected ratio: continuous
+                phase accumulated as the channel moves. Restarts after a capture
+                gap and anchors each segment at its own start, so the value is
+                phase change since that segment began — segments are not
+                comparable with one another. Shares the phase palette above for
+                comparison, though accumulated phase is not an angle. Always
+                swap-corrected regardless of the toggle: uncorrected, 1.2% of
+                frame-to-frame steps exceed π, and each one the unwrapper
+                misreads offsets everything after it by 2π for good.
+              </p>
+              <Heatmap
+                path={path}
+                metric="csi_ratio_phase_time_unwrapped"
+                filename={meta.filename}
+                numSubcarriers={meta.num_subcarriers}
+                captureTMin={meta.t_min}
+                captureTMax={meta.t_max}
+                title="CSI Ratio Phase — Time-Unwrapped (rx1/rx0)"
+                colorLabel="Accumulated phase (rad)"
+                height={320}
+                palette={TWILIGHT}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </FoldedPanel>
 
             <Separator className="my-2" />
             <p className="text-xs text-muted-foreground">
