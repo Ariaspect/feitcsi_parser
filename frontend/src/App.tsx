@@ -427,6 +427,35 @@ export function App() {
               sourceMac={sourceMac}
               dark={dark}
             />
+
+            <Separator className="my-2" />
+            <p className="text-xs text-muted-foreground">
+              Channel impulse response: the swap-corrected ratio, inverse-FFT'd
+              from subcarrier into delay. Rows are delay taps, not
+              subcarriers — re-centred so the zero-delay peak sits in the
+              middle alongside DC on the panels above, with real echoes to one
+              side and the DFT's circular wraparound to the other. A single
+              tight peak near centre says the ratio is dominated by one path;
+              a capture with real multipath shows a second, smaller peak
+              offset from it.
+            </p>
+
+            <Heatmap
+              path={path}
+              metric="csi_ratio_cir"
+              filename={meta.filename}
+              numSubcarriers={meta.num_subcarriers}
+              captureTMin={meta.t_min}
+              captureTMax={meta.t_max}
+              title="CSI Ratio CIR — |IFFT| (rx1/rx0)"
+              colorLabel="CIR magnitude"
+              axisLabel="Delay tap"
+              height={400}
+              timeLink={timeLink}
+              mimo={mimo}
+              sourceMac={sourceMac}
+              dark={dark}
+            />
           </div>
         ) : (
           !error && (

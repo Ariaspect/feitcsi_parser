@@ -908,9 +908,17 @@ def test_derived_metrics_are_served(index: FrameIndex) -> None:
         grid, _ = compute_tile(CAPTURE, t0, t1, 64, metric)
         base_grid, _ = compute_tile(CAPTURE, t0, t1, 64, spec.bases[0])
         assert grid.shape == base_grid.shape, metric
-        # Same cells have data; the transform must not create or destroy
-        # coverage, only change the values inside it.
-        assert np.array_equal(np.isnan(grid), np.isnan(base_grid)), metric
+        if spec.preserves_coverage:
+            # Same cells have data; the transform must not create or
+            # destroy coverage, only change the values inside it.
+            assert np.array_equal(np.isnan(grid), np.isnan(base_grid)), metric
+        else:
+            # A domain-changing transform (e.g. subcarrier -> delay tap)
+            # has no per-cell correspondence to preserve, but a column
+            # (frame) the base had no ratio for must still be empty here.
+            base_has_data = ~np.all(np.isnan(base_grid), axis=0)
+            grid_has_data = ~np.all(np.isnan(grid), axis=0)
+            assert np.array_equal(base_has_data, grid_has_data), metric
 
 
 def test_derived_metric_matches_transform_of_decoded_frames(index: FrameIndex) -> None:

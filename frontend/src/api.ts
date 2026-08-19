@@ -110,7 +110,11 @@ export type Metric =
   | "csi_ratio_amplitude_corrected"
   // Unwrapped along time on the corrected ratio: accumulated phase, so it
   // leaves [-pi, pi] and takes a fitted scale like the amplitude metrics.
-  | "csi_ratio_phase_time_unwrapped";
+  | "csi_ratio_phase_time_unwrapped"
+  // Delay-domain view of the corrected ratio: abs(IFFT(ratio)) per frame.
+  // Row 0 is not a subcarrier here, it is a delay tap, fftshifted so the
+  // zero-delay peak sits in the row centre alongside DC on the other panels.
+  | "csi_ratio_cir";
 
 export async function fetchTile(
   path: string,

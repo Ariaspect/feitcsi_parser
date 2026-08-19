@@ -33,6 +33,11 @@ interface HeatmapProps {
   colorLabel: string;
   palette?: readonly string[];
   height?: number;
+  /** Y-axis caption. Every panel plots a subcarrier-indexed row except the
+   * CIR view, whose rows are delay taps — same centred axis machinery
+   * (scMin/scMax, halfN), different physical meaning, so only the label
+   * changes. */
+  axisLabel?: string;
   /** Link between stacked heatmaps' time axes. When the user zooms or resets
    * one plot, the other mirrors the time window (but not the subcarrier band).
    * Omit for a standalone heatmap. */
@@ -91,6 +96,7 @@ interface PropsMirror {
   colorLabel: string;
   palette: readonly string[];
   height: number;
+  axisLabel: string;
   timeLink?: TimeLink;
   mimo?: string | null;
   sourceMac?: string | null;
@@ -126,6 +132,7 @@ export function Heatmap({
   colorLabel,
   palette = VIRIDIS,
   height = 400,
+  axisLabel = "Subcarrier bin",
   timeLink,
   mimo,
   sourceMac,
@@ -195,6 +202,7 @@ export function Heatmap({
     colorLabel,
     palette,
     height,
+    axisLabel,
     timeLink,
     mimo,
     sourceMac,
@@ -493,7 +501,7 @@ export function Heatmap({
       ctx.save();
       ctx.translate(12, plot.y + plot.h / 2);
       ctx.rotate(-Math.PI / 2);
-      ctx.fillText("Subcarrier bin", 0, 0);
+      ctx.fillText(props.axisLabel, 0, 0);
       ctx.restore();
 
       // --- Colorbar ---

@@ -82,10 +82,11 @@ Open http://localhost:8000
 3. Every `refresh_ms` the frontend polls `/api/meta`, which reads the frame
    index only and never decodes payloads. Pixels come from `/api/tile`, which
    is fetched only when the view actually changes.
-4. Frontend renders seven heatmaps: amplitude (dBm), phase (rad), CSI ratio
+4. Frontend renders eight heatmaps: amplitude (dBm), phase (rad), CSI ratio
    amplitude and phase, then the swap-corrected CSI ratio pair, then the
-   time-unwrapped ratio phase. See [Phase views](#phase-views) and
-   [Swapped rx streams](#swapped-rx-streams).
+   time-unwrapped ratio phase, then its channel impulse response (CIR). See
+   [Phase views](#phase-views), [Swapped rx streams](#swapped-rx-streams),
+   and [Channel impulse response](#channel-impulse-response).
 
 Controls:
 - **.dat file** — path to a capture, growing or finished.
@@ -132,7 +133,8 @@ Query params:
   `csi_ratio_phase`, `phase_unwrapped`, `phase_detrended`,
   `csi_ratio_phase_unwrapped`, `csi_ratio_phase_time_unwrapped`
   (see [Phase views](#phase-views)), `csi_ratio_phase_corrected`,
-  `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams))
+  `csi_ratio_amplitude_corrected` (see [Swapped rx streams](#swapped-rx-streams)),
+  `csi_ratio_cir` (see [Channel impulse response](#channel-impulse-response))
 
 Returns a bare `(num_subcarriers, width)` little-endian float32 array,
 row-major, row 0 = highest subcarrier. The body stays a buffer the client wraps
@@ -456,6 +458,70 @@ that varies — does not correlate (its two groups align at 0.999 *as-is*).
 No per-frame property identifies them either. Note that CSIKit parses only
 about eight fields out of the 272 header bytes, so most of the header has no
 known semantics: "nothing found" is not "nothing there".
+
+## Channel impulse response
+
+`csi_ratio_cir` takes the swap-corrected ratio (`backend.ratio`) and inverse-
+FFTs it along the subcarrier axis into delay: `backend.cir.ratio_to_cir`.
+Where every other panel reads the channel in frequency, this one reads it in
+time-of-flight — echoes at different path lengths separate into different
+delay taps instead of showing up as ripples across subcarriers.
+
+It is built on the *corrected* ratio for the same reason the time-unwrap is
+(see above): an uncorrected swap negates the ratio's phase, and an IFFT would
+turn that negation into a spurious second peak rather than leaving a single
+clean one.
+
+Two things have to be undone before the IFFT means anything, both because
+every metric in this pipeline is already laid out DC-centred rather than in
+raw FFT bin order (see [Data Format](#data-format) below):
+
+- **`ifftshift` before the transform.** `np.fft.ifft` expects index 0 at DC
+  with positive frequencies ascending and negative ones wrapped to the top;
+  the centred array has DC in the middle. Skipping this does not blur the
+  result, it relocates every echo to the wrong delay.
+- **`fftshift` after it, for display.** Raw IFFT output puts delay 0 at
+  index 0, ascending — the ordinary DSP convention, and what
+  `backend.cir.ratio_to_cir` returns. But a real channel's true delay rarely
+  lands on an exact sample, so the peak's energy splits between tap 0 and
+  the *last* tap (a fractional delay just before zero wraps circularly to
+  the far end). Measured on both a FeitCSI and an MTK capture, that split
+  carries 15-30% of the peak's neighbourhood weight into the wrong-looking
+  place — one physical peak rendered as two. `ratio_to_cir_centred`
+  (fftshift, delay 0 in the middle) is what `csi_ratio_cir` actually serves,
+  and what reunites it: measured the same way, 95-100% of frames then land
+  their peak within two taps of the row's centre. It also means the CIR
+  panel reuses the same centred axis the frequency-domain panels already
+  have — the frontend needs a different *label* (`Delay tap`, via
+  `Heatmap`'s `axisLabel` prop) but no different axis logic.
+
+Null subcarriers — the MTK guard band, whatever CSIKit dropped as unusable on
+a FeitCSI capture — arrive as NaN and are read as zero energy on that tone
+before the transform, which is the standard reading for a punctured
+spectrum and is exactly what the MTK hardware's own null-tone encoding
+already means. A frame with *no* ratio at all (single-stream) is left NaN
+rather than computed as a confident flat zero, which would otherwise be
+indistinguishable from "measured, no echoes".
+
+One asymmetry between the two capture formats is worth knowing before
+reading fine structure into this panel: MTK's null bins sit at their true
+positions in a uniform 256-bin comb, so zero-filling them reconstructs the
+transmitted spectrum faithfully. FeitCSI's array has already had its
+unusable subcarriers *deleted* by CSIKit rather than zeroed in place, so the
+242-wide comb handed to the IFFT there is not perfectly uniform — the result
+is still peaked at the true delay but carries extra sidelobe smearing from
+the gaps. Good enough to read off relative timing, not to trust to the last
+dB, and not comparable dB-for-dB between the two formats in any case — see
+[MediaTek captures](#mediatek-captures) for why their ratios are not the
+same physical quantity to begin with.
+
+`csi_ratio_cir` uses max-hold aggregation like the other magnitude metrics
+(peak-preserving when a display column spans several native frames), and is
+exempt from the tile layer's usual "same cells have data" invariant for
+derived metrics: a CIR row is a delay tap, not a subcarrier, so there is no
+per-cell correspondence to a subcarrier-indexed base to preserve. What does
+still hold, cell for cell, is *frame* coverage — a column the base ratio had
+no data for gets no CIR either.
 
 ## Data Format
 

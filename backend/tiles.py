@@ -29,6 +29,7 @@ import numpy as np
 
 from . import mtk
 from .batch import decode_frames as _decode_feitcsi
+from .cir import ratio_to_cir_centred
 from .index import FrameIndex
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
 from .ratio import (
@@ -62,6 +63,12 @@ class Derived(NamedTuple):
     transform: Callable[..., np.ndarray]
     needs_times: bool = False
     needs_reference: bool = False
+    # False for a transform that changes what a row *is* — the CIR's rows are
+    # delay taps, not subcarriers, so a base's per-subcarrier NaN pattern
+    # (guard band, dropped pilots) has no counterpart to preserve. What must
+    # still hold, and does, is coverage per *frame*: a column the base has no
+    # ratio for gets no CIR either. See ``test_derived_metrics_are_served``.
+    preserves_coverage: bool = True
 
 # Metrics decoded straight out of a frame payload.
 BASE_METRICS = ("amplitude", "phase", "csi_ratio_amplitude", "csi_ratio_phase")
@@ -103,6 +110,17 @@ DERIVED_METRICS: dict[str, Derived] = {
     "csi_ratio_phase_time_unwrapped": Derived(
         ("csi_ratio_phase_corrected",), unwrap_time, needs_times=True
     ),
+    # Delay-domain view of the swap-corrected ratio. Built on the corrected
+    # pair rather than the raw one for the same reason the time-unwrap is:
+    # an uncorrected swap flips the ratio's phase, and IFFT would turn that
+    # flip into a spurious second echo rather than leaving it as a single
+    # clean peak. needs_reference is left False here and picked up through
+    # the recursive lookup in _needs_reference, same as the time-unwrap.
+    "csi_ratio_cir": Derived(
+        ("csi_ratio_amplitude_corrected", "csi_ratio_phase_corrected"),
+        ratio_to_cir_centred,
+        preserves_coverage=False,
+    ),
 }
 
 TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS)
@@ -124,7 +142,16 @@ def _needs_reference(metric: str) -> bool:
 # nearest-frame: a maximum over angles is meaningless, and that holds for the
 # unwrapped views too — an unwrapped row is still a phase curve, just one
 # whose branch cuts have been removed.
-MAX_HOLD_METRICS = ("amplitude", "csi_ratio_amplitude", "csi_ratio_amplitude_corrected")
+MAX_HOLD_METRICS = (
+    "amplitude",
+    "csi_ratio_amplitude",
+    "csi_ratio_amplitude_corrected",
+    # A CIR magnitude is the same kind of quantity as an amplitude — real,
+    # non-negative, meaningfully peaked — so the same peak-preserving
+    # aggregation applies rather than nearest-frame, which would just pick
+    # one frame's echo pattern and discard the rest of a zoomed-out column.
+    "csi_ratio_cir",
+)
 
 # Maximum frames decoded per /api/tile request. When the requested time range
 # holds more frames than this, stride-sample approximately BUDGET frames evenly
