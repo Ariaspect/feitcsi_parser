@@ -21,16 +21,8 @@ const TWILIGHT_STOPS = [
 
 export const TWILIGHT: readonly string[] = TWILIGHT_STOPS;
 
-/** Opaque neutral grey — used for pixel columns that contain no frames at all.
- *
- * A gap is a fact about the capture, not a rendering fault, and it has to read
- * that way. Transparent let the canvas background through, which against a
- * dark theme is close enough to the low end of VIRIDIS to pass for a real low
- * value. Neither palette holds an unsaturated mid-grey — VIRIDIS is saturated
- * throughout and TWILIGHT's near-neutrals are tinted and much lighter — so
- * this reads as "no data" against either, and stays distinct from the opaque
- * black of NON_FINITE_COLOR, which is a real db(0) measurement. */
-export const NO_DATA_COLOR: number = 0xff6e6e6e; // (a=255, b=0x6e, g=0x6e, r=0x6e) = #6e6e6e
+/** Fully transparent — used for pixel columns that contain no frames at all. */
+export const NO_DATA_COLOR: number = 0; // alpha 0, canvas background shows through
 
 /** Opaque black — used for NaN/Infinity cells, matching the old colorFor("#000000"). */
 export const NON_FINITE_COLOR: number = (255 << 24) >>> 0; // (a=255, b=0, g=0, r=0)
