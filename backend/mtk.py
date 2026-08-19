@@ -14,22 +14,74 @@ one measurement is a group of up to four records, and bit 15 marks the last of
 them. Grouping by *timestamp* looks tempting and is wrong — the millisecond
 clock ticks mid-group, splitting real groups and merging unrelated ones.
 
-*A group is a 2x1, not a 2x2.* Records carry ``tpi``/``rpi`` (cell index is
-``2*rpi + tpi``), but the board is physically 1x1 — one antenna for 2.4 GHz,
-one for 5 GHz — so ``rpi`` cannot be a second RF chain. Only ``tpi`` behaves
-like a real antenna pair. Measured over 36 complete groups::
+*A group is a 2x2 grid, and the ratio is taken along ``tpi``.* Records carry
+``tpi``/``rpi`` (cell index is ``2*rpi + tpi``). Which axis is which is not a
+naming question — it is settled by the transmitter's cyclic shift, which the
+802.11 standard applies per *transmit* chain and nothing else. Dividing along
+``tpi`` yields a dead-constant +0.78 rad/subcarrier ramp; dividing along
+``rpi`` yields none. So ``tpi`` indexes the AP's transmit chains and ``rpi``
+indexes the board's receive side. See "the tx pair carries the transmitter's
+cyclic shift" below.
 
-    tpi1/tpi0   temporal coherence 0.970 / 0.987, median step 0.08-0.10 rad
-    rpi1/rpi0   temporal coherence 0.108 / 0.099, median step 1.64-1.70 rad
-    raw cell    temporal coherence 0.170 / 0.132, median step 1.57-1.63 rad
+Measured over the 1231 complete four-cell 80 MHz groups of ``capture1.bin``::
 
-Dividing along ``tpi`` — two AP transmit antennas seen through one receiver —
-cancels the receiver's CFO/SFO. Dividing along ``rpi`` cancels nothing; it is
-no better than taking no ratio at all, which is itself evidence that ``rpi``
-is not a second chain. So **tpi is mapped onto the rx axis** and ``rpi`` plane
-0 is used, because ``batch._decode_chunk`` and ``ratio`` both read the ratio
-off ``rx1/rx0``. Our "rx" therefore holds transmit antennas. The alternative
-was renaming the ratio axis through two tested modules for a naming gain.
+    tpi1/tpi0   temporal coherence 0.998 / 0.989, median |step| 0.025 / 0.047
+    rpi1/rpi0   temporal coherence 0.678 / 0.678, median |step| 0.159 / 0.164
+    raw cell    temporal coherence 0.003,         median |step| 1.565
+
+An earlier revision of this docstring reported ``rpi1/rpi0`` at 0.108 / 0.099
+with a median step of 1.64-1.70 rad — i.e. indistinguishable from no ratio at
+all — and concluded that ``rpi`` could not be a second RF chain. That figure
+does not reproduce, on the full capture or on a 36-group slice of it (0.699,
+0.146). A step near 1.57 rad is what mis-pairing records *across* groups
+produces, which is the very failure the tag-18 grouping above exists to
+avoid, so the original measurement most likely predates that grouping.
+
+The correction matters because the reasoning was wrong even though the
+conclusion was right. ``rpi`` plane 1 is not empty: it carries 59.43 dB
+against plane 0's 59.95 dB, is smooth across frequency (0.995), and its
+ratio against plane 0 swings 24-31 dB across the band, so it is a genuinely
+different receive path rather than a copy or a dead chain. Whether that is a
+second antenna or a diversity-switched capture of one is not decidable from
+the file, and the board is documented as 1x1.
+
+``tpi`` still wins, on noise rather than on presence. Comparing how far each
+ratio moves at the shortest available frame gap against how far it moves once
+it has saturated separates jitter from signal::
+
+    gap        tpi1/tpi0      rpi1/rpi0
+    50 ms      0.158 rad      0.896 rad     <- rpi is 5.7x noisier per frame
+    20 s       0.352 rad      1.559 rad     <- and already near the 1.571 rad
+                                               limit of a random phase
+
+Both cancel the receiver's CFO/SFO, but ``tpi0`` and ``tpi1`` come out of the
+same packet, the same receive chain and the same timing recovery, so the
+cancellation is exact; the two ``rpi`` planes evidently do not share phase
+that tightly. So **tpi is mapped onto the rx axis** and ``rpi`` plane 0 is
+used, because ``batch._decode_chunk`` and ``ratio`` both read the ratio off
+``rx1/rx0``. Our "rx" therefore holds transmit antennas. The alternative was
+renaming the ratio axis through two tested modules for a naming gain.
+
+*The tx pair carries the transmitter's cyclic shift.* Because the two halves
+of this ratio are two different transmit chains, the deliberate per-chain
+cyclic shift the standard mandates does not cancel — it survives as a pure
+linear phase ramp across the band. That is the one thing the tx-pair ratio
+has that a genuine rx-pair ratio does not. Measured across every MTK capture
+on hand, with no frame of any file dissenting on the sign::
+
+    capture.bin          12 frames   +0.7811 rad/SC   397.8 ns
+    capture1.bin       1231 frames   +0.7793 rad/SC   396.9 ns
+    csi_ping34_30s.bin   36 frames   +0.7907 rad/SC   402.7 ns
+    livetest.bin       2274 frames   +0.7787 rad/SC   396.6 ns
+    tone_mask_off.bin  2158 frames   +0.7824 rad/SC   398.5 ns
+    tone_mask_on.bin   2061 frames   +0.7796 rad/SC   397.1 ns
+
+That is the -400 ns the standard specifies for the second stream, and at
+80 MHz it wraps the phase about 30 times across the band, which swamps any
+statistic taken along the subcarrier axis: the raw ratio phase of
+``capture1.bin`` has a circular resultant of 0.010 — indistinguishable from
+uniform — where removing the ramp lifts it to 0.811. ``decode_frames``
+therefore removes it by default; see ``estimate_csd_slope``.
 
 *Samples are 14-bit signed, not int16*, and tag 8 / tag 9 are the real and
 imaginary halves of one stream — not two chains.
@@ -79,6 +131,37 @@ MAX_NULL_RUN = 3
 RPI_PLANE = 0
 
 _MAX_SLOTS = 2  # tpi in {0, 1}
+
+# Frames sampled, spread evenly across a capture, to measure its cyclic-shift
+# ramp. The quantity is a hardware constant — the six captures on hand agree
+# to within 6 ns of one another — so this sample is about outvoting per-frame
+# noise, not about tracking anything that moves.
+CSD_SAMPLE = 512
+
+# Usable two-stream frames a capture needs before a ramp is measured at all.
+# Below this the median is not a majority of anything.
+CSD_MIN_FRAMES = 8
+
+# Adjacent-subcarrier steps a frame must contribute before it gets a vote. A
+# 20 MHz frame carries about 50 of them; the guard band and any single-stream
+# frame carry none.
+CSD_MIN_STEPS = 8
+
+# Ramps shallower than this are left in place. 0.05 rad/SC is about 25 ns,
+# under two wraps across an 80 MHz band — shallow enough that removing a
+# noisy estimate of it would cost more than the ramp does. The real thing
+# measures 0.78, fifteen times over the line.
+CSD_MIN_SLOPE = 0.05
+
+# Fraction of sampled frames whose slope must share the median's sign. A
+# genuine cyclic shift is deterministic and scores 1.00 on every capture
+# here. This is the same test that separates a tx pair from an rx pair: the
+# MTK tx ratio has 0% of frames dissenting, where the FeitCSI rx ratio has
+# 68% on the same statistic, because there the quantity is noise about zero.
+CSD_MIN_AGREEMENT = 0.9
+
+# "Not measured yet" — distinct from a measured "no ramp worth removing".
+_CSD_UNSET = object()
 
 
 def _sign_extend_14(raw: np.ndarray) -> np.ndarray:
@@ -161,6 +244,7 @@ class MTKIndex:
     # ------------------------------------------------------------------ #
 
     def _scan_full(self) -> None:
+        self._csd: float | None | object = _CSD_UNSET
         size = self.path.stat().st_size
         if size < PREFIX_BYTES:
             self._init_empty()
@@ -319,6 +403,25 @@ class MTKIndex:
     #  Shared surface                                                     #
     # ------------------------------------------------------------------ #
 
+    def csd_slope(self) -> float | None:
+        """This capture's cyclic-shift ramp in rad/subcarrier, or ``None``.
+
+        Measured once and remembered. Anchored to the *file* rather than to a
+        batch for the reason ``ratio.Reference`` exists: an estimate rebuilt
+        per view would let panning change the correction, and so change the
+        picture, which is the one thing a correction must never do.
+
+        ``extend`` keeps the measurement — a cyclic shift is a property of the
+        transmitter, not of how much of the file has arrived. Only a rebuild
+        after truncation discards it, since that may be a different file.
+
+        Two callers racing may both measure it; the computation is
+        deterministic, so the loser merely repeats the work.
+        """
+        if self._csd is _CSD_UNSET:
+            self._csd = estimate_csd_slope(self.path, self)
+        return self._csd  # type: ignore[return-value]
+
     def mimo_labels(self) -> list[str]:
         return [
             _mimo_label(int(rx), int(tx))
@@ -411,6 +514,58 @@ def _read_plane(
     return _sign_extend_14(raw.view("<u2")).astype(np.float64)
 
 
+def estimate_csd_slope(path: str | Path, index: MTKIndex) -> float | None:
+    """Measure a capture's cyclic-shift ramp, in radians per subcarrier.
+
+    The transmitter delays each of its chains by a different fixed amount so
+    that two antennas sending one stream cannot null each other out. A fixed
+    delay is a linear phase across frequency, so dividing chain 1 by chain 0
+    leaves that ramp behind — see the module docstring. It is deterministic,
+    which is what makes it removable: the estimate here is a median of
+    medians rather than a fit, because there is a single right answer and the
+    job is only to find it through the noise.
+
+    Estimating from *differences* between adjacent subcarriers keeps the
+    answer independent of where the phase happens to be anchored, and keeps
+    it valid for a 20 MHz frame and an 80 MHz frame alike — 802.11 spaces
+    subcarriers 312.5 kHz apart at every one of these bandwidths, so a given
+    delay is the same number of radians per subcarrier in all of them.
+
+    Returns ``None`` rather than a number the caller should not trust: too
+    few two-stream frames to vote, a ramp too shallow to be worth removing,
+    or frames that disagree on its sign. That last gate is what stops this
+    from inventing a ramp on a capture whose transmitter has only one chain,
+    where the statistic is noise about zero and the sign splits near half.
+
+    Unambiguous up to ``pi`` rad/SC, i.e. about 1600 ns, since the step
+    between adjacent subcarriers is only known modulo ``2*pi``. Every cyclic
+    shift the standard defines is far below that.
+    """
+    sel = np.flatnonzero(index.num_rx_arr >= 2)
+    if sel.size < CSD_MIN_FRAMES:
+        return None
+
+    picks = sel[
+        np.unique(
+            np.linspace(0, sel.size - 1, min(CSD_SAMPLE, sel.size)).astype(np.int64)
+        )
+    ]
+    _, _, _, ratio_phase = decode_frames(path, index, picks, deslope=False)
+
+    steps = np.angle(np.exp(1j * np.diff(ratio_phase.astype(np.float64), axis=1)))
+    usable = steps[np.isfinite(steps).sum(axis=1) >= CSD_MIN_STEPS]
+    if usable.shape[0] < CSD_MIN_FRAMES:
+        return None
+
+    per_frame = np.nanmedian(usable, axis=1)
+    slope = float(np.median(per_frame))
+    if abs(slope) < CSD_MIN_SLOPE:
+        return None
+    if np.mean(np.sign(per_frame) == np.sign(slope)) < CSD_MIN_AGREEMENT:
+        return None
+    return slope
+
+
 def decode_frames(
     path: str | Path,
     index: MTKIndex,
@@ -418,6 +573,7 @@ def decode_frames(
     *,
     scaled: bool = False,
     interpolate: bool = True,
+    deslope: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Decode selected frames into (amplitude, phase, ratio_amp, ratio_phase).
 
@@ -431,6 +587,14 @@ def decode_frames(
     by ~256 dB. Scaling touches only ``amplitude`` — both ratio metrics and
     both phases are provably independent of it — so leaving it off costs an
     absolute dB reference and nothing else.
+
+    ``deslope`` removes the transmitter's cyclic-shift ramp from the ratio,
+    using the whole file's estimate via ``MTKIndex.csd_slope``. It is aimed at
+    ``ratio_phase``: the correction is a unit-magnitude rotation, so it leaves
+    ``ratio_amp`` alone to within floating point — a few 1e-15 dB, since
+    ``exp`` is not exactly unit-modulus in binary. ``amplitude`` and ``phase``
+    read rx0 and never see it at all. Pass ``False`` to get the ratio as
+    decoded — ``estimate_csd_slope`` does, to measure the ramp it removes.
     """
     path = Path(path)
     frame_ids = np.asarray(frame_ids, dtype=np.int64)
@@ -440,6 +604,8 @@ def decode_frames(
     empty = np.empty((0, width), dtype=np.float32)
     if n == 0:
         return empty, empty, empty, empty
+
+    slope = index.csd_slope() if deslope else None
 
     amp = np.full((n, width), np.nan, dtype=np.float32)
     phase = np.full((n, width), np.nan, dtype=np.float32)
@@ -488,6 +654,13 @@ def decode_frames(
                 if scaled:
                     rx1 = _scale(rx1, index.rssi_1[ids], nbins)
                 ratio = rx1 / rx0
+                if slope is not None:
+                    # The ramp is a function of frequency offset from DC, and
+                    # every bandwidth here is centred on DC, so anchoring the
+                    # correction at the band's own centre leaves a 20 MHz and
+                    # an 80 MHz frame on one phase reference instead of two.
+                    k = np.arange(nbins) - nbins // 2
+                    ratio = ratio * np.exp(-1j * slope * k)
                 ratio_amp[sel, lo : lo + nbins] = _db(np.abs(ratio))
                 ratio_phase[sel, lo : lo + nbins] = np.angle(ratio)
 

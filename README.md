@@ -218,7 +218,10 @@ Two things the detrend is deliberately not applied to:
 
 - **The CSI ratio.** rx1/rx0 shares an oscillator and clock between the two
   chains, so the division already cancels the common offset and most of the
-  slope. Fitting a line there removes signal, not nuisance.
+  slope. Fitting a line there removes signal, not nuisance. (On a MediaTek
+  capture the two halves are transmit chains rather than receive ones, which
+  cancels the same offsets but leaves a deliberate ramp behind — see
+  [MediaTek captures](#mediatek-captures).)
 - **Anything needing absolute time-of-flight.** The fit takes any genuinely
   linear-in-frequency component with it. Standard sanitization in the
   SpotFi/PhaseFi lineage, fine for motion sensing, fatal for ranging.
@@ -467,3 +470,63 @@ applied: it would split the contiguous spectrum and weld the two outer edges
 together.
 
 See https://feitcsi.kuskosoft.com/csi_format/ for the on-wire spec.
+
+### MediaTek captures
+
+Captures pulled off the LG webOS board (`/var/iwtools/iw-priv`, read from
+`/proc/net/wlan/csi_data`) are a different format entirely and are detected by
+sniffing, not by extension. Records are self-delimiting TLVs —
+`magic 0xAC | length u16 LE | tag(1) len(2 LE) value ...` — samples are 14-bit
+signed rather than `int16`, and subcarriers arrive in raw FFT bin order, so
+here `fftshift` **is** required, the exact opposite of the FeitCSI rule above.
+A frame is a *group* of up to four records closed by bit 15 of tag 18, never a
+run sharing a timestamp: the millisecond clock ticks mid-group.
+
+**The ratio is a transmit pair.** Records are indexed by `tpi` and `rpi`. The
+axes are told apart by the transmitter's cyclic shift, which 802.11 applies
+per transmit chain and to nothing else: dividing along `tpi` leaves a ramp,
+dividing along `rpi` leaves none. So `tpi` indexes the AP's transmit chains,
+and it is `tpi` that gets mapped onto the pipeline's rx axis, because
+everything downstream reads the ratio off `rx1/rx0`. **A MediaTek capture's
+"CSI ratio" therefore compares two antennas at the far end of the link**,
+where a FeitCSI capture's compares two on the receiver. Both cancel the
+receiver's CFO/SFO — the two halves come out of one packet, one receive chain
+and one timing recovery — but they are not the same physical quantity and
+should not be pooled or plotted on a shared scale.
+
+`rpi` plane 1 is real signal, not a dead chain (59.43 dB against plane 0's
+59.95 dB, smooth across frequency at 0.995), so it is not obvious from the
+file alone what it is on a board documented as 1x1. It is not used, because
+its ratio is far noisier per frame: at the shortest frame gap the `tpi` ratio
+moves 0.158 rad where the `rpi` ratio moves 0.896 rad, already most of the
+1.571 rad a uniformly random phase would give.
+
+**The cyclic shift is removed by default.** Because the two halves of the
+ratio are two different transmit chains, the fixed per-chain delay the
+standard mandates does not cancel; it survives as a pure linear phase ramp.
+It measures 396.6–402.7 ns across all six captures on hand — the −400 ns the
+standard specifies for a second stream — with no frame of any file dissenting
+on the sign. At 80 MHz that wraps the phase about 30 times across the band,
+which is enough to make any statistic taken along the subcarrier axis
+meaningless: the raw ratio phase of `capture1.bin` has a circular resultant of
+0.010, indistinguishable from uniform, where removing the ramp lifts it to
+0.842.
+
+The ramp is measured once per file — not per view, for the reason the
+orientation reference is also anchored to the file — and subtracted about each
+band's own DC bin, so a 20 MHz and an 80 MHz frame land on one phase
+reference. Only `csi_ratio_phase` is affected; `ratio_amp` is unchanged
+because the correction is a unit-magnitude rotation, and `amplitude`/`phase`
+read rx0 and never see it. Pass `deslope=False` to `mtk.decode_frames` for the
+ratio as decoded. A capture whose frames disagree on the ramp's sign, or whose
+ramp is shallower than 0.05 rad/subcarrier, gets no correction at all rather
+than a number not worth trusting.
+
+Two things to watch when using this ratio. It depends on the AP continuing to
+send two streams — 59 of `capture1.bin`'s 1290 groups are single-stream and
+have no ratio at all — where a genuine receive pair is always present because
+it is your own hardware. And no rate word exists in the format (tag 19 reads 0
+on every record), so there is no way to confirm from the file whether the AP
+ever applies beamforming; if it did, `tpi` would index precoded combinations
+rather than antennas. Nothing in the captures here suggests it happens — no
+frame-to-frame jump exceeds 0.664 rad — but it is not provable from the data.

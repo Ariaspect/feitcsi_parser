@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from backend.mtk import (
+    CSD_MIN_FRAMES,
     MAGIC,
     RPI_PLANE,
     TAG_BANDWIDTH,
@@ -24,6 +25,7 @@ from backend.mtk import (
     MTKIndex,
     can_read,
     decode_frames,
+    estimate_csd_slope,
 )
 
 CAPTURES = Path(__file__).resolve().parent.parent / "captures"
@@ -377,7 +379,7 @@ def test_the_ping_capture_indexes_as_expected() -> None:
 
 @pytest.mark.skipif(not PING.is_file(), reason="MTK ping capture not present")
 def test_the_tpi_ratio_is_temporally_coherent() -> None:
-    """The property the tpi mapping exists for: rpi would score ~0.10 here."""
+    """The property the tpi mapping exists for: rpi scores ~0.68 here."""
     idx = MTKIndex(PING)
     ids = np.flatnonzero(idx.filter_mask(mimo=(2, 1)))
     _, _, _, ratio_phase = decode_frames(PING, idx, ids)
@@ -501,3 +503,204 @@ def test_the_api_serves_an_mtk_capture() -> None:
     assert total == blank_rows * grid.shape[1] + blank_cols * grid.shape[0] \
         - blank_rows * blank_cols, "NaN outside the guard band and time gaps"
     reset_tile_caches()
+
+
+# ---------------------------------------------------------------------- #
+#  10. Cyclic shift                                                       #
+# ---------------------------------------------------------------------- #
+
+
+def _slope(ratio_phase: np.ndarray) -> float:
+    """Median per-subcarrier phase step, the quantity the estimator votes on."""
+    steps = np.angle(np.exp(1j * np.diff(ratio_phase.astype(float), axis=1)))
+    return float(np.nanmedian(np.nanmedian(steps, axis=1)))
+
+
+def ramped(z: np.ndarray, slope: float) -> np.ndarray:
+    """*z* with a linear phase ramp of *slope* rad per subcarrier about DC.
+
+    ``band`` is in raw FFT bin order, and ``fftfreq`` gives each bin its
+    signed distance from DC there — the same axis ``decode_frames`` corrects
+    along once it has fftshifted. Rounding keeps the result representable in
+    the 14 bits the hardware uses.
+    """
+    k = np.fft.fftfreq(len(z), 1 / len(z))
+    out = z * np.exp(1j * slope * k)
+    return np.round(out.real) + 1j * np.round(out.imag)
+
+
+def _ramped_capture(
+    tmp_path: Path, slopes, n_bins: int = 256, seed: int = 3, **kw
+) -> Path:
+    """One group per entry in *slopes*, tpi1 being tpi0 under that ramp."""
+    blob = b"".join(
+        group_records(
+            g,
+            {(0, RPI_PLANE): band(n_bins, seed=seed + g),
+             (1, RPI_PLANE): ramped(band(n_bins, seed=seed + g), sl)},
+            ts=1000 + 50 * g,
+            **kw,
+        )
+        for g, sl in enumerate(slopes)
+    )
+    return write(tmp_path, blob)
+
+
+def test_a_constant_ramp_is_measured_and_removed(tmp_path: Path) -> None:
+    path = _ramped_capture(tmp_path, [0.7793] * 12)
+    idx = MTKIndex(path)
+    assert idx.csd_slope() == pytest.approx(0.7793, abs=0.01)
+
+    ids = np.arange(idx.count)
+    assert _slope(decode_frames(path, idx, ids, deslope=False)[3]) == pytest.approx(
+        0.7793, abs=0.01
+    )
+    assert abs(_slope(decode_frames(path, idx, ids)[3])) < 0.01
+
+
+def test_deslope_touches_the_ratio_phase_and_nothing_else(tmp_path: Path) -> None:
+    """Only one of the four arrays moves.
+
+    ``amplitude`` and ``phase`` read rx0, which the correction never reaches.
+    ``ratio_amp`` is reached but not moved: a unit-magnitude rotation cannot
+    change a magnitude, up to ``exp`` not being exactly unit-modulus in
+    binary — the residual measures a few 1e-15 dB.
+    """
+    path = _ramped_capture(tmp_path, [0.7793] * 12)
+    idx = MTKIndex(path)
+    ids = np.arange(idx.count)
+    off = decode_frames(path, idx, ids, deslope=False)
+    on = decode_frames(path, idx, ids)
+
+    for name, a, b in zip(("amplitude", "phase"), off, on):
+        np.testing.assert_array_equal(
+            np.nan_to_num(a, nan=-999.0), np.nan_to_num(b, nan=-999.0),
+            err_msg=f"{name} must not move",
+        )
+    np.testing.assert_allclose(
+        np.nan_to_num(off[2], nan=-999.0), np.nan_to_num(on[2], nan=-999.0),
+        atol=1e-12, err_msg="ratio_amp must not move beyond floating point",
+    )
+    assert not np.allclose(off[3], on[3], equal_nan=True)
+
+
+def test_a_capture_without_a_ramp_is_left_alone(tmp_path: Path) -> None:
+    """A transmitter with one chain applies no cyclic shift; invent none."""
+    path = _ramped_capture(tmp_path, [0.0] * 12)
+    idx = MTKIndex(path)
+    assert idx.csd_slope() is None
+
+    ids = np.arange(idx.count)
+    np.testing.assert_array_equal(
+        np.nan_to_num(decode_frames(path, idx, ids, deslope=False)[3], nan=-999.0),
+        np.nan_to_num(decode_frames(path, idx, ids)[3], nan=-999.0),
+    )
+
+
+def test_frames_disagreeing_on_the_sign_are_refused(tmp_path: Path) -> None:
+    """A ramp deep enough to pass the floor, but only 7 of 12 frames agree.
+
+    The magnitude gate alone would accept this; a real cyclic shift is
+    deterministic, so a split this wide means the quantity is not one.
+    """
+    path = _ramped_capture(tmp_path, [0.7793] * 7 + [-0.7793] * 5)
+    idx = MTKIndex(path)
+    assert _slope(decode_frames(path, idx, np.arange(12), deslope=False)[3]) > 0.5
+    assert idx.csd_slope() is None
+
+
+def test_too_few_two_stream_frames_to_vote(tmp_path: Path) -> None:
+    path = _ramped_capture(tmp_path, [0.7793] * (CSD_MIN_FRAMES - 1))
+    assert MTKIndex(path).csd_slope() is None
+
+
+def test_both_bandwidths_are_corrected_about_their_own_dc(tmp_path: Path) -> None:
+    """A 20 MHz frame sits centred in a 256-wide row; the ramp is about DC.
+
+    802.11 spaces subcarriers 312.5 kHz apart at 20 and 80 MHz alike, so one
+    cyclic shift is the same rad/subcarrier in both, and both bands are
+    centred on DC. Anchoring the correction at each band's own centre is
+    what keeps the narrow frame from being corrected about the wide frame's
+    edge. No capture on hand mixes bandwidths among two-stream frames, so
+    this case exists only here.
+    """
+    wide = b"".join(
+        group_records(
+            g,
+            {(0, RPI_PLANE): band(256, seed=g),
+             (1, RPI_PLANE): ramped(band(256, seed=g), 0.7793)},
+            ts=1000 + 50 * g,
+        )
+        for g in range(12)
+    )
+    narrow = group_records(
+        99,
+        {(0, RPI_PLANE): band(64, seed=99),
+         (1, RPI_PLANE): ramped(band(64, seed=99), 0.7793)},
+        bw_code=0,
+        ts=2000,
+    )
+    path = write(tmp_path, wide + narrow)
+    idx = MTKIndex(path)
+    assert idx.num_subcarriers == 256
+    assert idx.channel_widths[-1] == "20"
+
+    ratio_phase = decode_frames(path, idx, np.array([idx.count - 1]))[3]
+    live = np.isfinite(ratio_phase[0])
+    assert live.sum() > 30, "the narrow frame should decode"
+    assert abs(_slope(ratio_phase)) < 0.01
+
+    # Centred, not left-aligned: the live span straddles the row's midpoint.
+    span = np.flatnonzero(live)
+    assert span.min() < 128 < span.max()
+
+
+def test_the_estimate_is_anchored_to_the_file_not_the_batch(tmp_path: Path) -> None:
+    """Decoding a slice must give that slice the same numbers as the whole.
+
+    The reason ``ratio.Reference`` exists, applied to the ramp: an estimate
+    rebuilt per view would let panning change the picture.
+    """
+    path = _ramped_capture(tmp_path, [0.7793] * 12)
+    idx = MTKIndex(path)
+    whole = decode_frames(path, idx, np.arange(12))[3]
+    part = decode_frames(path, idx, np.arange(4, 8))[3]
+    np.testing.assert_allclose(part, whole[4:8], equal_nan=True)
+
+
+def test_extend_keeps_the_measurement(tmp_path: Path) -> None:
+    """A cyclic shift belongs to the transmitter, not to how much has arrived."""
+    blob = _ramped_capture(tmp_path, [0.7793] * 12).read_bytes()
+    path = write(tmp_path, blob, name="growing.bin")
+    idx = MTKIndex(path)
+    first = idx.csd_slope()
+    assert first is not None
+
+    with path.open("ab") as fh:
+        fh.write(blob)
+    idx.extend()
+    assert idx.count == 24
+    assert idx.csd_slope() == first
+
+
+@pytest.mark.skipif(not PING.is_file(), reason="MTK ping capture not present")
+def test_the_ping_capture_carries_the_standard_cyclic_shift() -> None:
+    """~400 ns is what 802.11 specifies for a second stream."""
+    idx = MTKIndex(PING)
+    slope = idx.csd_slope()
+    assert slope is not None
+    delay_ns = slope / (2 * np.pi * 312_500) * 1e9
+    assert delay_ns == pytest.approx(400, abs=10)
+
+    ids = np.flatnonzero(idx.filter_mask(mimo=(2, 1)))
+    raw = decode_frames(PING, idx, ids, deslope=False)[3]
+    fixed = decode_frames(PING, idx, ids)[3]
+    assert _slope(raw) == pytest.approx(slope, abs=0.01)
+    assert abs(_slope(fixed)) < 0.01
+
+    # 30 wraps across the band leave the raw phase indistinguishable from
+    # uniform; removing them is what makes a subcarrier-axis mean mean anything.
+    live = np.isfinite(raw)
+    assert abs(np.mean(np.exp(1j * raw[live]))) < 0.05
+    assert abs(np.mean(np.exp(1j * fixed[live]))) > 0.3
+
