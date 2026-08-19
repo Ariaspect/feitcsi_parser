@@ -23,18 +23,31 @@ Two consequences follow from that, and both are load-bearing:
   different senders (~18% same-sender in the captures at hand), the
   comparison is meaningless, and the confidence gate below declines to act
   rather than flipping at random.
-* **Orientation is only ever relative.** Which of the two states is "correct"
-  is not observable from one frame, so a majority vote fixes the convention
-  per batch: since swaps are the minority, the orientation shared by most
-  frames wins. This keeps separately-decoded batches consistent with each
-  other without needing a global anchor.
+* **Orientation needs an absolute reference.** Which of the two states is
+  "correct" is not observable from one frame, and every quantity the
+  detection can derive from a batch is derived *from that batch* — so a
+  window can only ever produce an answer self-consistent within itself, and
+  which of the two self-consistent answers you get depends on which frames
+  are in the window. Panning or zooming a view then inverts whole panels.
+  ``Reference`` breaks that: the band profile and the mean phase direction
+  are measured once over the whole capture and passed in, so every window
+  lands on the same absolute orientation. Build one with ``build_reference``
+  and pass it to everything here. Without it the old batch-relative
+  behaviour remains, majority vote and all, for callers holding a bare
+  array with no capture to refer to.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from typing import NamedTuple
+
 import numpy as np
 
 __all__ = [
+    "Reference",
+    "build_reference",
+    "with_context",
     "detect_states",
     "detect_swaps",
     "detect_rotations",
@@ -67,21 +80,134 @@ TEMPLATE_HALF_WIDTH = 8
 # ceiling is also what bounds worst-case latency.
 REFINE_PASSES = 2
 
-# Frames averaged when testing a stretch against the global amplitude profile.
+# Frames averaged when testing a stretch against the amplitude profile.
 # A single frame's profile correlation is barely better than a coin toss, but
 # the state being tested is piecewise-constant over thousands of frames, so
 # averaging recovers it decisively.
 ANCHOR_WINDOW = 201
 
-# Only runs at least this long are re-oriented by the amplitude anchor. Short
-# excursions are the phase passes' business — they resolve isolated frames far
-# more sharply than a smoothed correlation can, and letting the anchor touch
-# them would blur genuine single-frame swaps across its whole window.
+# Only runs at least this long are re-oriented by the *batch-relative*
+# amplitude anchor. Short excursions are the phase passes' business — they
+# resolve isolated frames far more sharply than a smoothed correlation can,
+# and letting the anchor touch them would blur genuine single-frame swaps
+# across its whole window. Does not apply once a Reference is supplied: an
+# absolute reference only ever corrects a *sign*, so the run-length gate has
+# nothing left to protect against.
 MIN_ANCHOR_RUN = 200
 
 # The anchor is only trustworthy when the profile has a real shape to match.
 # Perfectly balanced antennas would leave nothing to correlate against.
 MIN_PROFILE_STD = 0.5  # dB
+
+# Frames averaged when anchoring a *stride-sampled* view: one, i.e. none.
+# Smoothing is what makes a near-chance per-frame correlation readable, and it
+# works because neighbouring frames share a state. Under a stride they do not
+# — the rows are seconds apart and independent — so averaging them mixes in
+# evidence about other frames and swamps the frame's own. Measured against the
+# native-rate answer, judging each sampled frame alone errs on 5% of frames at
+# every stride from 2 to 64; averaging 5 errs on 14-23%, and leaving the
+# frames uncorrected errs on 28%.
+SAMPLED_ANCHOR_WINDOW = 1
+
+# The reference's phase direction is read off a bimodal distribution — the
+# right way up and, a pi away, the rotated frames. The vector sum finds it
+# only while the correct mode is the majority. Measured on an hour of frames
+# the resultant reaches 0.52 of the total arc length; below this it is not a
+# majority worth trusting and no reference is issued.
+MIN_PHASE_MARGIN = 0.15
+
+# Frames of context decoded either side of a window before correcting it.
+# _chain and _refine judge a frame against its neighbours, so the first and
+# last few frames of any window are decided on half the evidence. Correcting
+# with a margin and trimming it off keeps a window's interior identical to
+# what the whole capture would have given it.
+CONTEXT_FRAMES = 128
+
+
+class Reference(NamedTuple):
+    """The capture's own orientation, measured once and reused by every view.
+
+    ``amp_profile`` is the mean-removed median dB ratio amplitude across the
+    band. Its shape is set by the antennas rather than the moving channel, so
+    it holds over a whole capture, and a swap negates it — which makes the
+    sign of a frame's correlation against it an *absolute* verdict rather
+    than a comparison with whatever else happens to be on screen.
+
+    ``phase_dir`` is the unit vector the capture's frames point along on
+    average. The amplitude cannot see a pi rotation (it leaves dB untouched),
+    so the rotation parity needs its own absolute reference; this is it.
+    """
+
+    amp_profile: np.ndarray
+    phase_dir: complex
+
+
+def build_reference(
+    ratio_amplitude: np.ndarray, ratio_phase: np.ndarray
+) -> Reference | None:
+    """Measure the capture's orientation from a spread sample of its frames.
+
+    Feed this frames drawn evenly across the whole capture *of a single
+    transmitter* — they need not be contiguous, since neither quantity here
+    involves a neighbour. Both are majority statistics, which is what makes
+    the chicken-and-egg go away: the corruption is the minority (4.1% of
+    frames swapped, 14.2% a pi out), so raw frames already point the right
+    way in bulk and no prior correction is needed to measure the reference.
+
+    Returns ``None`` when the capture cannot support an absolute verdict — a
+    band too flat to correlate against, or a phase direction with no clear
+    majority. Callers should fall back to the batch-relative path rather than
+    trusting a reference that is really a coin toss.
+    """
+    amp = np.asarray(ratio_amplitude, dtype=np.float64)
+    amp = np.where(np.isfinite(amp), amp, np.nan)
+    if amp.size == 0:
+        return None
+    with np.errstate(invalid="ignore"):
+        profile = np.nanmedian(amp, axis=0)
+        profile = profile - np.nanmean(profile)
+        if not np.isfinite(profile).any() or np.nanstd(profile) < MIN_PROFILE_STD:
+            return None
+    profile = np.nan_to_num(profile)
+
+    phase = np.asarray(ratio_phase, dtype=np.float64)
+    z = np.exp(1j * phase)
+    z[~np.isfinite(phase)] = 0.0
+    v = z.mean(axis=1)
+    resultant = v.sum()
+    arc = np.abs(v).sum()
+    if arc == 0 or not np.isfinite(resultant) or np.abs(resultant) / arc < MIN_PHASE_MARGIN:
+        return None
+    return Reference(profile, complex(resultant / np.abs(resultant)))
+
+
+def _moving_average(x: np.ndarray, w: int) -> np.ndarray:
+    """Centred moving average, normalised at the edges.
+
+    ``np.convolve(..., mode="same")`` pads with zeros, which drags the first
+    and last w/2 outputs toward zero — right where a tile window's own edge
+    sits. Dividing by the number of contributing samples keeps the ends
+    readable, and it is the sign of this that decides a flip.
+    """
+    w = int(max(1, min(w, len(x))))
+    if w == 1:
+        return np.asarray(x, dtype=np.float64)
+    kernel = np.ones(w)
+    norm = np.convolve(np.ones(len(x)), kernel, mode="same")
+    return np.convolve(np.asarray(x, dtype=np.float64), kernel, mode="same") / norm
+
+
+def _profile_corr(amplitude: np.ndarray, profile: np.ndarray) -> np.ndarray:
+    """Per-frame correlation of a dB amplitude block against *profile*.
+
+    ``-inf`` from ``db(0)`` has to be masked out, not merely tolerated: left
+    in, it overflows the dot product and poisons the frame's verdict.
+    """
+    a = np.asarray(amplitude, dtype=np.float64)
+    a = np.where(np.isfinite(a), a, np.nan)
+    with np.errstate(invalid="ignore"):
+        centred = a - np.nanmean(a, axis=1, keepdims=True)
+    return np.nan_to_num(centred) @ profile
 
 
 def _fit(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
@@ -111,7 +237,11 @@ def _alignment(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def detect_states(
-    ratio_phase: np.ndarray, ratio_amplitude: np.ndarray | None = None
+    ratio_phase: np.ndarray,
+    ratio_amplitude: np.ndarray | None = None,
+    *,
+    reference: Reference | None = None,
+    native: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Recover each frame's ``(swapped, rotated)`` state relative to frame 0.
 
@@ -137,13 +267,30 @@ def detect_states(
     inverted and internally consistent, which is invisible to every
     phase-based check. See ``_anchor_to_amplitude``.
 
-    Returns ``(swap, rot)``, both bool arrays of length ``n_frames``, each
-    majority-normalised so the convention follows the bulk of the batch.
+    *reference* is what makes the answer a property of the capture instead of
+    a property of the window. With one, both anchors judge against it and the
+    result for a given frame is the same whichever view asked; without one,
+    the anchors fall back to statistics of this batch and a closing majority
+    vote fixes the convention, which is stable only as long as the batch is.
+
+    *native* declares that consecutive rows really are consecutive frames.
+    ``_chain`` and ``_refine`` compare a frame to its neighbours, so on a
+    stride-sampled view — where "neighbours" are seconds apart and the fit
+    quality collapses — they are skipped and the anchors, which judge each
+    frame on its own against *reference*, carry the whole decision. That
+    costs the isolated single-frame swaps, which at those zooms occupy a
+    fraction of one display column and cannot be seen anyway. Passing
+    ``native=False`` without a *reference* leaves the frames untouched, there
+    being nothing left that could decide anything.
+
+    Returns ``(swap, rot)``, both bool arrays of length ``n_frames``.
     """
     n = len(ratio_phase)
     swap = np.zeros(n, dtype=bool)
     rot = np.zeros(n, dtype=bool)
     if n < 2:
+        return swap, rot
+    if not native and reference is None:
         return swap, rot
 
     # The two passes fail in complementary ways, so they are alternated.
@@ -161,33 +308,42 @@ def detect_states(
     # the last round, and states compose by XOR (a second swap undoes the
     # first; a second rotation likewise). Iterating converges quickly and is
     # idempotent once no residual boundary remains.
-    swap, rot = _chain(ratio_phase)
-    for _ in range(REFINE_PASSES):
-        prev_swap, prev_rot = swap, rot
-        swap, rot = _refine(ratio_phase, swap, rot)
-        swap, rot = _merge_segments(ratio_phase, swap, rot)
-        d_swap, d_rot = _chain(_apply(ratio_phase, swap, rot))
-        swap = swap ^ d_swap
-        rot = rot ^ d_rot
-        if np.array_equal(swap, prev_swap) and np.array_equal(rot, prev_rot):
-            break
+    if native:
+        swap, rot = _chain(ratio_phase)
+        for _ in range(REFINE_PASSES):
+            prev_swap, prev_rot = swap, rot
+            swap, rot = _refine(ratio_phase, swap, rot)
+            swap, rot = _merge_segments(ratio_phase, swap, rot)
+            d_swap, d_rot = _chain(_apply(ratio_phase, swap, rot))
+            swap = swap ^ d_swap
+            rot = rot ^ d_rot
+            if np.array_equal(swap, prev_swap) and np.array_equal(rot, prev_rot):
+                break
 
     # Last: settle which side of each boundary is actually the right way up.
     # Everything above only compares frames to other frames, so it can place a
     # boundary perfectly and still leave the whole region between two of them
     # inverted.
-    if ratio_amplitude is not None:
-        swap = _anchor_to_amplitude(ratio_amplitude, swap)
+    smooth = ANCHOR_WINDOW if native else SAMPLED_ANCHOR_WINDOW
+    swap = _anchor_to_amplitude(
+        ratio_amplitude, swap, reference=reference, smooth=smooth
+    )
 
     # The rotation parity needs its own anchor: the amplitude is blind to a
     # pi rotation, so nothing above can tell a correctly-oriented region from
     # one sitting a pi away from the rest of the capture.
-    rot = _anchor_rotation(ratio_phase, swap, rot)
+    rot = _anchor_rotation(
+        ratio_phase, swap, rot, reference=reference, smooth=smooth
+    )
 
-    if swap.mean() > 0.5:
-        swap = ~swap
-    if rot.mean() > 0.5:
-        rot = ~rot
+    if reference is None:
+        # No absolute verdict available, so the convention is whatever most
+        # of this batch agrees on. Note this overrides the anchors above —
+        # it is a last resort, and it is exactly what a Reference replaces.
+        if swap.mean() > 0.5:
+            swap = ~swap
+        if rot.mean() > 0.5:
+            rot = ~rot
 
     return swap, rot
 
@@ -252,7 +408,10 @@ def _chain(ratio_phase: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _anchor_to_amplitude(
-    ratio_amplitude: np.ndarray, swap: np.ndarray
+    ratio_amplitude: np.ndarray | None,
+    swap: np.ndarray,
+    reference: Reference | None = None,
+    smooth: int = ANCHOR_WINDOW,
 ) -> np.ndarray:
     """Re-orient block-scale swap errors against the global amplitude profile.
 
@@ -274,9 +433,25 @@ def _anchor_to_amplitude(
     and the smoothing needed to make it readable spans far more frames than a
     genuine isolated swap covers — so short excursions are left to the phase
     passes, which resolve them sharply.
+
+    With a *reference* none of that hedging is needed. The profile no longer
+    comes from the frames being judged, so there is no risk of confirming a
+    window's own inversion, no need to iterate it to a fixed point, and no
+    need for the run-length gate: an absolute reference can only ever flip a
+    sign that is wrong. It also drops the minimum-length bail, which is what
+    left every view under 400 frames with no absolute orientation at all.
     """
+    if ratio_amplitude is None:
+        return swap
     n = len(swap)
-    if n < MIN_ANCHOR_RUN * 2 or ratio_amplitude is None:
+
+    if reference is not None:
+        oriented = np.asarray(ratio_amplitude, dtype=np.float64).copy()
+        oriented[swap] = -oriented[swap]
+        corr = _profile_corr(oriented, reference.amp_profile)
+        return swap ^ (_moving_average(corr, smooth) < 0)
+
+    if n < MIN_ANCHOR_RUN * 2:
         return swap
 
     amp = np.where(np.isfinite(ratio_amplitude), ratio_amplitude, np.nan).astype(np.float64)
@@ -296,7 +471,7 @@ def _anchor_to_amplitude(
         centred = oriented - np.nanmean(oriented, axis=1, keepdims=True)
         corr = np.nansum(np.nan_to_num(centred) * profile, axis=1)
 
-        w = min(ANCHOR_WINDOW, max(3, n // 4))
+        w = min(smooth, max(3, n // 4))
         kernel = np.ones(w) / w
         smoothed = np.convolve(corr, kernel, mode="same")
 
@@ -310,7 +485,11 @@ def _anchor_to_amplitude(
 
 
 def _anchor_rotation(
-    ratio_phase: np.ndarray, swap: np.ndarray, rot: np.ndarray
+    ratio_phase: np.ndarray,
+    swap: np.ndarray,
+    rot: np.ndarray,
+    reference: Reference | None = None,
+    smooth: int = ANCHOR_WINDOW,
 ) -> np.ndarray:
     """Settle the rotation parity against the capture's own mean direction.
 
@@ -330,8 +509,20 @@ def _anchor_rotation(
 
     As with the amplitude anchor, only long runs are re-oriented. Genuine
     single-frame events belong to the phase passes, which see them sharply.
+
+    And as there, a *reference* removes the hedging: the direction is the
+    capture's, measured once, so a single pass against it settles the parity
+    for any window at any length.
     """
     n = len(rot)
+
+    if reference is not None:
+        corrected = _apply(ratio_phase, swap, rot)
+        z = np.exp(1j * corrected)
+        z[~np.isfinite(corrected)] = 0.0
+        agree = np.real(z.mean(axis=1) * np.conj(reference.phase_dir))
+        return rot ^ (_moving_average(agree, smooth) < 0)
+
     if n < MIN_ANCHOR_RUN * 2:
         return rot
 
@@ -352,7 +543,7 @@ def _anchor_rotation(
         # negative when it sits a pi away from it.
         agree = np.real(v * np.conj(ref))
 
-        w = min(ANCHOR_WINDOW, max(3, n // 4))
+        w = min(smooth, max(3, n // 4))
         smoothed = np.convolve(agree, np.ones(w) / w, mode="same")
 
         flipped = _long_runs(smoothed < 0, MIN_ANCHOR_RUN)
@@ -584,7 +775,11 @@ def detect_swaps(ratio_phase: np.ndarray) -> np.ndarray:
 
 
 def correct_ratio_phase(
-    ratio_phase: np.ndarray, ratio_amplitude: np.ndarray | None = None
+    ratio_phase: np.ndarray,
+    ratio_amplitude: np.ndarray | None = None,
+    *,
+    reference: Reference | None = None,
+    native: bool = True,
 ) -> np.ndarray:
     """Undo both corruptions of the ratio phase. Returns float32.
 
@@ -599,8 +794,13 @@ def correct_ratio_phase(
     information about which side of a boundary is the right way up, so
     without it a mistaken pair of toggles can invert a long region and leave
     it looking perfectly self-consistent.
+
+    Pass *reference* too, or the answer is only as stable as the batch — see
+    ``detect_states``.
     """
-    swap, rot = detect_states(ratio_phase, ratio_amplitude)
+    swap, rot = detect_states(
+        ratio_phase, ratio_amplitude, reference=reference, native=native
+    )
     out = np.array(ratio_phase, dtype=np.float64, copy=True)
     out[swap] = -out[swap]
     out[rot] += np.pi
@@ -612,7 +812,11 @@ def correct_ratio_phase(
 
 
 def correct_ratio_amplitude(
-    ratio_amplitude: np.ndarray, ratio_phase: np.ndarray
+    ratio_amplitude: np.ndarray,
+    ratio_phase: np.ndarray,
+    *,
+    reference: Reference | None = None,
+    native: bool = True,
 ) -> np.ndarray:
     """Negate the dB ratio amplitude of swapped frames. Returns float32.
 
@@ -622,6 +826,29 @@ def correct_ratio_amplitude(
     correction in one plot but not the other.
     """
     out = np.array(ratio_amplitude, dtype=np.float32, copy=True)
-    flip, _ = detect_states(ratio_phase, ratio_amplitude)
+    flip, _ = detect_states(
+        ratio_phase, ratio_amplitude, reference=reference, native=native
+    )
     out[flip] = -out[flip]
     return out
+
+
+def with_context(
+    correct: "Callable[..., np.ndarray]",
+    blocks: "Sequence[np.ndarray]",
+    *,
+    lead: int,
+    length: int,
+    **kwargs,
+) -> np.ndarray:
+    """Correct a window that carries context, and return only its interior.
+
+    *blocks* are the metric arrays for ``lead`` frames of leading context,
+    then the ``length`` frames actually wanted, then whatever trailing
+    context was available. Correcting the whole thing and slicing the middle
+    out gives the interior frames the same neighbours they would have had in
+    a full-capture pass, which is what keeps a tile's edge columns from being
+    decided on half the evidence.
+    """
+    corrected = correct(*blocks, **kwargs)
+    return corrected[lead : lead + length]

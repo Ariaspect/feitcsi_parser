@@ -531,8 +531,13 @@ export function Heatmap({
       // exact === false means the tile was stride-sampled because the range
       // exceeded the decode budget. A sampled max-hold can miss transients;
       // silence would be a lie, so the indicator says so.
+      // anchored === false means the ratio was NOT corrected: correction
+      // needs one transmitter's own frame sequence, and on `all` consecutive
+      // frames come from different senders, so it is skipped rather than
+      // applied at ~1/20th the effect and reported as done.
       const live = followLiveRef.current;
       const sampled = tileEntry.tile.exact === false;
+      const uncorrected = tileEntry.tile.anchored === false;
       ctx.font = "11px sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "top";
@@ -540,7 +545,11 @@ export function Heatmap({
       if (sampled) {
         indicator += "  ⚠ sampled — zoom in for exact";
       }
-      ctx.fillStyle = sampled ? "#d80" : live ? "#2a7" : "#d33";
+      if (uncorrected) {
+        indicator += "  ⚠ uncorrected — select a transmitter";
+      }
+      ctx.fillStyle =
+        uncorrected || sampled ? "#d80" : live ? "#2a7" : "#d33";
       ctx.fillText(indicator, cssW - PADDING.right, 8);
 
       // --- Hover crosshair + tooltip ---

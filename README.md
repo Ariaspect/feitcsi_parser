@@ -280,7 +280,36 @@ swaps.
 
 Orientation is not observable from a single frame, so every decision is made
 by comparing frames against each other. Three phase passes run in a loop, each
-covering the others' blind spot, followed by an amplitude anchor:
+covering the others' blind spot, then two anchors settle which way up the
+result sits — against a **reference measured once for the whole capture**:
+
+0. **Reference.** Comparing frames to each other can only ever produce an
+   answer that is self-consistent *within the batch being looked at*, and
+   there are always two such answers. Which one a view lands on then depends
+   on which frames the view contains — so panning or zooming inverted whole
+   panels, at a measured 12% of positions at a 200-frame zoom. Both anchors
+   below originally derived their reference from the batch in front of them,
+   which is what made this structural rather than a tuning problem.
+
+   `build_reference` measures the two quantities once, from a few thousand
+   frames drawn evenly across the capture: the median dB band profile and the
+   mean phase direction. Both are majority statistics and the corruption is
+   the minority (4.1% of frames swapped, 14.2% a π out), so raw frames
+   already point the right way in bulk and no prior correction is needed to
+   measure them — the chicken-and-egg does not arise. Every tile of that
+   capture is then judged against the same absolute orientation, and a
+   frame's verdict is the same whichever view asked for it. Cost is one
+   decode of ~4096 frames per capture per transmitter (~0.2 s), cached.
+
+   It is per *transmitter*, because the band profile is a property of one
+   pair of antennas; blending two senders' profiles anchors to neither. So a
+   selected `source_mac` is required, and `reference is not None` is the
+   single switch on whether the ratio is corrected at all — a view can never
+   be half-corrected, nor claim a correction it did not get. No reference is
+   also issued when a sender's band is too flat to correlate against or its
+   phase names no clear direction. In every such case the ratio is passed
+   through exactly as decoded and the tile reports `X-Tile-Anchored: 0`, which
+   the heatmap surfaces as *⚠ uncorrected — select a transmitter*.
 
 1. **Chain.** Every adjacent pair is fitted twice — `phi_i` against
    `phi_prev`, and `-phi_prev` — and the better fit wins. Its *offset* then
@@ -311,9 +340,16 @@ cannot see a rotation at all.
    negates it too, and its shape across the band is fixed by the antennas
    rather than the moving channel. Every 2000-frame chunk of an hourly
    capture correlates +0.955 to +0.999 with the file's median profile, so a
-   stretch that anti-correlates is simply wrong. Only runs of ≥200 frames are
-   re-oriented; isolated frames stay with the phase passes, which resolve
-   them far more sharply than a smoothed correlation can.
+   stretch that anti-correlates is simply wrong.
+
+   With a reference the profile comes from the capture rather than from the
+   frames being judged, so there is no risk of confirming a window's own
+   inversion, no iteration to a fixed point, and no run-length gate — an
+   absolute reference can only ever flip a sign that is already wrong. It
+   also drops the ≥400-frame minimum, which is what used to leave every
+   zoomed-in view with no absolute orientation at all. Without a reference
+   the older behaviour stands: only runs of ≥200 frames are re-oriented, and
+   isolated frames stay with the phase passes.
 
    This pass exists because the phase-only version shipped a regression: it
    removed the real isolated swaps and then inverted a 1400-second block on
@@ -337,7 +373,25 @@ cannot see a rotation at all.
    over an hour it holds at +1.3 rad end to end, while a wrongly-rotated
    stretch sits at −1.8. A full π apart, separable by sign. Across the 20
    captures this took columns sitting a π from the capture mean from 14.2% to
-   **0.3%**.
+   **0.3%**. As with the amplitude anchor, a reference turns this from a
+   comparison with the batch into a single pass against a fixed direction.
+
+6. **Stride-sampled views.** A decimated view is not a frame sequence: its
+   rows are seconds apart, so the chain and refine passes have nothing to
+   compare against and are skipped entirely. The anchors carry the whole
+   decision, judging each frame on its own against the reference — and
+   *without smoothing*, because smoothing works by borrowing evidence from
+   neighbours that share a state, which sampled rows do not. Measured against
+   the native-rate answer, this errs on 5% of frames at every stride from 2
+   to 64; averaging 5 neighbours errs on 14–23%, and leaving the frames
+   uncorrected errs on 28%. What is lost is the isolated single-frame swaps,
+   which at those zooms occupy a fraction of one column and cannot be seen.
+
+Windows are corrected with a 128-frame context margin that is then trimmed
+off, so the frames at a tile's or a cache block's edge are decided on the same
+neighbours a full-capture pass would have given them. Without it a 200-frame
+view disagreed with the capture-scale answer somewhere in 28 of 198 positions;
+with it, 4 — and none of them an inversion.
 
 Measured across all 20 hourly captures at the full-file view (the worst case,
 where stride sampling puts adjacent columns ~4.5 s apart), inverted column
@@ -357,16 +411,26 @@ a full 8192-frame tile and ~0.04 s on a typical zoomed view.
 
 Three properties of the method are worth knowing before relying on it:
 
-- **It needs a single transmitter selected.** Detection is relative — a frame
-  is judged against its neighbours. On `source_mac=all`, consecutive frames
-  come from different senders, nothing is comparable, and the confidence gate
-  declines to act rather than flipping at random.
+- **It needs a single transmitter selected, and does nothing without one.**
+  Detection is relative — a frame is judged against its neighbours. On
+  `source_mac=all` consecutive frames come from different senders (14% and 7%
+  same-sender on the two transmitters of an hourly capture), so `_chain`
+  compares two senders 86–93% of the time and the confidence gate declines.
+  Measured on the same frames, correcting on one transmitter's own sequence
+  leaves **0.3–0.6%** of steps above π/2, where correcting the interleaved
+  stream leaves **11.2–11.6%** — against 12.4–13.2% uncorrected. It bought
+  almost nothing and reported itself as done, so on `all` the correction is
+  now skipped outright and the panel shows the raw ratio.
 - **The flag means "opposite orientation to frame 0", not "anomalous".**
   Parity accumulates along the sequence, so roughly half the frames in a long
   batch carry the flag even though individual swaps are rare.
-- **Orientation is only ever relative.** Which of the two states is "correct"
-  is not observable from a single frame, so a majority vote fixes the
-  convention per batch.
+- **Orientation needs the capture, not the window.** Which of the two states
+  is "correct" is not observable from a single frame and not observable from
+  a window either — see step 0. With a reference the answer is a property of
+  the capture; without one it falls back to a majority vote over the batch,
+  which is stable only as long as the batch is, and which is wrong exactly
+  when the minority assumption fails (a window landing inside a long
+  corrupted stretch).
 - **A genuine π channel rotation is indistinguishable from an artificial
   one** when it lands between two sampled instants. At heavy zoom-out the
   remaining handful of inverted-looking transitions are real events in the

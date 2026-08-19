@@ -11,9 +11,13 @@ from backend.batch import decode_frames
 from backend.index import FrameIndex
 from backend.ratio import (
     CONFIDENCE_MIN,
+    CONTEXT_FRAMES,
+    build_reference,
     correct_ratio_amplitude,
     correct_ratio_phase,
+    detect_states,
     detect_swaps,
+    with_context,
 )
 
 CAPTURE = Path(__file__).resolve().parent.parent / "captures" / "capture.dat"
@@ -506,3 +510,187 @@ def test_rotation_anchor_leaves_short_events_alone():
     _, rot = detect_states(phase, amp)
     assert rot[500] != rot[499]
     assert rot[500] != rot[501]
+
+
+# ----------------------------------------------------------------------- #
+#  Reference: making the answer a property of the capture, not the view   #
+# ----------------------------------------------------------------------- #
+
+
+def test_reference_is_measurable_from_a_spread_sample():
+    """The reference needs no prior correction — both halves are majorities."""
+    amp = _synthetic_amp(n=800)
+    phase = _synthetic(n=800)
+    # Corrupt the minority, as the hardware does.
+    rng = np.random.default_rng(3)
+    swapped = rng.random(800) < 0.05
+    amp[swapped] = -amp[swapped]
+    phase[swapped] = -phase[swapped]
+
+    ref = build_reference(amp[::7], phase[::7])
+    assert ref is not None
+    # The profile recovered from raw frames matches the uncorrupted shape.
+    clean = _synthetic_amp(n=800).mean(axis=0)
+    clean = clean - clean.mean()
+    assert np.corrcoef(ref.amp_profile, clean)[0, 1] > 0.95
+    assert abs(abs(ref.phase_dir) - 1.0) < 1e-9
+
+
+def test_reference_declines_on_a_featureless_band():
+    """Balanced antennas leave nothing to correlate a swap against."""
+    n, num_sc = 400, 64
+    amp = np.random.default_rng(0).normal(0, 0.05, size=(n, num_sc))
+    assert build_reference(amp, _synthetic(n=n, num_sc=num_sc)) is None
+
+
+def test_reference_declines_without_a_phase_majority():
+    """Half the frames a pi away from the other half names no direction."""
+    n = 400
+    amp = _synthetic_amp(n=n)
+    phase = _synthetic(n=n)
+    phase[::2] = np.angle(np.exp(1j * (phase[::2] + np.pi)))
+    assert build_reference(amp, phase) is None
+
+
+def _corrupted_capture(n=4000, num_sc=64, seed=5):
+    """A long sequence carrying both corruptions, with the truth returned."""
+    rng = np.random.default_rng(seed)
+    phase = _synthetic(n=n, num_sc=num_sc, seed=seed)
+    amp = _synthetic_amp(n=n, num_sc=num_sc)
+    swap = rng.random(n) < 0.04
+    rot = np.zeros(n, dtype=bool)
+    # Rotations arrive in blocks lasting seconds, not as isolated frames.
+    for start in rng.integers(0, n - 200, size=8):
+        rot[start : start + rng.integers(20, 200)] = True
+    obs_phase = phase.copy()
+    obs_phase[swap] = -obs_phase[swap]
+    obs_phase[rot] = np.angle(np.exp(1j * (obs_phase[rot] + np.pi)))
+    obs_amp = amp.copy()
+    obs_amp[swap] = -obs_amp[swap]
+    return obs_phase, obs_amp, swap, rot
+
+
+def test_reference_makes_the_verdict_independent_of_the_window():
+    """The regression: pan or zoom and whole panels used to invert.
+
+    Every quantity the detection could derive from a batch was derived from
+    that batch, so a window only ever produced an answer self-consistent with
+    itself — and which of the two self-consistent answers you got depended on
+    which frames were in it. With a reference, a frame's verdict is the same
+    whichever view asked for it.
+    """
+    phase, amp, _, _ = _corrupted_capture()
+    ref = build_reference(amp[::4], phase[::4])
+    assert ref is not None
+    full_swap, full_rot = detect_states(phase, amp, reference=ref)
+
+    for start, width in ((0, 200), (1500, 200), (1500, 400), (900, 1200), (2600, 800)):
+        lo = max(0, start - CONTEXT_FRAMES)
+        hi = min(len(phase), start + width + CONTEXT_FRAMES)
+        swap, rot = detect_states(phase[lo:hi], amp[lo:hi], reference=ref)
+        here = slice(start - lo, start - lo + width)
+        there = slice(start, start + width)
+        # Not one frame in the window may disagree about its orientation.
+        assert np.array_equal(swap[here], full_swap[there]), (start, width)
+        assert np.array_equal(rot[here], full_rot[there]), (start, width)
+
+
+def test_small_windows_still_get_an_absolute_orientation():
+    """Below 400 frames the old anchors bailed, leaving nothing absolute."""
+    phase, amp, _, _ = _corrupted_capture()
+    ref = build_reference(amp[::4], phase[::4])
+    full_swap, full_rot = detect_states(phase, amp, reference=ref)
+
+    lo, hi = 2000, 2120  # 120 frames — under MIN_ANCHOR_RUN, let alone twice it
+    swap, rot = detect_states(phase[lo:hi], amp[lo:hi], reference=ref)
+    assert np.array_equal(swap, full_swap[lo:hi])
+    assert np.array_equal(rot, full_rot[lo:hi])
+
+
+def test_reference_suppresses_the_majority_vote():
+    """A window that really is mostly corrupted must not be inverted wholesale.
+
+    The majority vote is what a batch-relative answer falls back on, and it
+    is wrong exactly when the minority assumption fails — which is what a
+    window landing inside a long corrupted stretch does.
+    """
+    n = 600
+    phase = _synthetic(n=n)
+    amp = _synthetic_amp(n=n)
+    corrupt = np.zeros(n, dtype=bool)
+    corrupt[100:500] = True  # two thirds of the window
+    obs_phase = phase.copy()
+    obs_phase[corrupt] = -obs_phase[corrupt]
+    obs_amp = amp.copy()
+    obs_amp[corrupt] = -obs_amp[corrupt]
+
+    ref = build_reference(amp, phase)
+    swap, _ = detect_states(obs_phase, obs_amp, reference=ref)
+    assert np.array_equal(swap, corrupt)
+
+    # Without the reference the majority vote inverts it, as it always did.
+    legacy, _ = detect_states(obs_phase, obs_amp)
+    assert legacy.mean() <= 0.5
+
+
+def test_sampled_view_judges_each_frame_on_its_own():
+    """Under a stride, neighbours are unrelated and the chain must not run."""
+    phase, amp, _, _ = _corrupted_capture()
+    ref = build_reference(amp[::4], phase[::4])
+    truth_swap, truth_rot = detect_states(phase, amp, reference=ref)
+
+    for stride in (4, 16, 64):
+        swap, rot = detect_states(
+            phase[::stride], amp[::stride], reference=ref, native=False
+        )
+        wrong = ((swap ^ truth_swap[::stride]) | (rot ^ truth_rot[::stride])).mean()
+        uncorrected = (truth_swap[::stride] | truth_rot[::stride]).mean()
+        # Better than leaving the frames alone, and never a wholesale flip.
+        assert wrong < uncorrected / 2, (stride, wrong, uncorrected)
+        assert wrong < 0.15
+
+
+def test_sampled_view_without_a_reference_changes_nothing():
+    """Nothing left that could decide anything, so decide nothing."""
+    phase, amp, _, _ = _corrupted_capture()
+    swap, rot = detect_states(phase[::8], amp[::8], native=False)
+    assert not swap.any()
+    assert not rot.any()
+
+
+def test_reference_survives_minus_inf_amplitudes():
+    """db(0) is -inf; left in the dot product it overflows and poisons a frame."""
+    phase, amp, _, _ = _corrupted_capture(n=800)
+    amp[np.arange(0, 800, 37), 3] = -np.inf
+    ref = build_reference(amp[::4], phase[::4])
+    assert ref is not None
+    assert np.isfinite(ref.amp_profile).all()
+    swap, rot = detect_states(phase, amp, reference=ref)
+    assert swap.shape == (800,) and rot.shape == (800,)
+
+
+def test_correctors_accept_and_forward_the_reference():
+    phase, amp, _, _ = _corrupted_capture(n=800)
+    ref = build_reference(amp[::4], phase[::4])
+    swap, _ = detect_states(phase, amp, reference=ref)
+
+    out_phase = correct_ratio_phase(phase, amp, reference=ref)
+    out_amp = correct_ratio_amplitude(amp, phase, reference=ref)
+    assert out_phase.dtype == np.float32
+    assert np.allclose(out_amp[swap], -amp[swap], atol=1e-4)
+    assert np.allclose(out_amp[~swap], amp[~swap], atol=1e-4)
+
+
+def test_with_context_returns_only_the_interior():
+    phase, amp, _, _ = _corrupted_capture(n=800)
+    ref = build_reference(amp[::4], phase[::4])
+    out = with_context(
+        correct_ratio_phase,
+        (phase[300:700], amp[300:700]),
+        lead=50,
+        length=300,
+        reference=ref,
+    )
+    assert out.shape == (300, phase.shape[1])
+    assert np.allclose(out, correct_ratio_phase(phase[300:700], amp[300:700],
+                                                reference=ref)[50:350], equal_nan=True)

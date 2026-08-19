@@ -84,6 +84,9 @@ export interface Tile {
   framesDecoded: number;
   totalInRange: number;
   exact: boolean;
+  /** False when a correction metric had no absolute orientation to anchor
+   *  to, so this tile's polarity is not comparable with another view's. */
+  anchored: boolean;
   vmin: number;
   vmax: number;
   pLow: number; // 1st percentile of finite values — robust scale for amplitude
@@ -144,6 +147,8 @@ export async function fetchTile(
     framesDecoded: parseInt(h.get("X-Tile-Frames") ?? "0", 10),
     totalInRange: parseInt(h.get("X-Tile-Total") ?? "0", 10),
     exact: h.get("X-Tile-Exact") === "1",
+    // Absent header means an older backend that always anchored implicitly.
+    anchored: h.get("X-Tile-Anchored") !== "0",
     vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
     vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
     pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),

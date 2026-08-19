@@ -34,6 +34,7 @@ app.add_middleware(
         "X-Tile-Frames",
         "X-Tile-Total",
         "X-Tile-Exact",
+        "X-Tile-Anchored",
         "X-Tile-VMin",
         "X-Tile-VMax",
         "X-Tile-PLow",
@@ -231,6 +232,9 @@ def tile(
             "X-Tile-Frames": str(meta["frames_decoded"]),
             "X-Tile-Total": str(meta["total_in_range"]),
             "X-Tile-Exact": "1" if meta["exact"] else "0",
+            # 0 when a correction metric had no absolute orientation to
+            # anchor to, so its polarity is not comparable with another view.
+            "X-Tile-Anchored": "1" if meta["anchored"] else "0",
             "X-Tile-VMin": str(meta["vmin"]),
             "X-Tile-VMax": str(meta["vmax"]),
             "X-Tile-PLow": str(meta["p_low"]),
