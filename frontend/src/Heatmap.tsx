@@ -47,6 +47,16 @@ interface HeatmapProps {
 
 const PADDING = { top: 30, right: 70, bottom: 40, left: 60 };
 
+/** True when the color scale must be fitted to the data instead of being
+ * given a priori. Wrapped phase knows its range is [-π, π] and passes both
+ * bounds; amplitude and the unwrapped phase views do not, and lock to their
+ * first tile's percentile band instead. Deriving this from the bounds rather
+ * than from a metric name list means a new metric gets the right behaviour by
+ * saying what it knows about its own range, not by being added here. */
+function autoScales(props: { minValue?: number; maxValue?: number }): boolean {
+  return props.minValue === undefined && props.maxValue === undefined;
+}
+
 interface PlotRect {
   x: number;
   y: number;
@@ -154,7 +164,8 @@ export function Heatmap({
   const debounceTimerRef = useRef<number | null>(null);
   const lastFetchKeyRef = useRef<FetchKey | null>(null);
   const requestTileRef = useRef<(() => void) | null>(null);
-  // Amplitude color scale locked to the first tile's percentile bounds
+  // Color scale for metrics without a-priori bounds (amplitude, and the
+  // unwrapped phase views), locked to the first tile's percentile bounds
   // (1st/99th) for a given capture. The raw min/max is dominated by outliers
   // — 98.5% of values fall in [40, 60] while extrema span [7.7, 84.7] — so a
   // min/max scale compresses the visible structure into one narrow slice of
@@ -162,6 +173,9 @@ export function Heatmap({
   // band clamp to the end colors via lutIndex. Cleared on capture identity
   // change (see Effect 1's reset path).
   const ampScaleRef = useRef<{ lo: number; hi: number } | null>(null);
+  // Last metric drawn, so a metric switch can drop scale and tile state that
+  // was fitted to the previous one. Null until the first render completes.
+  const metricRef = useRef<Metric | null>(null);
 
   const halfN = Math.floor(numSubcarriers / 2);
 
@@ -211,6 +225,20 @@ export function Heatmap({
       mimo: props.mimo,
       sourceMac: props.sourceMac,
     };
+
+    // A metric switch (e.g. the detrend toggle) keeps the capture and the
+    // view, but the locked color scale and the on-screen tile belong to the
+    // old metric — unwrapped phase spans tens of radians where detrended
+    // spans a few, so reusing the lock would paint the new data as one flat
+    // color. The view deliberately survives: the point of the toggle is to
+    // compare the same window both ways.
+    if (metricRef.current !== props.metric) {
+      metricRef.current = props.metric;
+      ampScaleRef.current = null;
+      tileRef.current = null;
+      imageDataRef.current = null;
+      lastFetchKeyRef.current = null;
+    }
 
     const prevCapture = captureRef.current;
     if (!prevCapture || shouldResetView(prevCapture, newCapture)) {
@@ -366,8 +394,7 @@ export function Heatmap({
       // lock unset, and NaN bounds would send lutIndex to NaN, index the LUT
       // with it, and paint the entire plot transparent with "NaN" on the
       // colorbar -- a blank screen with nothing to explain it.
-      const isAmpLike = props.metric === "amplitude" || props.metric === "csi_ratio_amplitude";
-      const locked = isAmpLike ? ampScaleRef.current : null;
+      const locked = autoScales(props) ? ampScaleRef.current : null;
       const min = locked ? locked.lo : props.minValue ?? tile.vmin;
       const max = locked ? locked.hi : props.maxValue ?? tile.vmax;
 
@@ -504,8 +531,13 @@ export function Heatmap({
       // exact === false means the tile was stride-sampled because the range
       // exceeded the decode budget. A sampled max-hold can miss transients;
       // silence would be a lie, so the indicator says so.
+      // anchored === false means the ratio was NOT corrected: correction
+      // needs one transmitter's own frame sequence, and on `all` consecutive
+      // frames come from different senders, so it is skipped rather than
+      // applied at ~1/20th the effect and reported as done.
       const live = followLiveRef.current;
       const sampled = tileEntry.tile.exact === false;
+      const uncorrected = tileEntry.tile.anchored === false;
       ctx.font = "11px sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "top";
@@ -513,7 +545,11 @@ export function Heatmap({
       if (sampled) {
         indicator += "  ⚠ sampled — zoom in for exact";
       }
-      ctx.fillStyle = sampled ? "#d80" : live ? "#2a7" : "#d33";
+      if (uncorrected) {
+        indicator += "  ⚠ uncorrected — select a transmitter";
+      }
+      ctx.fillStyle =
+        uncorrected || sampled ? "#d80" : live ? "#2a7" : "#d33";
       ctx.fillText(indicator, cssW - PADDING.right, 8);
 
       // --- Hover crosshair + tooltip ---
@@ -702,7 +738,7 @@ export function Heatmap({
         // Prefer percentile bounds (robust to outliers); fall back to extrema
         // if the percentile band is degenerate (pHigh === pLow); leave unset
         // if both are degenerate — draw() then uses the current tile's vmin/vmax.
-        if ((props.metric === "amplitude" || props.metric === "csi_ratio_amplitude") && ampScaleRef.current === null) {
+        if (autoScales(props) && ampScaleRef.current === null) {
           if (tile.pHigh > tile.pLow) {
             ampScaleRef.current = { lo: tile.pLow, hi: tile.pHigh };
           } else if (tile.vmax > tile.vmin) {

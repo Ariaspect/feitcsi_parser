@@ -11,8 +11,8 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from .stream import get_stream
-from .tiles import compute_tile, get_index, reset_tile_caches
-from .index import parse_mimo_filter
+from .tiles import TILE_METRICS, compute_tile, get_index, reset_tile_caches
+from .index import parse_mac_filter, parse_mimo_filter
 
 DEFAULT_PATH = "captures/capture.dat"
 DEFAULT_WINDOW = 200
@@ -34,6 +34,7 @@ app.add_middleware(
         "X-Tile-Frames",
         "X-Tile-Total",
         "X-Tile-Exact",
+        "X-Tile-Anchored",
         "X-Tile-VMin",
         "X-Tile-VMax",
         "X-Tile-PLow",
@@ -132,7 +133,7 @@ def meta(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    mac_filter = source_mac if source_mac and source_mac.strip() else None
+    mac_filter = parse_mac_filter(source_mac)
     mask = idx.filter_mask(mimo=mimo_filter, source_mac=mac_filter)
     filtered_count = int(mask.sum())
 
@@ -186,7 +187,7 @@ def tile(
     t0: float = Query(..., description="Start of requested time window (seconds)"),
     t1: float = Query(..., description="End of requested time window (seconds)"),
     width: int = Query(1600, ge=1, description="Output columns (client plot width in pixels; capped at 4096)"),
-    metric: str = Query("amplitude", description="Metric: 'amplitude' or 'phase'"),
+    metric: str = Query("amplitude", description=f"One of: {', '.join(TILE_METRICS)}"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM' (e.g. '2x1', '2x2')"),
     source_mac: str | None = Query(None, description="Source MAC filter, e.g. 'd8:3a:dd:29:22:f5'"),
 ) -> Response:
@@ -201,8 +202,11 @@ def tile(
     cannot know is how far the capture has grown since. Returning it here lets
     a live view track the newest packet without a second /api/meta round trip.
     """
-    if metric not in ("amplitude", "phase", "csi_ratio_amplitude", "csi_ratio_phase"):
-        raise HTTPException(status_code=400, detail="metric must be 'amplitude', 'phase', 'csi_ratio_amplitude', or 'csi_ratio_phase'")
+    if metric not in TILE_METRICS:
+        raise HTTPException(
+            status_code=400,
+            detail="metric must be one of: " + ", ".join(f"'{m}'" for m in TILE_METRICS),
+        )
 
     p = resolve_capture_path(path)
 
@@ -211,7 +215,7 @@ def tile(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    mac_filter = source_mac if source_mac and source_mac.strip() else None
+    mac_filter = parse_mac_filter(source_mac)
 
     grid, meta = compute_tile(p, t0, t1, width, metric, mimo=mimo_filter, source_mac=mac_filter)
 
@@ -228,6 +232,9 @@ def tile(
             "X-Tile-Frames": str(meta["frames_decoded"]),
             "X-Tile-Total": str(meta["total_in_range"]),
             "X-Tile-Exact": "1" if meta["exact"] else "0",
+            # 0 when a correction metric had no absolute orientation to
+            # anchor to, so its polarity is not comparable with another view.
+            "X-Tile-Anchored": "1" if meta["anchored"] else "0",
             "X-Tile-VMin": str(meta["vmin"]),
             "X-Tile-VMax": str(meta["vmax"]),
             "X-Tile-PLow": str(meta["p_low"]),

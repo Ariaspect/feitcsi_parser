@@ -23,6 +23,17 @@ const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
 const DARK_KEY = "feitcsi-dark";
 
+// Preferred transmitter to show on load. 'all' interleaves every sender in
+// the capture, and since two devices here transmit at roughly equal rates,
+// consecutive frames come from the same one only ~18% of the time. That is
+// harmless for the per-frame panels but makes anything read along the time
+// axis meaningless, so a single transmitter is the safer default.
+//
+// Falls back to 'all' when this address is absent from the loaded capture —
+// see the filters effect. A capture from a different rig has different MACs,
+// and defaulting to one that is not there would show an empty plot.
+const DEFAULT_SOURCE_MAC = "08:bf:b8:95:80:04";
+
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
   const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS);
@@ -33,7 +44,7 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
-  const [sourceMac, setSourceMac] = useState<string>("all");
+  const [sourceMac, setSourceMac] = useState<string>(DEFAULT_SOURCE_MAC);
   const [dark, setDark] = useState<boolean>(() => {
     const stored = localStorage.getItem(DARK_KEY);
     return stored === null ? true : stored === "true";
@@ -82,7 +93,15 @@ export function App() {
     setFilters(null);
     fetchFilters(path)
       .then((f) => {
-        if (!cancelled) setFilters(f);
+        if (cancelled) return;
+        setFilters(f);
+        // Keep the selection honest for whatever capture just loaded: a MAC
+        // that is not in this file would filter every frame away and draw an
+        // empty plot with nothing to explain it. Applies to the default on
+        // first load and to a user's pick surviving a path change alike.
+        setSourceMac((prev) =>
+          prev === "all" || f.source_macs.includes(prev) ? prev : "all",
+        );
       })
       .catch(() => {});
     return () => {
@@ -330,6 +349,77 @@ export function App() {
               maxValue={Math.PI}
               title="CSI Ratio Phase (rx1/rx0)"
               colorLabel="Ratio phase (rad)"
+              height={400}
+              palette={TWILIGHT}
+              timeLink={timeLink}
+              mimo={mimo}
+              sourceMac={sourceMac}
+              dark={dark}
+            />
+
+            <Separator className="my-2" />
+            <p className="text-xs text-muted-foreground">
+              Derived views below. Some frames arrive with the rx streams
+              exchanged (ratio reciprocal) or the ratio negated (phase +π);
+              these put them back. Detection compares each frame against its
+              neighbours, so a single Source MAC must be selected — on{" "}
+              <code className="bg-muted px-1 py-0.5 rounded">all</code> the
+              correction declines to act rather than guessing.
+            </p>
+
+            <Heatmap
+              path={path}
+              metric="csi_ratio_amplitude_corrected"
+              filename={meta.filename}
+              numSubcarriers={meta.num_subcarriers}
+              captureTMin={meta.t_min}
+              captureTMax={meta.t_max}
+              title="CSI Ratio Amplitude — Swap-Corrected (rx1/rx0)"
+              colorLabel="Ratio amp (dB)"
+              height={400}
+              timeLink={timeLink}
+              mimo={mimo}
+              sourceMac={sourceMac}
+              dark={dark}
+            />
+            <Heatmap
+              path={path}
+              metric="csi_ratio_phase_corrected"
+              filename={meta.filename}
+              numSubcarriers={meta.num_subcarriers}
+              captureTMin={meta.t_min}
+              captureTMax={meta.t_max}
+              minValue={-Math.PI}
+              maxValue={Math.PI}
+              title="CSI Ratio Phase — Swap-Corrected (rx1/rx0)"
+              colorLabel="Ratio phase (rad)"
+              height={400}
+              palette={TWILIGHT}
+              timeLink={timeLink}
+              mimo={mimo}
+              sourceMac={sourceMac}
+              dark={dark}
+            />
+
+            <Separator className="my-2" />
+            <p className="text-xs text-muted-foreground">
+              Unwrapped along <i>time</i> on the corrected ratio: continuous
+              phase accumulated as the channel moves. Restarts after a capture
+              gap and anchors each segment at its own start, so the value is
+              phase change since that segment began — segments are not
+              comparable with one another. Shares the phase palette above for
+              comparison, though accumulated phase is not an angle.
+            </p>
+
+            <Heatmap
+              path={path}
+              metric="csi_ratio_phase_time_unwrapped"
+              filename={meta.filename}
+              numSubcarriers={meta.num_subcarriers}
+              captureTMin={meta.t_min}
+              captureTMax={meta.t_max}
+              title="CSI Ratio Phase — Time-Unwrapped (rx1/rx0)"
+              colorLabel="Accumulated phase (rad)"
               height={400}
               palette={TWILIGHT}
               timeLink={timeLink}

@@ -16,8 +16,13 @@ from backend.parser import load_capture
 from backend.tiles import (
     BLOCK_SIZE,
     TILE_FRAME_BUDGET,
+    _base_with_context,
     _block_cache,
+    _needs_reference,
+    _ref_cache,
     compute_tile,
+    get_index,
+    get_reference,
     reset_tile_caches,
 )
 
@@ -887,3 +892,304 @@ def test_fill_handles_zero_and_one_decoded(index: FrameIndex) -> None:
     assert grid1.shape == (index.num_subcarriers, 1)
     assert not np.all(np.isnan(grid1))
 
+
+
+# ----------------------------------------------------------------------- #
+#  Derived phase metrics (unwrap / detrend)                               #
+# ----------------------------------------------------------------------- #
+
+
+def test_derived_metrics_are_served(index: FrameIndex) -> None:
+    """Every derived metric produces a grid of the same shape as its base."""
+    from backend.tiles import DERIVED_METRICS
+
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+    for metric, spec in DERIVED_METRICS.items():
+        grid, _ = compute_tile(CAPTURE, t0, t1, 64, metric)
+        base_grid, _ = compute_tile(CAPTURE, t0, t1, 64, spec.bases[0])
+        assert grid.shape == base_grid.shape, metric
+        # Same cells have data; the transform must not create or destroy
+        # coverage, only change the values inside it.
+        assert np.array_equal(np.isnan(grid), np.isnan(base_grid)), metric
+
+
+def test_derived_metric_matches_transform_of_decoded_frames(index: FrameIndex) -> None:
+    """The tile path and a direct transform of decoded frames agree.
+
+    Guards the ordering rule: the transform runs per frame on full subcarrier
+    vectors before column aggregation. Transforming after aggregation would
+    unwrap across frames rather than across subcarriers and diverge here.
+    """
+    from backend.phase import unwrap_subcarrier
+
+    # A window small enough that every frame in it is decoded exactly.
+    t0 = float(index.times[0])
+    t1 = float(index.times[min(50, index.count - 1)])
+    grid, meta = compute_tile(CAPTURE, t0, t1, 8, "phase_unwrapped")
+    assert meta["exact"]
+
+    lo = int(np.searchsorted(index.times, t0, side="left"))
+    hi = int(np.searchsorted(index.times, t1, side="right"))
+    _, phase, _, _ = decode_frames(CAPTURE, index, np.arange(lo, hi))
+    expected = unwrap_subcarrier(phase)
+
+    # Each column holds one frame verbatim (nearest-frame aggregation), so
+    # every column must appear among the transformed frames.
+    for x in range(grid.shape[1]):
+        col = grid[::-1, x]  # undo the row flip applied by compute_tile
+        if np.isnan(col).all():
+            continue
+        assert np.isclose(expected, col, atol=1e-4, equal_nan=True).all(axis=1).any()
+
+
+def test_derived_metric_reuses_the_base_block_decode(index: FrameIndex) -> None:
+    """Asking for a derived metric after its base decodes no extra frames."""
+    reset_tile_caches()
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+
+    compute_tile(CAPTURE, t0, t1, 64, "phase")
+    after_base = _block_cache.frames_decoded
+    assert after_base > 0
+
+    compute_tile(CAPTURE, t0, t1, 64, "phase_unwrapped")
+    compute_tile(CAPTURE, t0, t1, 64, "phase_detrended")
+    assert _block_cache.frames_decoded == after_base
+
+
+def test_derived_metric_is_not_computed_until_requested(index: FrameIndex) -> None:
+    """A block decode must not populate derived entries nobody asked for."""
+    reset_tile_caches()
+    t0, t1 = float(index.times[0]), float(index.times[0]) + 1.0
+    compute_tile(CAPTURE, t0, t1, 64, "phase")
+
+    file_size = CAPTURE.stat().st_size
+    keys = {k[1] for k in _block_cache._entries}
+    assert "phase" in keys
+    assert "phase_unwrapped" not in keys
+    assert "phase_detrended" not in keys
+    del file_size
+
+
+def test_derived_metrics_survive_the_sampled_path(index: FrameIndex) -> None:
+    """The stride-sampled branch (filtered/over-budget) also derives correctly."""
+    t0, t1 = float(index.times[0]), float(index.times[-1])
+    grid, meta = compute_tile(CAPTURE, t0, t1, 128, "phase_detrended", mimo=(2, 1))
+    finite = grid[np.isfinite(grid)]
+    if finite.size:
+        # Detrended phase is centred by construction: the fit removes the mean.
+        assert abs(float(np.nanmean(finite))) < 1.0
+
+
+def test_tile_endpoint_serves_derived_metrics(index: FrameIndex) -> None:
+    """/api/tile accepts the new metric names and returns a float32 grid."""
+    from fastapi.testclient import TestClient
+    from backend.app import app
+    from backend.tiles import DERIVED_METRICS
+
+    client = TestClient(app)
+    for metric in DERIVED_METRICS:
+        resp = client.get("/api/tile", params={
+            "path": str(CAPTURE),
+            "t0": float(index.times[0]), "t1": float(index.times[0]) + 1.0,
+            "width": 32, "metric": metric,
+        })
+        assert resp.status_code == 200, (metric, resp.text)
+        w = int(resp.headers["X-Tile-Width"])
+        h = int(resp.headers["X-Tile-Height"])
+        assert len(resp.content) == w * h * 4
+
+
+# ----------------------------------------------------------------------- #
+#  Orientation reference wiring                                           #
+# ----------------------------------------------------------------------- #
+
+
+def test_needs_reference_follows_the_derivation_chain():
+    """The time-unwrapped ratio corrects nothing itself, but is built on one."""
+    assert _needs_reference("csi_ratio_phase_corrected")
+    assert _needs_reference("csi_ratio_amplitude_corrected")
+    assert _needs_reference("csi_ratio_phase_time_unwrapped")
+    assert not _needs_reference("csi_ratio_phase_unwrapped")
+    assert not _needs_reference("phase_detrended")
+    assert not _needs_reference("amplitude")
+
+
+def test_reference_is_built_once_per_capture_and_filter():
+    reset_tile_caches()
+    index = get_index(CAPTURE)
+    size = CAPTURE.stat().st_size
+    first = get_reference(CAPTURE, index, size)
+    second = get_reference(CAPTURE, index, size)
+    assert first is second or (first is None and second is None)
+
+    # A different filter is a different transmitter, so a different reference.
+    mac = index.source_macs[0]
+    other = get_reference(CAPTURE, index, size, source_mac=mac)
+    assert (str(CAPTURE), size, None, mac) in _ref_cache
+
+    reset_tile_caches()
+    assert not _ref_cache
+    assert other is None or other is not None  # only that the call succeeded
+
+
+def test_tiles_report_whether_they_were_anchored():
+    index = get_index(CAPTURE)
+    t0, t1 = float(index.times[0]), float(index.times[-1])
+
+    _, meta = compute_tile(CAPTURE, t0, t1, 64, "amplitude")
+    # A metric that needs no reference is trivially anchored.
+    assert meta["anchored"] is True
+
+    _, meta = compute_tile(CAPTURE, t0, t1, 64, "csi_ratio_phase_corrected")
+    assert isinstance(meta["anchored"], bool)
+
+
+def test_corrected_tiles_are_stable_across_pan_and_zoom():
+    """The regression, at the tile level: same frames, different views.
+
+    Two views of the same instant rarely pick the same frame for a column —
+    a wider view's column spans more frames — and raw wrapped phase differs
+    between frames anyway, so comparing columns naively measures the sampling
+    as much as the correction. The uncorrected metric settles it: where two
+    views agree on the raw column they resolved the same frame, and any
+    disagreement in the corrected column there is the correction's alone.
+    """
+    index = get_index(CAPTURE)
+    macs, counts = np.unique(np.asarray(index.source_macs), return_counts=True)
+    mac = str(macs[np.argmax(counts)])
+    times = np.asarray(index.times)[np.asarray(index.source_macs) == mac]
+    if len(times) < 100:
+        pytest.skip("too few frames from one transmitter to pan across")
+
+    lo, hi = len(times) // 4, len(times) // 2
+    t0, t1 = float(times[lo]), float(times[hi])
+    width = hi - lo
+    span = t1 - t0
+
+    def view(a, b, w):
+        raw, _ = compute_tile(CAPTURE, a, b, w, "csi_ratio_phase", source_mac=mac)
+        fix, meta = compute_tile(
+            CAPTURE, a, b, w, "csi_ratio_phase_corrected", source_mac=mac
+        )
+        return raw, fix, meta
+
+    base_raw, base_fix, base_meta = view(t0, t1, width)
+    if not base_meta["anchored"]:
+        pytest.skip("capture supports no absolute orientation")
+
+    compared = 0
+    for pad in (0.25, 0.5, 1.0):
+        a = max(float(times[0]), t0 - pad * span)
+        b = min(float(times[-1]), t1 + pad * span)
+        w = max(2, int(width * (b - a) / span))
+        raw, fix, _ = view(a, b, w)
+        s0 = int(round((t0 - a) / (b - a) * w))
+        e0 = int(round((t1 - a) / (b - a) * w))
+        if e0 - s0 < 2:
+            continue
+        picks = np.linspace(0, width - 1, e0 - s0).astype(int)
+
+        for k, col in enumerate(range(s0, e0)):
+            mine, theirs = base_raw[:, picks[k]], raw[:, col]
+            ok = np.isfinite(mine) & np.isfinite(theirs)
+            if ok.sum() < 8 or not np.allclose(mine[ok], theirs[ok], atol=1e-4):
+                continue  # different frames; nothing to say
+            d = np.angle(
+                np.exp(1j * (base_fix[:, picks[k]][ok] - fix[:, col][ok]))
+            )
+            compared += 1
+            # Same frame, so the correction must have reached the same verdict.
+            assert np.median(np.abs(d)) < 1e-3, (pad, col)
+
+    assert compared > 0, "no column resolved to the same frame in both views"
+
+
+def test_block_context_spans_the_neighbouring_blocks():
+    reset_tile_caches()
+    index = get_index(CAPTURE)
+    size = CAPTURE.stat().st_size
+    n_blocks = max(1, -(-index.count // BLOCK_SIZE))
+    if n_blocks < 2:
+        pytest.skip("capture is a single block")
+    got = _base_with_context(
+        CAPTURE, index, 1, "csi_ratio_phase", size, 32, 16, None
+    )
+    start, stop = BLOCK_SIZE, min(2 * BLOCK_SIZE, index.count)
+    assert len(got) == 32 + (stop - start) + 16
+
+
+def _assert_same_angle(a: np.ndarray, b: np.ndarray) -> None:
+    """Equal up to the branch cut.
+
+    The corrector re-wraps with ``angle(exp(i x))``, which sends exactly -pi
+    to +pi. It is the same angle and the same colour on a cyclic map, but a
+    raw comparison calls it a 2*pi miss.
+    """
+    ok = np.isfinite(a) & np.isfinite(b)
+    assert np.array_equal(np.isfinite(a), np.isfinite(b))
+    d = np.angle(np.exp(1j * (a[ok].astype(np.float64) - b[ok].astype(np.float64))))
+    np.testing.assert_allclose(d, 0.0, atol=1e-5)
+
+
+def test_no_reference_without_a_selected_transmitter():
+    """Correction is per transmitter, so `all` gets no reference at all."""
+    reset_tile_caches()
+    index = get_index(CAPTURE)
+    size = CAPTURE.stat().st_size
+    assert get_reference(CAPTURE, index, size) is None
+    assert get_reference(CAPTURE, index, size, source_mac="") is None
+    assert get_reference(CAPTURE, index, size, mimo=(2, 1)) is None
+    # Nothing was cached: there was nothing to build.
+    assert not _ref_cache
+
+
+def test_all_senders_leaves_the_ratio_exactly_as_decoded():
+    """On `all`, skip the correction rather than apply a near-no-op version.
+
+    Interleaved, _chain compares two different senders 86-93% of the time and
+    the confidence gate declines, so the correction achieves almost nothing —
+    but it still reported itself as done. Now the panel shows the raw ratio
+    and says so.
+    """
+    index = get_index(CAPTURE)
+    t0, t1 = float(index.times[0]), float(index.times[-1])
+
+    for corrected, raw in (
+        ("csi_ratio_phase_corrected", "csi_ratio_phase"),
+        ("csi_ratio_amplitude_corrected", "csi_ratio_amplitude"),
+    ):
+        fixed, meta = compute_tile(CAPTURE, t0, t1, 128, corrected)
+        plain, _ = compute_tile(CAPTURE, t0, t1, 128, raw)
+        assert meta["anchored"] is False, corrected
+        _assert_same_angle(fixed, plain)
+
+
+def test_a_selected_transmitter_is_corrected_and_says_so():
+    index = get_index(CAPTURE)
+    macs, counts = np.unique(np.asarray(index.source_macs), return_counts=True)
+    mac = str(macs[np.argmax(counts)])
+    t0, t1 = float(index.times[0]), float(index.times[-1])
+
+    _, meta = compute_tile(
+        CAPTURE, t0, t1, 128, "csi_ratio_phase_corrected", source_mac=mac
+    )
+    ref = get_reference(CAPTURE, index, CAPTURE.stat().st_size, source_mac=mac)
+    # The tile's claim and the reference's existence are the same fact.
+    assert meta["anchored"] is (ref is not None)
+
+
+def test_unanchored_tiles_do_not_run_the_batch_relative_fallback():
+    """Falling back to the old per-batch answer is what made views disagree."""
+    index = get_index(CAPTURE)
+    times = index.times
+    t0, t1 = float(times[0]), float(times[-1])
+    mid = (t0 + t1) / 2
+
+    whole, m1 = compute_tile(CAPTURE, t0, t1, 64, "csi_ratio_phase_corrected")
+    half, m2 = compute_tile(CAPTURE, t0, mid, 32, "csi_ratio_phase_corrected")
+    assert m1["anchored"] is False and m2["anchored"] is False
+    # Both are the raw ratio, so neither can be a pi from the other.
+    raw_whole, _ = compute_tile(CAPTURE, t0, t1, 64, "csi_ratio_phase")
+    raw_half, _ = compute_tile(CAPTURE, t0, mid, 32, "csi_ratio_phase")
+    _assert_same_angle(whole, raw_whole)
+    _assert_same_angle(half, raw_half)
