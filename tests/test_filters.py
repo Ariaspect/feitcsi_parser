@@ -302,8 +302,11 @@ def test_tile_endpoint_mac_filter(mixed_file: Path) -> None:
 # ----------------------------------------------------------------------- #
 
 
-def test_captures_endpoint_lists_dat_files() -> None:
-    """GET /api/captures returns .dat files from captures/ sorted by mtime desc."""
+def test_captures_endpoint_lists_capture_files() -> None:
+    """GET /api/captures returns .dat and .bin from captures/, mtime desc.
+
+    .dat is FeitCSI, .bin is MediaTek; both are selectable in the UI.
+    """
     client = TestClient(app)
     r = client.get("/api/captures")
     assert r.status_code == 200
@@ -313,7 +316,7 @@ def test_captures_endpoint_lists_dat_files() -> None:
     assert "capture.dat" in cap_names
 
     for c in caps:
-        assert c["filename"].endswith(".dat")
+        assert c["filename"].endswith((".dat", ".bin"))
         assert c["size_bytes"] > 0
         assert "path" in c
         assert "mtime" in c

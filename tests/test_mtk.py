@@ -434,3 +434,70 @@ def test_an_empty_file_indexes_to_nothing(tmp_path: Path) -> None:
     assert idx.count == 0 and idx.num_subcarriers == 0
     for arr in decode_frames(tmp_path / "cap.bin", idx, np.array([], dtype=np.int64)):
         assert arr.shape == (0, 0)
+
+
+# ---------------------------------------------------------------------- #
+#  9. Dispatch — the format is chosen by sniffing, not by extension       #
+# ---------------------------------------------------------------------- #
+
+
+def test_get_index_picks_the_reader_from_the_bytes(tmp_path: Path) -> None:
+    from backend.index import FrameIndex
+    from backend.tiles import get_index, reset_tile_caches
+
+    reset_tile_caches()
+    mtk_path = write(tmp_path, group_records(1, {(0, RPI_PLANE): band()}), "x.dat")
+    assert isinstance(get_index(mtk_path), MTKIndex), "extension must not decide"
+    if FEITCSI.is_file():
+        assert isinstance(get_index(FEITCSI), FrameIndex)
+    reset_tile_caches()
+
+
+def test_tiles_decode_frames_routes_to_the_owning_reader(tmp_path: Path) -> None:
+    from backend.tiles import decode_frames as dispatched
+
+    path = write(tmp_path, group_records(
+        1, {(0, RPI_PLANE): band(seed=1), (1, RPI_PLANE): band(seed=2)}))
+    idx = MTKIndex(path)
+    ids = np.array([0])
+    for routed, direct in zip(dispatched(path, idx, ids), decode_frames(path, idx, ids)):
+        np.testing.assert_array_equal(routed, direct)
+
+
+@pytest.mark.skipif(not PING.is_file(), reason="MTK ping capture not present")
+def test_the_api_serves_an_mtk_capture() -> None:
+    from fastapi.testclient import TestClient
+
+    from backend.app import app
+    from backend.tiles import reset_tile_caches
+
+    reset_tile_caches()
+    client = TestClient(app)
+
+    listed = {c["filename"] for c in client.get("/api/captures").json()}
+    assert PING.name in listed, "MTK captures must appear in the picker"
+
+    meta = client.get("/api/meta", params={"path": str(PING)}).json()
+    assert meta["chipset"] == "MediaTek"  # not the hardcoded Intel label
+    assert (meta["total_frames"], meta["num_subcarriers"]) == (38, 256)
+
+    assert client.get("/api/filters", params={"path": str(PING)}).json() == {
+        "mimo_modes": ["1x1", "2x1"],
+        "source_macs": [MAC],
+    }
+
+    body = client.get("/api/tile", params={
+        "path": str(PING), "metric": "csi_ratio_phase", "width": 120,
+        "t0": meta["t_min"], "t1": meta["t_max"],
+        "mimo": "2x1", "source_mac": MAC,
+    })
+    assert body.status_code == 200
+    grid = np.frombuffer(body.content, dtype="<f4").reshape(256, -1)
+    # Only the guard band and empty time columns may be blank.
+    blank_rows = (~np.isfinite(grid)).all(axis=1).sum()
+    blank_cols = (~np.isfinite(grid)).all(axis=0).sum()
+    total = (~np.isfinite(grid)).sum()
+    assert blank_rows == 11
+    assert total == blank_rows * grid.shape[1] + blank_cols * grid.shape[0] \
+        - blank_rows * blank_cols, "NaN outside the guard band and time gaps"
+    reset_tile_caches()

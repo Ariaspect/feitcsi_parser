@@ -155,6 +155,9 @@ class FrameIndex:
     rescanning from zero. Truncation (file shrank) triggers a full rebuild.
     """
 
+    # Reported by /api/meta. A property of the reader, not of any one file.
+    chipset = "Intel AX2xx"
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._scan_end: int = 0  # byte offset past the last complete frame

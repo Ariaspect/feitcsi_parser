@@ -147,7 +147,7 @@ def meta(
 
     return {
         "filename": p.name,
-        "chipset": "Intel AX2xx",
+        "chipset": idx.chipset,
         "bandwidth": idx.bandwidth,
         "num_subcarriers": idx.num_subcarriers,
         "total_frames": filtered_count,
@@ -250,21 +250,27 @@ def health() -> dict:
 
 
 CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
+# .dat = FeitCSI, .bin = MediaTek.
+CAPTURE_SUFFIXES = (".dat", ".bin")
 
 
 @app.get("/api/captures")
 def list_captures() -> list[dict]:
-    """List .dat files in the captures/ directory.
+    """List capture files in the captures/ directory.
 
-    Returns filename, size_bytes, and mtime (ISO 8601) for each .dat file,
+    Returns filename, size_bytes, and mtime (ISO 8601) for each capture,
     sorted by mtime descending (newest first). Missing dir → empty list.
+
+    ``.dat`` is FeitCSI, ``.bin`` is MediaTek. The extension only decides
+    what to *list*; which parser runs is decided by sniffing the bytes in
+    ``tiles.get_index``, so a misnamed file still reads correctly.
     """
     if not CAPTURES_DIR.is_dir():
         return []
 
     files: list[dict] = []
     for entry in CAPTURES_DIR.iterdir():
-        if entry.suffix == ".dat" and entry.is_file():
+        if entry.suffix in CAPTURE_SUFFIXES and entry.is_file():
             st = entry.stat()
             files.append({
                 "filename": entry.name,

@@ -27,7 +27,8 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .batch import decode_frames
+from . import mtk
+from .batch import decode_frames as _decode_feitcsi
 from .index import FrameIndex
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
 from .ratio import (
@@ -274,8 +275,19 @@ def get_reference(
     return ref
 
 
-def get_index(path: Path) -> FrameIndex:
-    """Return the shared FrameIndex for *path*, extending it if it exists.
+def decode_frames(path, index, frame_ids, **kwargs):
+    """Decode via whichever reader owns *index*.
+
+    The two readers produce the same four float32 arrays; everything above
+    this line is format-blind.
+    """
+    if isinstance(index, mtk.MTKIndex):
+        return mtk.decode_frames(path, index, frame_ids, **kwargs)
+    return _decode_feitcsi(path, index, frame_ids, **kwargs)
+
+
+def get_index(path: Path) -> FrameIndex | mtk.MTKIndex:
+    """Return the shared index for *path*, extending it if it exists.
 
     Mirrors the ``get_stream`` registry pattern in ``backend.stream``: the
     first call builds a full FrameIndex, subsequent calls call ``extend()``
@@ -286,7 +298,7 @@ def get_index(path: Path) -> FrameIndex:
     with _index_lock:
         idx = _index_cache.get(path)
         if idx is None:
-            idx = FrameIndex(path)
+            idx = mtk.MTKIndex(path) if mtk.can_read(path) else FrameIndex(path)
             _index_cache[path] = idx
         else:
             idx.extend()

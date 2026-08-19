@@ -149,6 +149,8 @@ class MTKIndex:
     there is no uniform memmap fast path to take.
     """
 
+    chipset = "MediaTek"
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._scan_end: int = 0
