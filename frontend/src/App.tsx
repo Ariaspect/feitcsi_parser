@@ -17,7 +17,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon } from "lucide-react";
+import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -51,10 +51,25 @@ export function App() {
   // the wire, NaN gaps included -- useful for judging what interpolation is
   // actually doing to a given capture.
   const [interpolate, setInterpolate] = useState<boolean>(true);
+  // Swap correction on the CSI ratio panels. Some frames arrive with the rx
+  // streams exchanged (ratio reciprocal) or the ratio negated (phase +pi);
+  // correction puts them back. On by default because a capture read without
+  // it shows those frames as vertical discontinuities that are an artefact of
+  // the NIC, not the channel. Off is the escape hatch for judging what the
+  // correction is doing. Detection compares each frame against its
+  // neighbours, so it needs one transmitter's own sequence -- on `all` the
+  // backend declines to act and the panels say so themselves.
+  const [swapCorrected, setSwapCorrected] = useState<boolean>(true);
   const [dark, setDark] = useState<boolean>(() => {
     const stored = localStorage.getItem(DARK_KEY);
     return stored === null ? true : stored === "true";
   });
+
+  // What the ratio panels actually show. Correction needs one transmitter's
+  // own frame sequence to compare neighbours against, so on `all` it cannot
+  // act whatever the toggle says. Deriving metric, panel title and button
+  // label from this one flag keeps the three from disagreeing.
+  const swapActive = swapCorrected && sourceMac !== "all";
 
   const [timeLink] = useState(createTimeLink);
 
@@ -265,6 +280,22 @@ export function App() {
             Interpolate {interpolate ? "On" : "Off"}
           </Button>
 
+          <Button
+            variant={swapActive ? "default" : "outline"}
+            size="sm"
+            onClick={() => setSwapCorrected((v) => !v)}
+            disabled={sourceMac === "all"}
+            className="h-8"
+            title={
+              sourceMac === "all"
+                ? "Select a single MAC to correct swaps. Detection compares each frame against its neighbours, and on all senders consecutive frames rarely come from the same one."
+                : "Put back frames whose rx streams arrived exchanged, or whose ratio arrived negated. Applies to the CSI ratio panels."
+            }
+          >
+            <ArrowLeftRightIcon data-icon="inline-start" />
+            Swap Correction {swapActive ? "On" : "Off"}
+          </Button>
+
           <Button variant="outline" size="icon" onClick={toggleDark} className="h-8 w-8">
             {dark ? <SunIcon /> : <MoonIcon />}
           </Button>
@@ -344,12 +375,12 @@ export function App() {
             />
             <Heatmap
               path={path}
-              metric="csi_ratio_amplitude"
+              metric={swapActive ? "csi_ratio_amplitude_corrected" : "csi_ratio_amplitude"}
               filename={meta.filename}
               numSubcarriers={meta.num_subcarriers}
               captureTMin={meta.t_min}
               captureTMax={meta.t_max}
-              title="CSI Ratio Amplitude (rx1/rx0)"
+              title={`CSI Ratio Amplitude (rx1/rx0)${swapActive ? " — Swap-Corrected" : ""}`}
               colorLabel="Ratio amp (dB)"
               height={320}
               timeLink={timeLink}
@@ -360,60 +391,14 @@ export function App() {
             />
             <Heatmap
               path={path}
-              metric="csi_ratio_phase"
+              metric={swapActive ? "csi_ratio_phase_corrected" : "csi_ratio_phase"}
               filename={meta.filename}
               numSubcarriers={meta.num_subcarriers}
               captureTMin={meta.t_min}
               captureTMax={meta.t_max}
               minValue={-Math.PI}
               maxValue={Math.PI}
-              title="CSI Ratio Phase (rx1/rx0)"
-              colorLabel="Ratio phase (rad)"
-              height={320}
-              palette={TWILIGHT}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              interpolate={interpolate}
-              dark={dark}
-            />
-
-            <Separator className="my-2" />
-            <p className="text-xs text-muted-foreground">
-              Derived views below. Some frames arrive with the rx streams
-              exchanged (ratio reciprocal) or the ratio negated (phase +π);
-              these put them back. Detection compares each frame against its
-              neighbours, so a single Source MAC must be selected — on{" "}
-              <code className="bg-muted px-1 py-0.5 rounded">all</code> the
-              correction declines to act rather than guessing.
-            </p>
-
-            <Heatmap
-              path={path}
-              metric="csi_ratio_amplitude_corrected"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
-              title="CSI Ratio Amplitude — Swap-Corrected (rx1/rx0)"
-              colorLabel="Ratio amp (dB)"
-              height={320}
-              timeLink={timeLink}
-              mimo={mimo}
-              sourceMac={sourceMac}
-              interpolate={interpolate}
-              dark={dark}
-            />
-            <Heatmap
-              path={path}
-              metric="csi_ratio_phase_corrected"
-              filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
-              captureTMin={meta.t_min}
-              captureTMax={meta.t_max}
-              minValue={-Math.PI}
-              maxValue={Math.PI}
-              title="CSI Ratio Phase — Swap-Corrected (rx1/rx0)"
+              title={`CSI Ratio Phase (rx1/rx0)${swapActive ? " — Swap-Corrected" : ""}`}
               colorLabel="Ratio phase (rad)"
               height={320}
               palette={TWILIGHT}
@@ -431,7 +416,10 @@ export function App() {
               gap and anchors each segment at its own start, so the value is
               phase change since that segment began — segments are not
               comparable with one another. Shares the phase palette above for
-              comparison, though accumulated phase is not an angle.
+              comparison, though accumulated phase is not an angle. Always
+              swap-corrected regardless of the toggle: uncorrected, 1.2% of
+              frame-to-frame steps exceed π, and each one the unwrapper
+              misreads offsets everything after it by 2π for good.
             </p>
 
             <Heatmap
