@@ -316,7 +316,7 @@ export function App() {
               captureTMax={meta.t_max}
               title="Amplitude"
               colorLabel="Amplitude (dBm)"
-              height={400}
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
@@ -334,7 +334,7 @@ export function App() {
               maxValue={Math.PI}
               title="Phase"
               colorLabel="Phase (rad)"
-              height={400}
+              height={320}
               palette={TWILIGHT}
               timeLink={timeLink}
               mimo={mimo}
@@ -351,7 +351,7 @@ export function App() {
               captureTMax={meta.t_max}
               title="CSI Ratio Amplitude (rx1/rx0)"
               colorLabel="Ratio amp (dB)"
-              height={400}
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
@@ -369,7 +369,7 @@ export function App() {
               maxValue={Math.PI}
               title="CSI Ratio Phase (rx1/rx0)"
               colorLabel="Ratio phase (rad)"
-              height={400}
+              height={320}
               palette={TWILIGHT}
               timeLink={timeLink}
               mimo={mimo}
@@ -397,7 +397,7 @@ export function App() {
               captureTMax={meta.t_max}
               title="CSI Ratio Amplitude — Swap-Corrected (rx1/rx0)"
               colorLabel="Ratio amp (dB)"
-              height={400}
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}
@@ -415,7 +415,7 @@ export function App() {
               maxValue={Math.PI}
               title="CSI Ratio Phase — Swap-Corrected (rx1/rx0)"
               colorLabel="Ratio phase (rad)"
-              height={400}
+              height={320}
               palette={TWILIGHT}
               timeLink={timeLink}
               mimo={mimo}
@@ -443,7 +443,7 @@ export function App() {
               captureTMax={meta.t_max}
               title="CSI Ratio Phase — Time-Unwrapped (rx1/rx0)"
               colorLabel="Accumulated phase (rad)"
-              height={400}
+              height={320}
               palette={TWILIGHT}
               timeLink={timeLink}
               mimo={mimo}
@@ -476,7 +476,7 @@ export function App() {
               title="Channel Impulse Response — |IFFT| (rx0/tx0)"
               colorLabel="CIR magnitude"
               axisLabel="Delay tap"
-              height={400}
+              height={320}
               timeLink={timeLink}
               mimo={mimo}
               sourceMac={sourceMac}

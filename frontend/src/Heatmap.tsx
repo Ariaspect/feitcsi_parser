@@ -605,14 +605,21 @@ export function Heatmap({
     >()
       .scaleExtent([1, 10000])
       // Exclude shift so shift+wheel / shift+drag fall through to the hand-rolled
-      // subcarrier handlers. Keep ctrl+wheel (trackpad pinch) for d3.
+      // subcarrier handlers. A plain wheel is excluded too and left to the
+      // page's own scroll: eight stacked 400px panels leave almost no space
+      // between them for the cursor to land on to scroll past them, so a
+      // heatmap capturing every wheel tick under it made the page nearly
+      // unscrollable. Only ctrl+wheel -- a trackpad pinch gesture, or an
+      // explicit "I mean to zoom" -- drives time-zoom; drag-to-pan and
+      // dblclick-to-reset are unaffected, since neither is a wheel event.
       .filter(
         (event: unknown) => {
           const e = event as WheelEvent | MouseEvent | TouchEvent;
           const ctrl = "ctrlKey" in e && e.ctrlKey;
           const shift = "shiftKey" in e && e.shiftKey;
           const button = "button" in e ? e.button : 0;
-          return (!ctrl || e.type === "wheel") && !button && !shift;
+          if (e.type === "wheel") return ctrl && !shift;
+          return !ctrl && !button && !shift;
         },
       )
       .on("zoom", (event: D3ZoomEvent<HTMLCanvasElement, unknown>) => {
