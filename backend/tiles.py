@@ -833,9 +833,23 @@ def compute_tile(
     # the colormap. The 1st/99th percentile bounds are the robust scale the
     # frontend locks to. -inf from db(0) is excluded by the finite mask, not
     # clamped into the percentile — clamping would drag p_low to -inf.
-    finite_mask = np.isfinite(grid)
+    #
+    # Measured on *data*, not on *grid*: grid is the wrong population. Each of
+    # its columns reduces the ~len(data)/width frames that fall in it, and for
+    # a MAX_HOLD_METRICS metric that reduction is a maximum — an order
+    # statistic whose distribution depends on how many frames share a column,
+    # i.e. on the caller's pixel width. Bounds taken from it move with the
+    # browser window: on a 2285-frame capture, p_low reads 39.4 at width 900
+    # against 38.0 at 2560 (true 37.8), and vmin 17.2 against 0.0, while vmax
+    # stays pinned because max-of-max is the one statistic the reduction
+    # cannot bias. Two laptops would lock to different color scales for the
+    # same capture. *data* holds the frames themselves, whose selection is a
+    # function of TILE_FRAME_BUDGET alone, so these bounds are width-invariant.
+    # Gap-filled columns would not have added extrema either way — they are
+    # convex blends of data rows.
+    finite_mask = np.isfinite(data)
     if finite_mask.any():
-        finite_vals = grid[finite_mask]
+        finite_vals = data[finite_mask]
         vmin = float(finite_vals.min())
         vmax = float(finite_vals.max())
         p_low = float(np.nanpercentile(finite_vals, 1))

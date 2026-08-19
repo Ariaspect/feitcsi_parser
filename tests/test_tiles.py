@@ -593,29 +593,28 @@ def test_string_path_is_accepted(index: FrameIndex) -> None:
 # ----------------------------------------------------------------------- #
 
 
-def test_tile_percentile_bounds(index: FrameIndex) -> None:
-    """compute_tile returns p_low/p_high (1st/99th percentile of finite values).
+def test_tile_percentile_bounds_do_not_move_with_width(index: FrameIndex) -> None:
+    """p_low/p_high are the 1st/99th percentile of the decoded frames.
 
-    The raw min/max is dominated by outliers; percentile bounds are the robust
-    scale the frontend locks to. -inf from db(0) must be excluded from the
-    percentile computation, not clamped into it — clamping would drag p_low
-    to -inf and defeat the purpose.
+    They are measured on the frames, not on the returned grid, so they do not
+    move with the caller's pixel width. A grid column reduces the frames that
+    fall in it — a maximum, for amplitude — and the distribution of that
+    reduction depends on how many frames share a column, so bounds read off
+    the grid would make the color scale a function of the browser window.
+    Two laptops on the same capture must lock to the same scale.
     """
     t0, t1 = _full_range(index)
-    grid, meta = compute_tile(CAPTURE, t0, t1, 200, "amplitude")
+    _, narrow = compute_tile(CAPTURE, t0, t1, 200, "amplitude")
+    _, wide = compute_tile(CAPTURE, t0, t1, 1600, "amplitude")
 
-    finite_mask = np.isfinite(grid)
-    if finite_mask.any():
-        finite_vals = grid[finite_mask]
-        expected_low = float(np.nanpercentile(finite_vals, 1))
-        expected_high = float(np.nanpercentile(finite_vals, 99))
-        assert meta["p_low"] == pytest.approx(expected_low, rel=1e-5)
-        assert meta["p_high"] == pytest.approx(expected_high, rel=1e-5)
+    for meta in (narrow, wide):
+        # -inf from db(0) is excluded by the finite mask, not clamped in.
+        assert np.isfinite(meta["p_low"]) and np.isfinite(meta["p_high"])
         # Percentile bounds sit inside the finite extrema.
         assert meta["vmin"] <= meta["p_low"] <= meta["p_high"] <= meta["vmax"]
-    else:
-        assert meta["p_low"] == 0.0
-        assert meta["p_high"] == 0.0
+
+    for key in ("vmin", "vmax", "p_low", "p_high"):
+        assert narrow[key] == pytest.approx(wide[key], rel=1e-6), key
 
 
 def test_tile_percentile_excludes_neg_inf(index: FrameIndex) -> None:
