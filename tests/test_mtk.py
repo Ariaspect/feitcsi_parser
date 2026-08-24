@@ -704,3 +704,220 @@ def test_the_ping_capture_carries_the_standard_cyclic_shift() -> None:
     assert abs(np.mean(np.exp(1j * raw[live]))) < 0.05
     assert abs(np.mean(np.exp(1j * fixed[live]))) > 0.3
 
+
+
+# ---------------------------------------------------------------------- #
+#  8. Vectorised scan                                                     #
+# ---------------------------------------------------------------------- #
+
+
+def _slow_index(path: Path, monkeypatch) -> MTKIndex:
+    """An index built with the vectorised scan disabled."""
+    monkeypatch.setattr(MTKIndex, "_build_fast", lambda self, *a, **k: None)
+    return MTKIndex(path)
+
+
+_INDEX_FIELDS = (
+    "offsets",
+    "_stamps",
+    "rssi_1",
+    "csi_lengths",
+    "_bins",
+    "num_rx_arr",
+    "num_tx_arr",
+    "_real_off",
+    "_imag_off",
+    "times",
+    "source_macs",
+    "channel_widths",
+    "count",
+    "num_subcarriers",
+    "num_rx",
+    "num_tx",
+    "bandwidth",
+)
+
+
+def assert_same_index(fast: MTKIndex, slow: MTKIndex) -> None:
+    for field in _INDEX_FIELDS:
+        a, b = getattr(fast, field), getattr(slow, field)
+        if isinstance(a, np.ndarray):
+            assert a.shape == b.shape, field
+            assert np.array_equal(a, b), field
+        else:
+            assert a == b, field
+
+
+def test_the_vectorised_scan_matches_the_record_walk(tmp_path, monkeypatch) -> None:
+    """The whole point: same index, whichever path built it."""
+    blob = b"".join(
+        group_records(
+            g,
+            {(t, r): band(seed=g * 4 + 2 * r + t) for r in range(2) for t in range(2)},
+            ts=1000 + 50 * g,
+        )
+        for g in range(12)
+    )
+    cap = write(tmp_path, blob)
+    fast = MTKIndex(cap)
+    assert fast.count == 12
+    assert_same_index(fast, _slow_index(cap, monkeypatch))
+
+
+def test_interleaved_bandwidths_scan_the_same(tmp_path, monkeypatch) -> None:
+    """An 80 MHz capture still receives the odd 20 MHz frame, mid-file."""
+    blob = b""
+    for g in range(9):
+        if g in (3, 4):  # a short burst of narrow single-record groups
+            blob += group_records(g, {(0, 0): band(64, seed=g)}, bw_code=0, ts=1000 + 50 * g)
+        else:
+            blob += group_records(
+                g,
+                {(t, r): band(seed=g * 4 + 2 * r + t) for r in range(2) for t in range(2)},
+                ts=1000 + 50 * g,
+            )
+    cap = write(tmp_path, blob)
+    fast = MTKIndex(cap)
+    assert fast.count == 9
+    assert set(fast.channel_widths) == {"80", "20"}
+    assert_same_index(fast, _slow_index(cap, monkeypatch))
+
+
+def test_the_vectorised_scan_stops_at_a_truncated_record(tmp_path, monkeypatch) -> None:
+    blob = b"".join(
+        group_records(g, {(0, 0): band(seed=g), (1, 0): band(seed=g + 50)},
+                      ts=1000 + 50 * g)
+        for g in range(4)
+    )
+    cap = write(tmp_path, blob[:-40])  # cut mid-record
+    fast = MTKIndex(cap)
+    assert fast.count == 3
+    assert_same_index(fast, _slow_index(cap, monkeypatch))
+
+
+def test_the_vectorised_scan_refuses_a_desynchronised_file(tmp_path) -> None:
+    """A record not starting on MAGIC ends the scan, as the walk does."""
+    good = group_records(0, {(0, 0): band(seed=1), (1, 0): band(seed=2)})
+    blob = good + b"\x00" * 64 + good
+    idx = MTKIndex(write(tmp_path, blob))
+    assert idx.count == 1
+
+
+def test_a_class_missing_a_tag_falls_back_to_the_walk(tmp_path) -> None:
+    """No tag, no vectorised layout — and no silently wrong index either."""
+    body = b"".join([
+        _tlv(TAG_VERSION, bytes([13])),
+        _tlv(TAG_TIMESTAMP, struct.pack("<Q", 1000)),
+        _tlv(TAG_SEQUENCE, struct.pack("<I", 0x8000)),
+    ])
+    blob = bytes([MAGIC]) + struct.pack("<H", len(body)) + body
+    cap = write(tmp_path, blob)
+    mm = np.memmap(cap, dtype=np.uint8, mode="r")
+    idx = MTKIndex.__new__(MTKIndex)
+    idx.path = cap
+    assert idx._build_fast(mm, 0, mm.size, existing=None) is None
+
+
+def test_extend_through_the_vectorised_scan_matches_a_full_scan(tmp_path) -> None:
+    """A file that grew in pieces indexes like one that arrived whole."""
+    blobs = [
+        group_records(
+            g,
+            {(t, r): band(seed=g * 4 + 2 * r + t) for r in range(2) for t in range(2)},
+            ts=1000 + 50 * g,
+        )
+        for g in range(10)
+    ]
+    whole = b"".join(blobs)
+    cap = tmp_path / "grow.bin"
+
+    cap.write_bytes(whole[:700])  # starts mid-record
+    live = MTKIndex(cap)
+    for cut in (1800, 3100, 5000, len(whole)):
+        cap.write_bytes(whole[:cut])
+        live.extend()
+
+    assert live.count == 10
+    assert_same_index(live, MTKIndex(cap))
+
+
+def test_consecutive_groups_reusing_an_id_stay_separate(tmp_path, monkeypatch) -> None:
+    """Bit 15 ends a group even when the next one carries the same id.
+
+    Tag 18's group id is only 16 bits, so it wraps roughly hourly; two
+    neighbouring groups sharing an id is rare but not impossible, and merging
+    them would splice two measurements into one frame.
+    """
+    blob = (
+        group_records(7, {(0, 0): band(seed=1), (1, 0): band(seed=2)}, ts=1000)
+        + group_records(7, {(0, 0): band(seed=3), (1, 0): band(seed=4)}, ts=1050)
+    )
+    cap = write(tmp_path, blob)
+    fast = MTKIndex(cap)
+    assert fast.count == 2
+    assert list(fast._stamps) == [1000, 1050]
+    assert_same_index(fast, _slow_index(cap, monkeypatch))
+
+
+def test_same_sized_records_with_different_layouts_fall_back(tmp_path) -> None:
+    """One record's tag offsets only stand in for a class if they really hold.
+
+    Two records can share a length and still place their tags differently.
+    Reading the second through the first's offsets would mislabel every field,
+    so the layout is verified across the class before it is trusted.
+    """
+    csi = band(seed=1)
+    common = [
+        _tlv(TAG_VERSION, bytes([13])),
+        _tlv(TAG_TIMESTAMP, struct.pack("<Q", 1000)),
+        _tlv(TAG_RSSI, bytes([200])),
+        _tlv(TAG_BANDWIDTH, bytes([2])),
+        _tlv(TAG_SOURCE_MAC, bytes(int(x, 16) for x in MAC.split(":"))),
+        _tlv(TAG_CSI_REAL, _csi_bytes(np.real(csi))),
+        _tlv(TAG_CSI_IMAG, _csi_bytes(np.imag(csi))),
+    ]
+    tpi_t, rpi_t = _tlv(TAG_TPI, bytes([0])), _tlv(TAG_RPI, bytes([0]))
+
+    def rec(tags: list[bytes], seq: int) -> bytes:
+        body = b"".join(tags + [_tlv(TAG_SEQUENCE, struct.pack("<I", seq))])
+        return bytes([MAGIC]) + struct.pack("<H", len(body)) + body
+
+    # Identical length, tpi and rpi transposed.
+    blob = rec(common + [tpi_t, rpi_t], 0x8000) + rec(common + [rpi_t, tpi_t], (1 << 16) | 0x8000)
+    cap = write(tmp_path, blob)
+
+    mm = np.memmap(cap, dtype=np.uint8, mode="r")
+    probe = MTKIndex.__new__(MTKIndex)
+    probe.path = cap
+    assert probe._build_fast(mm, 0, mm.size, existing=None) is None
+
+    assert MTKIndex(cap).count == 2  # the walk still indexes it
+
+
+def test_a_payload_disagreeing_with_its_bandwidth_fills_no_slot(tmp_path, monkeypatch) -> None:
+    """A 20 MHz payload under an 80 MHz code is not silently read as 80 MHz."""
+    blob = group_records(0, {(0, 0): band(64, seed=1)}, bw_code=2, ts=1000)
+    cap = write(tmp_path, blob)
+    fast = MTKIndex(cap)
+    assert fast.count == 1
+    assert int(fast.num_rx_arr[0]) == 0
+    assert int(fast.csi_lengths[0]) == 0
+    assert_same_index(fast, _slow_index(cap, monkeypatch))
+
+
+def test_the_scan_stops_at_a_bad_magic_mid_run(tmp_path, monkeypatch) -> None:
+    """Predicting record starts is only sound if the prediction is checked.
+
+    A stride is guessed from one record and then extrapolated, so a corrupt
+    byte that leaves the length field intact would still land the next
+    prediction on a plausible-looking boundary. Only the magic says otherwise.
+    """
+    good = group_records(0, {(0, 0): band(seed=1)}, ts=1000)
+    corrupt = bytearray(group_records(1, {(0, 0): band(seed=2)}, ts=1050))
+    corrupt[0] = MAGIC ^ 0x07  # same length, same layout, wrong magic
+
+    cap = write(tmp_path, good + bytes(corrupt))
+    fast = MTKIndex(cap)
+    assert fast.count == 1
+    assert int(fast._stamps[0]) == 1000
+    assert_same_index(fast, _slow_index(cap, monkeypatch))
