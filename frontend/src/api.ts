@@ -167,3 +167,74 @@ export async function fetchTile(
     pHigh: parseFloat(h.get("X-Tile-PHigh") ?? "0"),
   };
 }
+
+/** Metrics /api/doppler accepts. Both are real-valued series: amplitude, and
+ *  the time-unwrapped ratio phase. Raw wrapped phase is deliberately absent —
+ *  its 2π jumps are broadband steps that would dominate an FFT and read as
+ *  motion that is not there. */
+export type DopplerMetric = "amplitude" | "csi_ratio_phase_time_unwrapped";
+
+export interface DopplerTile extends Tile {
+  /** The capture's own median frame rate over the frames in range — not a
+   *  function of any requested width. */
+  fs: number;
+  /** Nyquist, fs/2. The axis runs 0..fMax and is one-sided: real input means
+   *  the sign of the Doppler shift is not recoverable, so approaching and
+   *  receding motion are indistinguishable. Motion above fMax aliases. */
+  fMax: number;
+  win: number;
+  hop: number;
+  winSeconds: number;
+}
+
+export async function fetchDoppler(
+  path: string,
+  t0: number,
+  t1: number,
+  metric: DopplerMetric,
+  winSeconds: number,
+  signal?: AbortSignal,
+  mimo?: string | null,
+  sourceMac?: string | null,
+  interpolate?: boolean,
+): Promise<DopplerTile> {
+  const url =
+    `/api/doppler?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}&metric=${metric}&win_seconds=${winSeconds}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  const grid = new Float32Array(await res.arrayBuffer());
+  const h = res.headers;
+  return {
+    grid,
+    width: parseInt(h.get("X-Doppler-Width") ?? "0", 10),
+    height: parseInt(h.get("X-Doppler-Height") ?? "0", 10),
+    // Column centres, not the requested range: a column is centred on its
+    // window, so the first sits half a window inside t0. Labelling the axis
+    // from the request would draw every column half a window too early.
+    t0: parseFloat(h.get("X-Doppler-ColT0") ?? "0"),
+    t1: parseFloat(h.get("X-Doppler-ColT1") ?? "0"),
+    captureTMin: parseFloat(h.get("X-Capture-TMin") ?? "0"),
+    captureTMax: parseFloat(h.get("X-Capture-TMax") ?? "0"),
+    framesDecoded: parseInt(h.get("X-Doppler-Frames") ?? "0", 10),
+    totalInRange: parseInt(h.get("X-Doppler-Frames") ?? "0", 10),
+    // Columns are windows, never stride-sampled frames, so there is no
+    // inexact case to report and nothing to anchor against another view.
+    exact: true,
+    anchored: true,
+    vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
+    vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
+    pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),
+    pHigh: parseFloat(h.get("X-Tile-PHigh") ?? "0"),
+    fs: parseFloat(h.get("X-Doppler-Fs") ?? "0"),
+    fMax: parseFloat(h.get("X-Doppler-FMax") ?? "0"),
+    win: parseInt(h.get("X-Doppler-Win") ?? "0", 10),
+    hop: parseInt(h.get("X-Doppler-Hop") ?? "0", 10),
+    winSeconds: parseFloat(h.get("X-Doppler-WinSeconds") ?? "0"),
+  };
+}

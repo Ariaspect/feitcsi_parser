@@ -82,7 +82,8 @@ Open http://localhost:8000
 3. Every `refresh_ms` the frontend polls `/api/meta`, which reads the frame
    index only and never decodes payloads. Pixels come from `/api/tile`, which
    is fetched only when the view actually changes.
-4. Frontend renders eight heatmaps: amplitude (dBm), phase (rad), CSI ratio
+4. The **Channel** tab renders six heatmaps, and the **Doppler** tab two more
+   (see [Doppler](#doppler)). The channel panels are: amplitude (dBm), phase (rad), CSI ratio
    amplitude and phase, then the swap-corrected CSI ratio pair, then the
    time-unwrapped ratio phase, then the raw channel's impulse response
    (CIR). See [Phase views](#phase-views),
@@ -190,6 +191,37 @@ Returns JSON:
 }
 ```
 
+### `GET /api/doppler`
+
+Subcarrier-averaged Doppler spectrogram. Same binary contract as `/api/tile` —
+bare little-endian float32 body, metadata in headers — so the same canvas
+renderer draws it. The body is `(win // 2 + 1, n_windows)`, row-major,
+**row 0 = highest Doppler frequency**.
+
+Query params:
+- `path`, `t0`, `t1` — as `/api/tile`
+- `metric` — `amplitude` or `csi_ratio_phase_time_unwrapped`
+- `win_seconds` — STFT window length in seconds (default 30, max 600)
+- `overlap` — window overlap fraction (default 0.5)
+- `mimo`, `source_mac`, `interpolate` — as `/api/tile`
+
+| Header | Meaning |
+|---|---|
+| `X-Doppler-Width` / `X-Doppler-Height` | Grid shape: windows × frequency bins. |
+| `X-Doppler-Fs` | The capture's **own median frame rate** over the frames in range. |
+| `X-Doppler-FMax` | Nyquist, `Fs/2`. This file's real ceiling. |
+| `X-Doppler-Win` / `X-Doppler-Hop` | Window and hop, in samples. `Win` is always even. |
+| `X-Doppler-WinSeconds` | The window actually used, in seconds. |
+| `X-Doppler-Frames` | Frames that fed the transform. |
+| `X-Doppler-ColT0` / `X-Doppler-ColT1` | First and last **column centres** — half a window inside the requested range. |
+
+`X-Doppler-Fs` comes from frame timing, never from a requested width.
+Resampling a 5 Hz capture onto a wider grid manufactures peaks above its own
+Nyquist; the same mistake decimates a faster capture and truncates the top of
+its band.
+
+Returns `400` for an unknown metric or a window longer than the range holds.
+
 ### `GET /api/captures`
 
 Lists capture files under `captures/`, newest first. Takes no parameters.
@@ -218,6 +250,54 @@ is chosen by sniffing the bytes, so a misnamed file still reads correctly.
 ### `GET /api/health`
 
 Returns `{"status": "ok"}`.
+
+## Doppler
+
+Two panels, in their own tab: an STFT of the amplitude time series, and one of
+the time-unwrapped ratio phase. Both are subcarrier-averaged — each subcarrier
+is transformed and the magnitude spectrograms are averaged, which lifts SNR
+without asking you to pick a tone.
+
+Raw wrapped phase is deliberately **not** offered. Its 2π jumps are broadband
+steps that dominate an FFT and read as motion that is not there.
+
+**Doppler here is unsigned.** Amplitude and unwrapped phase are real signals,
+so their spectra are conjugate-symmetric and the sign of the shift is not
+recoverable: approaching and receding motion are indistinguishable. Signed
+Doppler would need the complex CSI. The axis is one-sided, `0 … fs/2`.
+
+### What it can see
+
+Doppler shift is `f_d = 2v/λ`, so at 5 GHz a 1 m/s hand movement sits near
+**33 Hz** — above the Nyquist of every capture here. Frame rate is the limit:
+
+| capture | frames | PRF | worst gap | Nyquist |
+|---|---|---|---|---|
+| `capture.dat` | 1,101 | 5.1 Hz | 401 ms | ±2.5 Hz |
+| `csi_20260813_030001.dat` | 65,219 | 11.6 Hz | **22,946 ms** | ±5.8 Hz |
+| `20260822_070002.bin` | 60,796 | 17.9 Hz | 116 ms | ±8.9 Hz |
+
+So this is a respiration-and-presence instrument, not a gesture one. Measured
+across six slices each: `20260821_170002.bin` (evening) carries a 0.08–0.28 Hz
+line at 2.4–4.2× contrast; `20260822_070002.bin` (07:00 the next morning) is
+flat at 1.05–1.23×. Occupied versus empty is legible. A flat panel is a real
+reading, not a broken one.
+
+Because the interesting band is the bottom few percent of the axis,
+**shift + wheel** to zoom the frequency axis is how you actually read these.
+
+### Windows and gaps
+
+The window is set in *seconds*, not frames, because frame rate varies from 5 to
+18 Hz across captures — a fixed frame count would mean a different physical
+window per file. Longer window, finer frequency resolution, fewer columns.
+
+Frames are resampled onto a uniform grid first, at the capture's median rate.
+A window spanning a gap wider than 2× the 95th-percentile inter-frame interval
+comes out NaN rather than carrying an interpolated ramp: a 23-second hole must
+not become signal. Subcarriers that are non-finite for the whole capture
+(DC/guard band, dropped pilots — 11 of 256 on an MTK file) are excluded from
+the average rather than poisoning it.
 
 ## Capture paths
 

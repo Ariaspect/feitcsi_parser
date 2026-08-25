@@ -10,7 +10,10 @@ Two caches keep repeated work cheap:
 * ``FrameIndex`` objects are cached per path (``extend()`` on each request so a
   growing capture stays current without a full rescan).
 * Decoded blocks (contiguous runs of ``BLOCK_SIZE`` frames) are cached in an
-  LRU keyed by ``(path, metric, block_index, file_size)``.  Including file size
+  LRU keyed by ``(path, metric, block_index, frames_in_that_block)``. Keying
+  a block on how many frames *it* holds rather than on the size of the whole
+  file is what lets a completed block survive the capture growing: its own
+  count can never change again, while the tail block's does. Keying on file size
   means a rewritten or truncated file cannot serve stale blocks.
 
 Thread safety: FastAPI serves handlers from a threadpool, so both caches are
@@ -31,6 +34,7 @@ from . import mtk
 from .batch import decode_frames as _decode_feitcsi
 from .cir import csi_to_cir_centred
 from .index import FrameIndex
+from .doppler import gap_limit_for, resample_uniform, stft_average, uniform_grid
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
 from .ratio import (
     CONTEXT_FRAMES,
@@ -206,6 +210,16 @@ class _BlockCache:
         # via ``reset_tile_caches()``.
         self.frames_decoded = 0
 
+    def drop_path(self, path: str) -> None:
+        """Evict every block belonging to *path*.
+
+        For a truncated capture: the frame ids its cached blocks were decoded
+        under no longer refer to the same frames.
+        """
+        with self._lock:
+            for key in [k for k in self._entries if k[0] == path]:
+                self._bytes -= self._entries.pop(key).nbytes
+
     def get(self, key: tuple) -> np.ndarray | None:
         with self._lock:
             entry = self._entries.get(key)
@@ -343,7 +357,12 @@ def get_index(path: Path) -> FrameIndex | mtk.MTKIndex:
             idx = mtk.MTKIndex(path) if mtk.can_read(path) else FrameIndex(path)
             _index_cache[path] = idx
         else:
+            before = idx.count
             idx.extend()
+            # extend() rebuilds from scratch when the file has been truncated,
+            # so frame ids shift and any cached block for this path is stale.
+            if idx.count < before:
+                _block_cache.drop_path(str(path))
         return idx
 
 
@@ -361,12 +380,22 @@ def reset_tile_caches() -> None:
 # ----------------------------------------------------------------------- #
 
 
+def _block_frame_count(index: FrameIndex, block_idx: int) -> int:
+    """Frames currently held by *block_idx*.
+
+    A block that is already full returns BLOCK_SIZE for the rest of the
+    process's life, which is what lets a completed block stay cached while a
+    growing capture appends to the tail.
+    """
+    start = block_idx * BLOCK_SIZE
+    return max(0, min(BLOCK_SIZE, index.count - start))
+
+
 def _decode_block_cached(
     path: Path,
     index: FrameIndex,
     block_idx: int,
     metric: str,
-    file_size: int,
     reference: Reference | None = None,
     interpolate: bool = True,
 ) -> np.ndarray:
@@ -387,7 +416,7 @@ def _decode_block_cached(
     boundary would be decided on half of them — visible as a speckled seam
     every BLOCK_SIZE frames.
     """
-    key = (str(path), metric, block_idx, file_size, interpolate)
+    key = (str(path), metric, block_idx, _block_frame_count(index, block_idx), interpolate)
     cached = _block_cache.get(key)
     if cached is not None:
         return cached
@@ -401,7 +430,7 @@ def _decode_block_cached(
             trail = min(CONTEXT_FRAMES, index.count - stop)
             bases = [
                 _base_with_context(
-                    path, index, block_idx, m, file_size, lead, trail, reference,
+                    path, index, block_idx, m, lead, trail, reference,
                     interpolate=interpolate,
                 )
                 for m in derived.bases
@@ -414,7 +443,7 @@ def _decode_block_cached(
         else:
             bases = [
                 _decode_block_cached(
-                    path, index, block_idx, m, file_size, reference,
+                    path, index, block_idx, m, reference,
                     interpolate=interpolate,
                 )
                 for m in derived.bases
@@ -440,7 +469,10 @@ def _decode_block_cached(
         "csi_ratio_phase": ratio_phase,
     }
     for m, arr in _metrics.items():
-        _block_cache.put((str(path), m, block_idx, file_size, interpolate), arr)
+        _block_cache.put(
+            (str(path), m, block_idx, _block_frame_count(index, block_idx), interpolate),
+            arr,
+        )
     with _block_cache._lock:
         _block_cache.frames_decoded += len(block_ids)
 
@@ -452,7 +484,6 @@ def _base_with_context(
     index: FrameIndex,
     block_idx: int,
     metric: str,
-    file_size: int,
     lead: int,
     trail: int,
     reference: Reference | None,
@@ -468,19 +499,19 @@ def _base_with_context(
     parts = []
     if lead:
         prev = _decode_block_cached(
-            path, index, block_idx - 1, metric, file_size, reference,
+            path, index, block_idx - 1, metric, reference,
             interpolate=interpolate,
         )
         parts.append(prev[len(prev) - lead :])
     parts.append(
         _decode_block_cached(
-            path, index, block_idx, metric, file_size, reference,
+            path, index, block_idx, metric, reference,
             interpolate=interpolate,
         )
     )
     if trail:
         nxt = _decode_block_cached(
-            path, index, block_idx + 1, metric, file_size, reference,
+            path, index, block_idx + 1, metric, reference,
             interpolate=interpolate,
         )
         parts.append(nxt[:trail])
@@ -522,7 +553,6 @@ def _decode_via_blocks(
     index: FrameIndex,
     frame_ids: np.ndarray,
     metric: str,
-    file_size: int,
     reference: Reference | None = None,
     *,
     interpolate: bool = True,
@@ -544,7 +574,7 @@ def _decode_via_blocks(
         block_start = block_idx * BLOCK_SIZE
 
         block = _decode_block_cached(
-            path, index, block_idx, metric, file_size, reference,
+            path, index, block_idx, metric, reference,
             interpolate=interpolate,
         )
 
@@ -622,6 +652,132 @@ def _interpolate_time_gaps(
 # ----------------------------------------------------------------------- #
 #  Tile computation                                                       #
 # ----------------------------------------------------------------------- #
+
+
+# Doppler runs on real-valued series only. Amplitude is the raw channel's
+# magnitude; the phase panel is built on the *time-unwrapped* ratio phase
+# because raw phase is wrapped, and its 2*pi jumps are broadband steps that
+# would dominate an FFT and read as motion that is not there.
+DOPPLER_METRICS: tuple[str, ...] = ("amplitude", "csi_ratio_phase_time_unwrapped")
+
+
+def compute_doppler(
+    path: Path,
+    t0: float,
+    t1: float,
+    metric: str,
+    *,
+    win_seconds: float = 30.0,
+    overlap: float = 0.5,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> tuple[np.ndarray, dict]:
+    """Subcarrier-averaged Doppler spectrogram for a time range.
+
+    Returns ``(spectrogram, metadata)``. The grid is
+    ``(win // 2 + 1, n_windows)`` float32, row 0 = highest Doppler frequency
+    -- the same row order ``compute_tile`` uses, so the same renderer draws it.
+
+    The sample rate is the capture's median frame rate over the frames
+    actually in range, never a function of a requested display width. The
+    window is given in *seconds* for the same reason: frame rate varies from
+    5 Hz to 18 Hz across captures, so a fixed frame count would mean a
+    different physical window on every file.
+    """
+    if metric not in DOPPLER_METRICS:
+        raise ValueError(
+            "metric must be one of: " + ", ".join(repr(m) for m in DOPPLER_METRICS)
+        )
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError("overlap must be in [0, 1)")
+
+    index = get_index(path)
+    times_all = np.asarray(index.times, dtype=float)
+    mask = index.filter_mask(mimo=mimo, source_mac=source_mac)
+
+    frame_ids = np.flatnonzero(mask & (times_all >= t0) & (times_all <= t1))
+    if frame_ids.size < 2:
+        raise ValueError("fewer than 2 frames in range")
+
+    times = times_all[frame_ids]
+    grid_times, fs = uniform_grid(times)
+    # Even window only: with an odd length rfft has no exact Nyquist bin, so
+    # the axis would stop at (win-1)/(2*win)*fs and the panel's top label
+    # would quietly disagree with the capture's real ceiling.
+    win = int(round(win_seconds * fs))
+    win += win % 2
+    if win < 2:
+        raise ValueError(
+            f"win_seconds={win_seconds} is under two samples at {fs:.2f} Hz"
+        )
+    if grid_times.size < win:
+        raise ValueError(
+            f"range holds {grid_times.size} samples, shorter than the "
+            f"{win}-sample ({win_seconds:.1f} s) window"
+        )
+
+    reference = (
+        get_reference(
+            path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
+            interpolate=interpolate,
+        )
+        if _needs_reference(metric)
+        else None
+    )
+    values = _decode_for_doppler(
+        path, index, frame_ids, metric, reference, interpolate
+    )
+
+    samples = resample_uniform(times, values, grid_times, gap_limit_for(times))
+    hop = max(1, int(round(win * (1.0 - overlap))))
+    spec, freqs = stft_average(samples, fs, win, hop)
+
+    finite = spec[np.isfinite(spec)]
+    step = 1.0 / fs
+    n_out = spec.shape[1]
+    return spec.astype(np.float32), {
+        "fs": float(fs),
+        "f_max": float(freqs[-1]),
+        "win": int(win),
+        "hop": int(hop),
+        "win_seconds": float(win * step),
+        "frames_used": int(frame_ids.size),
+        "t_min": float(times_all[0]) if times_all.size else 0.0,
+        "t_max": float(times_all[-1]) if times_all.size else 0.0,
+        # A column is centred on its window, so the first and last column
+        # centres sit half a window inside the requested range.
+        "col_t0": float(grid_times[0] + win * step / 2.0),
+        "col_t1": float(grid_times[0] + ((n_out - 1) * hop + win / 2.0) * step),
+        "vmin": float(finite.min()) if finite.size else 0.0,
+        "vmax": float(finite.max()) if finite.size else 1.0,
+        "p_low": float(np.percentile(finite, 1)) if finite.size else 0.0,
+        "p_high": float(np.percentile(finite, 99)) if finite.size else 1.0,
+    }
+
+
+def _decode_for_doppler(
+    path: Path,
+    index: FrameIndex,
+    frame_ids: np.ndarray,
+    metric: str,
+    reference: Reference | None,
+    interpolate: bool,
+) -> np.ndarray:
+    """Decode *metric* for *frame_ids* as ``(n_frames, n_subcarriers)``.
+
+    Goes through the same block cache the tile path uses, so a Doppler panel
+    and a heatmap over the same window share one decode.
+    """
+    rows: list[np.ndarray] = []
+    for block_idx in sorted({int(i) // BLOCK_SIZE for i in frame_ids}):
+        block = _decode_block_cached(
+            path, index, block_idx, metric, reference, interpolate=interpolate
+        )
+        start = block_idx * BLOCK_SIZE
+        wanted = frame_ids[(frame_ids >= start) & (frame_ids < start + BLOCK_SIZE)]
+        rows.append(block[wanted - start])
+    return np.concatenate(rows, axis=0)
 
 
 def compute_tile(
@@ -744,7 +900,7 @@ def compute_tile(
         data = np.empty((0, num_sc), dtype=np.float32)
     elif exact and not filtered:
         data = _decode_via_blocks(
-            path, index, frame_ids, metric, file_size, reference,
+            path, index, frame_ids, metric, reference,
             interpolate=interpolate,
         )
     else:

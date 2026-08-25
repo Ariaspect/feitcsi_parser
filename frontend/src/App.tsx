@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { fetchCaptures, fetchFilters, fetchMeta, formatBytes, type CaptureFile, type Filters, type Meta } from "./api";
+import { useCallback, useEffect, useState } from "react";
+import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { createTimeLink } from "./timelink";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -92,6 +93,13 @@ export function App() {
   // the wire, NaN gaps included -- useful for judging what interpolation is
   // actually doing to a given capture.
   const [interpolate, setInterpolate] = useState<boolean>(true);
+  // STFT window, in seconds rather than frames: frame rate runs 5-18 Hz across
+  // captures, so a fixed frame count would mean a different physical window on
+  // every file. Longer window = finer frequency resolution, fewer columns.
+  const [winSeconds, setWinSeconds] = useState<number>(30);
+  // Row count and Nyquist are properties of the capture's own frame rate, so
+  // they are not known until the first response comes back.
+  const [dopplerGeom, setDopplerGeom] = useState<{ rows: number; fMax: number } | null>(null);
   // Swap correction on the CSI ratio panels. Some frames arrive with the rx
   // streams exchanged (ratio reciprocal) or the ratio negated (phase +pi);
   // correction puts them back. On by default because a capture read without
@@ -149,6 +157,43 @@ export function App() {
       cancelled = true;
     };
   }, [running, path, refreshMs, mimo, sourceMac]);
+
+  // Learn the spectrogram's row count and frequency ceiling before rendering a
+  // panel: Heatmap needs a row count up front, and both fall out of the
+  // capture's median frame rate rather than anything the client picks. The
+  // panel's own fetch then hits the backend block cache this warmed.
+  useEffect(() => {
+    if (!meta || meta.total_frames <= 0) {
+      setDopplerGeom(null);
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    fetchDoppler(path, meta.t_min, meta.t_max, "amplitude", winSeconds,
+                 controller.signal, mimo, sourceMac)
+      .then((t) => {
+        if (!cancelled) setDopplerGeom({ rows: t.height, fMax: t.fMax });
+      })
+      .catch(() => {
+        // A range too short for the window is an ordinary state here, not an
+        // error worth taking over the page: the panel shows its own message.
+        if (!cancelled) setDopplerGeom(null);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [path, meta?.t_min, meta?.t_max, meta?.total_frames, winSeconds, mimo, sourceMac]);
+
+  const dopplerSource = useCallback(
+    (dopplerMetric: DopplerMetric) =>
+      (t0: number, t1: number, _width: number, signal: AbortSignal) =>
+        // _width is deliberately ignored: column count follows the window and
+        // hop, and letting a pixel width drive the sample rate is what
+        // manufactures peaks above a capture's own Nyquist.
+        fetchDoppler(path, t0, t1, dopplerMetric, winSeconds, signal, mimo, sourceMac, interpolate),
+    [path, winSeconds, mimo, sourceMac, interpolate],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -378,7 +423,14 @@ export function App() {
         )}
 
         {meta && meta.total_frames > 0 ? (
-          <div className="space-y-4">
+          <Tabs defaultValue="channel">
+            <TabsList>
+              <TabsTrigger value="channel">Channel</TabsTrigger>
+              <TabsTrigger value="doppler">Doppler</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="channel">
+              <div className="space-y-4">
             <Heatmap
               path={path}
               metric="amplitude"
@@ -521,7 +573,96 @@ export function App() {
               interpolate={interpolate}
               dark={dark}
             />
-          </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="doppler">
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="win" className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                    Window (s)
+                  </Label>
+                  <Input
+                    id="win"
+                    type="number"
+                    min={1}
+                    max={600}
+                    className="w-24"
+                    value={winSeconds}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v >= 1 && v <= 600) setWinSeconds(v);
+                    }}
+                  />
+                  {dopplerGeom && (
+                    <span className="text-[11px] text-muted-foreground">
+                      resolution {(1 / winSeconds).toFixed(3)} Hz · ceiling{" "}
+                      {dopplerGeom.fMax.toFixed(2)} Hz
+                    </span>
+                  )}
+                </div>
+
+                {dopplerGeom ? (
+                  <>
+                    <Heatmap
+                      path={path}
+                      metric="amplitude"
+                      filename={meta.filename}
+                      numSubcarriers={dopplerGeom.rows}
+                      captureTMin={meta.t_min}
+                      captureTMax={meta.t_max}
+                      title="Doppler — amplitude"
+                      colorLabel="Magnitude"
+                      axisLabel="Doppler (Hz)"
+                      yDomain={[0, dopplerGeom.fMax]}
+                      source={dopplerSource("amplitude")}
+                      height={320}
+                      timeLink={timeLink}
+                      mimo={mimo}
+                      sourceMac={sourceMac}
+                      interpolate={interpolate}
+                      dark={dark}
+                    />
+
+                    <Heatmap
+                      path={path}
+                      metric="csi_ratio_phase_time_unwrapped"
+                      filename={meta.filename}
+                      numSubcarriers={dopplerGeom.rows}
+                      captureTMin={meta.t_min}
+                      captureTMax={meta.t_max}
+                      title="Doppler — time-unwrapped ratio phase"
+                      colorLabel="Magnitude"
+                      axisLabel="Doppler (Hz)"
+                      yDomain={[0, dopplerGeom.fMax]}
+                      source={dopplerSource("csi_ratio_phase_time_unwrapped")}
+                      height={320}
+                      timeLink={timeLink}
+                      mimo={mimo}
+                      sourceMac={sourceMac}
+                      interpolate={interpolate}
+                      dark={dark}
+                    />
+
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      Doppler here is <b>unsigned</b> — amplitude and unwrapped phase are
+                      real signals, so approaching and receding motion are
+                      indistinguishable. The axis stops at this capture&apos;s own Nyquist
+                      ({dopplerGeom.fMax.toFixed(2)} Hz); faster motion aliases, and at
+                      5 GHz a 1 m/s movement sits near 33 Hz. What is in reach is
+                      respiration and slow motion — <b>shift + wheel</b> zooms the
+                      frequency axis, and that band is the bottom few percent of it.
+                    </p>
+                  </>
+                ) : (
+                  <div className="text-muted-foreground p-8 text-sm">
+                    No spectrogram for this range — the window ({winSeconds} s) may be
+                    longer than the frames in view. Shorten it, or widen the time range.
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+          </Tabs>
         ) : (
           !error && (
             <div className="text-muted-foreground p-8">
