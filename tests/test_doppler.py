@@ -85,3 +85,78 @@ def test_gap_limit_tracks_jitter_not_dropouts() -> None:
     limit = gap_limit_for(times)
     assert limit > np.percentile(dt, 90), "must not flag ordinary jitter"
     assert limit < 23.0, "must flag a real dropout"
+
+
+def test_stft_ignores_structurally_dead_subcarriers() -> None:
+    """A subcarrier that is NaN for the whole capture must not blank the panel.
+
+    Guard, DC, and dropped pilot bins are non-finite for every frame -- 11 of
+    256 on a real MTK capture. Accumulating one into the average poisons every
+    bin of every window, which showed up as an entirely NaN spectrogram.
+    """
+    fs, win, hop = 20.0, 128, 64
+    samples = _tone(2.0, fs, 1024, n_cols=4)
+    samples[:, 1] = np.nan                       # structural null
+    spec, freqs = stft_average(samples, fs, win, hop)
+
+    assert np.isfinite(spec).all(), "a dead subcarrier must not propagate"
+    peak_row = int(np.argmax(spec.mean(axis=1)))
+    assert freqs[::-1][peak_row] == pytest.approx(2.0, abs=fs / win)
+
+    # And the average is over the three live columns, not all four.
+    live_only, _ = stft_average(samples[:, [0, 2, 3]], fs, win, hop)
+    assert np.allclose(spec, live_only)
+
+
+# ----------------------------------------------------------------------- #
+#  compute_doppler orchestration                                          #
+# ----------------------------------------------------------------------- #
+
+from pathlib import Path  # noqa: E402
+
+CAPTURES = Path(__file__).resolve().parent.parent / "captures"
+
+
+def _capture_or_skip(name: str = "capture.dat") -> Path:
+    p = CAPTURES / name
+    if not p.is_file():
+        pytest.skip(f"{name} not present")
+    return p
+
+
+def test_compute_doppler_shape_metadata_and_nyquist() -> None:
+    """Grid shape follows the window, and f_max is the capture's own Nyquist."""
+    from backend.tiles import compute_doppler, get_index
+
+    p = _capture_or_skip()
+    idx = get_index(p)
+    t = np.asarray(idx.times, dtype=float)
+    t0, t1 = float(t[0]), float(t[-1])
+    expected_fs = 1.0 / float(np.median(np.diff(t)[np.diff(t) > 0]))
+
+    spec, meta = compute_doppler(p, t0, t1, "amplitude", win_seconds=10.0)
+
+    assert spec.dtype == np.float32
+    assert spec.shape[0] == meta["win"] // 2 + 1
+    assert spec.shape[1] >= 1
+    assert meta["fs"] == pytest.approx(expected_fs, rel=1e-6)
+    assert meta["f_max"] == pytest.approx(meta["fs"] / 2)
+    assert meta["hop"] == meta["win"] // 2          # overlap 0.5
+    assert meta["col_t0"] <= meta["col_t1"] <= t1 + 1e-6
+    assert np.isfinite(spec).any(), "structural nulls must not blank the panel"
+
+
+def test_compute_doppler_rejects_a_tile_only_metric() -> None:
+    from backend.tiles import compute_doppler
+
+    with pytest.raises(ValueError, match="metric"):
+        compute_doppler(_capture_or_skip(), 0.0, 1e9, "csi_cir")
+
+
+def test_compute_doppler_rejects_a_window_longer_than_the_range() -> None:
+    from backend.tiles import compute_doppler, get_index
+
+    p = _capture_or_skip()
+    t0 = float(get_index(p).times[0])
+    with pytest.raises(ValueError, match="shorter than"):
+        compute_doppler(p, t0, t0 + 5.0, "amplitude", win_seconds=600.0)

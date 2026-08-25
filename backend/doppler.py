@@ -140,6 +140,14 @@ def stft_average(
       spans a real dropout -- so the column stays NaN rather than being
       zero-filled, which would report silence as signal.
 
+    Two different things produce NaN and they are *not* handled alike. A
+    column that is non-finite for the whole capture is a structural null --
+    the DC/guard band, or a pilot CSIKit dropped -- and carries no signal at
+    any time; measured on an MTK capture, 11 subcarriers of 256. Those are
+    excluded from the average, because ``acc += nan`` would otherwise poison
+    every bin of every window and blank the entire panel. A NaN confined to
+    some windows is a real dropout in time, and that one must propagate.
+
     Subcarriers are accumulated one at a time rather than stacked. The stacked
     form is ``(n_cols, n_windows, win)``, a quarter of a gigabyte for a full
     capture; accumulating holds one subcarrier's windows at a time.
@@ -164,12 +172,20 @@ def stft_average(
     taper = np.hanning(win)
 
     acc = np.zeros((win // 2 + 1, n_out), dtype=float)
+    contributing = 0
     for col in range(n_cols):
-        seg = samples[:, col][starts[:, None] + offsets]   # (n_out, win)
+        series = samples[:, col]
+        if not np.isfinite(series).any():
+            continue                                       # structural null
+        seg = series[starts[:, None] + offsets]            # (n_out, win)
         seg = seg - seg.mean(axis=1, keepdims=True)        # detrend per window
         acc += np.abs(np.fft.rfft(seg * taper, axis=1)).T
+        contributing += 1
 
-    spec = acc / n_cols
+    if contributing == 0:
+        return np.full((win // 2 + 1, n_out), np.nan), np.fft.rfftfreq(win, d=1.0 / fs)
+
+    spec = acc / contributing
     freqs = np.fft.rfftfreq(win, d=1.0 / fs)
     # Row 0 = highest frequency, so the renderer's top-down row order puts fast
     # motion at the top of the panel.
