@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchMeta, fetchTile } from "./api";
+import { fetchDoppler, fetchMeta, fetchTile } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -221,5 +221,62 @@ describe("fetchTile", () => {
       vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 500 })),
     );
     await expect(fetchTile("p", 0, 1, 1, "amplitude")).rejects.toThrow("HTTP 500");
+  });
+});
+
+describe("fetchDoppler", () => {
+  function dopplerResponse(width: number, height: number) {
+    const grid = new Float32Array(width * height).fill(1);
+    return new Response(grid.buffer, {
+      status: 200,
+      headers: {
+        "X-Doppler-Width": String(width),
+        "X-Doppler-Height": String(height),
+        "X-Doppler-Fs": "17.86",
+        "X-Doppler-FMax": "8.93",
+        "X-Doppler-Win": String((height - 1) * 2),
+        "X-Doppler-Hop": String(height - 1),
+        "X-Doppler-WinSeconds": "30",
+        "X-Doppler-Frames": "5524",
+        "X-Doppler-ColT0": "15",
+        "X-Doppler-ColT1": "185",
+        "X-Capture-TMin": "0",
+        "X-Capture-TMax": "200",
+        "X-Tile-VMin": "0",
+        "X-Tile-VMax": "10",
+        "X-Tile-PLow": "1",
+        "X-Tile-PHigh": "9",
+      },
+    });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("parses the grid and the doppler headers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => dopplerResponse(20, 129)));
+    const tile = await fetchDoppler("c.dat", 0, 200, "amplitude", 30);
+    expect(tile.width).toBe(20);
+    expect(tile.height).toBe(129);
+    expect(tile.grid.length).toBe(20 * 129);
+    expect(tile.fs).toBeCloseTo(17.86);
+    expect(tile.fMax).toBeCloseTo(8.93);
+    // Column centres, not the requested range.
+    expect(tile.t0).toBeCloseTo(15);
+    expect(tile.t1).toBeCloseTo(185);
+  });
+
+  it("sends win_seconds and the filter params", async () => {
+    const spy = vi.fn(async () => dopplerResponse(4, 5));
+    vi.stubGlobal("fetch", spy);
+    await fetchDoppler("c.dat", 1, 2, "amplitude", 45, undefined, "2x2", "aa:bb");
+    const url = String(spy.mock.calls[0][0]);
+    expect(url).toContain("/api/doppler?");
+    expect(url).toContain("win_seconds=45");
+    expect(url).toContain("mimo=2x2");
+  });
+
+  it("throws with the server status on an error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("too short", { status: 400 })));
+    await expect(fetchDoppler("c.dat", 0, 1, "amplitude", 600)).rejects.toThrow(/400/);
   });
 });
