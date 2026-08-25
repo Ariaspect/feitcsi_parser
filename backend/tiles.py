@@ -10,7 +10,10 @@ Two caches keep repeated work cheap:
 * ``FrameIndex`` objects are cached per path (``extend()`` on each request so a
   growing capture stays current without a full rescan).
 * Decoded blocks (contiguous runs of ``BLOCK_SIZE`` frames) are cached in an
-  LRU keyed by ``(path, metric, block_index, file_size)``.  Including file size
+  LRU keyed by ``(path, metric, block_index, frames_in_that_block)``. Keying
+  a block on how many frames *it* holds rather than on the size of the whole
+  file is what lets a completed block survive the capture growing: its own
+  count can never change again, while the tail block's does. Keying on file size
   means a rewritten or truncated file cannot serve stale blocks.
 
 Thread safety: FastAPI serves handlers from a threadpool, so both caches are
@@ -206,6 +209,16 @@ class _BlockCache:
         # via ``reset_tile_caches()``.
         self.frames_decoded = 0
 
+    def drop_path(self, path: str) -> None:
+        """Evict every block belonging to *path*.
+
+        For a truncated capture: the frame ids its cached blocks were decoded
+        under no longer refer to the same frames.
+        """
+        with self._lock:
+            for key in [k for k in self._entries if k[0] == path]:
+                self._bytes -= self._entries.pop(key).nbytes
+
     def get(self, key: tuple) -> np.ndarray | None:
         with self._lock:
             entry = self._entries.get(key)
@@ -343,7 +356,12 @@ def get_index(path: Path) -> FrameIndex | mtk.MTKIndex:
             idx = mtk.MTKIndex(path) if mtk.can_read(path) else FrameIndex(path)
             _index_cache[path] = idx
         else:
+            before = idx.count
             idx.extend()
+            # extend() rebuilds from scratch when the file has been truncated,
+            # so frame ids shift and any cached block for this path is stale.
+            if idx.count < before:
+                _block_cache.drop_path(str(path))
         return idx
 
 
@@ -361,12 +379,22 @@ def reset_tile_caches() -> None:
 # ----------------------------------------------------------------------- #
 
 
+def _block_frame_count(index: FrameIndex, block_idx: int) -> int:
+    """Frames currently held by *block_idx*.
+
+    A block that is already full returns BLOCK_SIZE for the rest of the
+    process's life, which is what lets a completed block stay cached while a
+    growing capture appends to the tail.
+    """
+    start = block_idx * BLOCK_SIZE
+    return max(0, min(BLOCK_SIZE, index.count - start))
+
+
 def _decode_block_cached(
     path: Path,
     index: FrameIndex,
     block_idx: int,
     metric: str,
-    file_size: int,
     reference: Reference | None = None,
     interpolate: bool = True,
 ) -> np.ndarray:
@@ -387,7 +415,7 @@ def _decode_block_cached(
     boundary would be decided on half of them — visible as a speckled seam
     every BLOCK_SIZE frames.
     """
-    key = (str(path), metric, block_idx, file_size, interpolate)
+    key = (str(path), metric, block_idx, _block_frame_count(index, block_idx), interpolate)
     cached = _block_cache.get(key)
     if cached is not None:
         return cached
@@ -401,7 +429,7 @@ def _decode_block_cached(
             trail = min(CONTEXT_FRAMES, index.count - stop)
             bases = [
                 _base_with_context(
-                    path, index, block_idx, m, file_size, lead, trail, reference,
+                    path, index, block_idx, m, lead, trail, reference,
                     interpolate=interpolate,
                 )
                 for m in derived.bases
@@ -414,7 +442,7 @@ def _decode_block_cached(
         else:
             bases = [
                 _decode_block_cached(
-                    path, index, block_idx, m, file_size, reference,
+                    path, index, block_idx, m, reference,
                     interpolate=interpolate,
                 )
                 for m in derived.bases
@@ -440,7 +468,10 @@ def _decode_block_cached(
         "csi_ratio_phase": ratio_phase,
     }
     for m, arr in _metrics.items():
-        _block_cache.put((str(path), m, block_idx, file_size, interpolate), arr)
+        _block_cache.put(
+            (str(path), m, block_idx, _block_frame_count(index, block_idx), interpolate),
+            arr,
+        )
     with _block_cache._lock:
         _block_cache.frames_decoded += len(block_ids)
 
@@ -452,7 +483,6 @@ def _base_with_context(
     index: FrameIndex,
     block_idx: int,
     metric: str,
-    file_size: int,
     lead: int,
     trail: int,
     reference: Reference | None,
@@ -468,19 +498,19 @@ def _base_with_context(
     parts = []
     if lead:
         prev = _decode_block_cached(
-            path, index, block_idx - 1, metric, file_size, reference,
+            path, index, block_idx - 1, metric, reference,
             interpolate=interpolate,
         )
         parts.append(prev[len(prev) - lead :])
     parts.append(
         _decode_block_cached(
-            path, index, block_idx, metric, file_size, reference,
+            path, index, block_idx, metric, reference,
             interpolate=interpolate,
         )
     )
     if trail:
         nxt = _decode_block_cached(
-            path, index, block_idx + 1, metric, file_size, reference,
+            path, index, block_idx + 1, metric, reference,
             interpolate=interpolate,
         )
         parts.append(nxt[:trail])
@@ -522,7 +552,6 @@ def _decode_via_blocks(
     index: FrameIndex,
     frame_ids: np.ndarray,
     metric: str,
-    file_size: int,
     reference: Reference | None = None,
     *,
     interpolate: bool = True,
@@ -544,7 +573,7 @@ def _decode_via_blocks(
         block_start = block_idx * BLOCK_SIZE
 
         block = _decode_block_cached(
-            path, index, block_idx, metric, file_size, reference,
+            path, index, block_idx, metric, reference,
             interpolate=interpolate,
         )
 
@@ -744,7 +773,7 @@ def compute_tile(
         data = np.empty((0, num_sc), dtype=np.float32)
     elif exact and not filtered:
         data = _decode_via_blocks(
-            path, index, frame_ids, metric, file_size, reference,
+            path, index, frame_ids, metric, reference,
             interpolate=interpolate,
         )
     else:

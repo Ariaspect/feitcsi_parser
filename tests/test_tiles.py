@@ -1380,3 +1380,47 @@ def test_unanchored_tiles_do_not_run_the_batch_relative_fallback():
     raw_half, _ = compute_tile(CAPTURE, t0, mid, 32, "csi_ratio_phase")
     _assert_same_angle(whole, raw_whole)
     _assert_same_angle(half, raw_half)
+
+
+def test_block_cache_survives_capture_growth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocks already complete must survive the capture growing.
+
+    The cache keyed on whole-file size, so one appended byte re-decoded every
+    block -- which made each live poll a cold decode of the visible window.
+
+    BLOCK_SIZE is shrunk so a small fixture spans several blocks; at the real
+    4096 the whole of capture.dat is one block, which is the growing tail and
+    is *supposed* to re-decode, so the regression would be invisible.
+    """
+    import backend.tiles as tiles_mod
+    from backend.tiles import compute_tile, get_index, reset_tile_caches
+
+    monkeypatch.setattr(tiles_mod, "BLOCK_SIZE", 128)
+
+    src = Path(__file__).resolve().parent.parent / "captures" / "capture.dat"
+    if not src.is_file():
+        pytest.skip("captures/capture.dat not present")
+    raw = src.read_bytes()
+    half = len(raw) // 2
+
+    grow = tmp_path / "grow.dat"
+    grow.write_bytes(raw[:half])
+
+    reset_tile_caches()
+    idx = get_index(grow)
+    assert idx.count > 128 * 3, "fixture must span several blocks"
+    t0, t1 = float(idx.times[0]), float(idx.times[-1])
+
+    compute_tile(grow, t0, t1, 400, "amplitude")
+    before_frames = tiles_mod._block_cache.frames_decoded
+
+    with grow.open("ab") as fh:
+        fh.write(raw[half : half + 200_000])
+    get_index(grow)
+    compute_tile(grow, t0, t1, 400, "amplitude")
+
+    # Only the tail block may re-decode. Before the fix every block did.
+    redecoded = tiles_mod._block_cache.frames_decoded - before_frames
+    assert redecoded <= 128 * 2, f"re-decoded {redecoded} frames after growth"
