@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app import app
@@ -368,6 +369,108 @@ def test_captures_endpoint_missing_dir(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 # ----------------------------------------------------------------------- #
+#  Nested captures: subdirectories, symlinked dirs, cycles                #
+# ----------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def nested_captures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A captures/ tree with a subdirectory, and CAPTURES_DIR pointed at it."""
+    import backend.app as app_mod
+    root = tmp_path / "captures"
+    (root / "2026-08" / "day1").mkdir(parents=True)
+    (root / "top.dat").write_bytes(b"\x01" * 16)
+    (root / "2026-08" / "mid.bin").write_bytes(b"\x02" * 16)
+    (root / "2026-08" / "day1" / "deep.dat").write_bytes(b"\x03" * 16)
+    monkeypatch.setattr(app_mod, "CAPTURES_DIR", root)
+    return root
+
+
+def test_captures_endpoint_recurses_into_subdirectories(nested_captures: Path) -> None:
+    """Nested captures are listed, named relative to captures/.
+
+    A bare name would collide across subdirectories; the relative path is what
+    makes two files called capture.dat distinguishable in the dropdown.
+    """
+    caps = TestClient(app).get("/api/captures").json()
+    names = {c["filename"] for c in caps}
+    assert names == {"top.dat", "2026-08/mid.bin", "2026-08/day1/deep.dat"}
+
+    # path stays absolute -- it is what the client sends back to /api/tile.
+    for c in caps:
+        assert Path(c["path"]).is_absolute()
+        assert c["size_bytes"] == 16
+
+
+def test_captures_endpoint_descends_symlinked_directory(nested_captures: Path,
+                                                        tmp_path: Path) -> None:
+    """A symlinked directory is walked.
+
+    Path.rglob does not descend symlinked directories on 3.12, and a symlinked
+    directory is how a large archive gets attached to captures/ -- so this is
+    the case the hand-rolled walk exists for.
+    """
+    archive = tmp_path / "archive" / "inner"
+    archive.mkdir(parents=True)
+    (archive / "mounted.dat").write_bytes(b"\x04" * 16)
+    (nested_captures / "link").symlink_to(tmp_path / "archive")
+
+    names = {c["filename"] for c in TestClient(app).get("/api/captures").json()}
+    assert "link/inner/mounted.dat" in names
+
+
+def test_captures_endpoint_survives_symlink_cycle(nested_captures: Path) -> None:
+    """A directory symlink pointing at an ancestor terminates the walk."""
+    (nested_captures / "2026-08" / "loop").symlink_to(nested_captures)
+
+    caps = TestClient(app).get("/api/captures").json()
+    names = {c["filename"] for c in caps}
+    assert "top.dat" in names
+    # Every entry appears exactly once despite the cycle.
+    assert len(names) == len(caps)
+
+
+def test_captures_endpoint_skips_broken_symlink(nested_captures: Path) -> None:
+    """A dangling link is dropped from the listing rather than erroring."""
+    (nested_captures / "dangling.dat").symlink_to(nested_captures / "gone.dat")
+
+    names = {c["filename"] for c in TestClient(app).get("/api/captures").json()}
+    assert "dangling.dat" not in names
+
+
+def test_captures_endpoint_honours_depth_cap(nested_captures: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Files below MAX_CAPTURE_DEPTH are not listed."""
+    import backend.app as app_mod
+    monkeypatch.setattr(app_mod, "MAX_CAPTURE_DEPTH", 0)
+
+    names = {c["filename"] for c in TestClient(app).get("/api/captures").json()}
+    assert names == {"top.dat"}
+
+
+def test_resolve_accepts_captures_relative_nested_path(nested_captures: Path) -> None:
+    """'subdir/file.dat' resolves against captures/, as /api/captures names it."""
+    from backend.app import resolve_capture_path
+    resolved = resolve_capture_path("2026-08/day1/deep.dat")
+    assert resolved == (nested_captures / "2026-08" / "day1" / "deep.dat").resolve()
+
+
+def test_resolve_still_accepts_absolute_path(nested_captures: Path) -> None:
+    """The absolute path /api/captures reports keeps working unchanged."""
+    from backend.app import resolve_capture_path
+    target = nested_captures / "2026-08" / "mid.bin"
+    assert resolve_capture_path(str(target)) == target.resolve()
+
+
+def test_resolve_rejects_missing_nested_path(nested_captures: Path) -> None:
+    """A nested path that exists in neither location is a 404."""
+    from backend.app import resolve_capture_path
+    with pytest.raises(HTTPException) as exc:
+        resolve_capture_path("2026-08/nope.dat")
+    assert exc.value.status_code == 404
+
+
+# ----------------------------------------------------------------------- #
 #  'all' means no filter, symmetrically for both filters                  #
 # ----------------------------------------------------------------------- #
 
@@ -417,3 +520,80 @@ def test_tile_endpoint_source_mac_all_is_unfiltered(mixed_file: Path) -> None:
     assert plain.status_code == with_all.status_code == 200
     assert with_all.headers["X-Tile-Width"] == plain.headers["X-Tile-Width"]
     assert with_all.content == plain.content
+
+
+# ----------------------------------------------------------------------- #
+#  resolve_capture_path confinement                                       #
+# ----------------------------------------------------------------------- #
+
+
+def test_resolve_rejects_relative_traversal(nested_captures: Path) -> None:
+    """A '..' component is refused, not normalised away."""
+    from backend.app import resolve_capture_path
+    with pytest.raises(HTTPException) as exc:
+        resolve_capture_path("../../../etc/passwd")
+    assert exc.value.status_code == 404
+
+
+def test_resolve_rejects_absolute_path_outside_roots(nested_captures: Path) -> None:
+    """An absolute path outside every root is refused before any file access."""
+    from backend.app import resolve_capture_path
+    with pytest.raises(HTTPException) as exc:
+        resolve_capture_path("/etc/hostname")
+    assert exc.value.status_code == 404
+
+
+def test_api_refuses_path_outside_roots() -> None:
+    """The refusal reaches the wire, not just the helper."""
+    client = TestClient(app)
+    for bad in ["/etc/hostname", "../pyproject.toml"]:
+        assert client.get("/api/meta", params={"path": bad}).status_code == 404
+
+
+def test_resolve_accepts_legacy_captures_prefix(nested_captures: Path) -> None:
+    """'captures/x.dat' still works -- DEFAULT_PATH and the README spell it so."""
+    from backend.app import resolve_capture_path
+    assert resolve_capture_path("captures/top.dat") == (nested_captures / "top.dat").resolve()
+
+
+def test_resolve_follows_symlink_pointing_outside_root(nested_captures: Path,
+                                                       tmp_path: Path) -> None:
+    """A symlink placed inside a root is followed wherever it points.
+
+    Creating it needs filesystem access to the server, so it is an operator's
+    deliberate act -- unlike a path an HTTP caller supplies.
+    """
+    from backend.app import resolve_capture_path
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    target = outside / "mounted.dat"
+    target.write_bytes(b"\x05" * 16)
+    (nested_captures / "linked.dat").symlink_to(target)
+
+    assert resolve_capture_path("linked.dat") == target.resolve()
+
+
+def test_capture_roots_reads_env_var(monkeypatch: pytest.MonkeyPatch,
+                                     tmp_path: Path) -> None:
+    """Extra roots come from FEITCSI_CAPTURE_ROOTS, os.pathsep-separated."""
+    import os
+
+    from backend.app import CAPTURES_DIR, ROOTS_ENV_VAR, capture_roots
+    monkeypatch.setenv(ROOTS_ENV_VAR, f"{tmp_path}{os.pathsep}{tmp_path / 'two'}")
+    roots = capture_roots()
+    assert roots[0] == CAPTURES_DIR
+    assert tmp_path in roots and (tmp_path / "two") in roots
+
+
+def test_extra_root_is_readable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A file under an extra root resolves; one above it still does not."""
+    from backend.app import ROOTS_ENV_VAR, resolve_capture_path
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / "m.dat").write_bytes(b"\x06" * 16)
+    (tmp_path / "sibling.dat").write_bytes(b"\x07" * 16)
+    monkeypatch.setenv(ROOTS_ENV_VAR, str(mount))
+
+    assert resolve_capture_path(str(mount / "m.dat")) == (mount / "m.dat").resolve()
+    with pytest.raises(HTTPException):
+        resolve_capture_path(str(tmp_path / "sibling.dat"))

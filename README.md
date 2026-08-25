@@ -190,9 +190,78 @@ Returns JSON:
 }
 ```
 
+### `GET /api/captures`
+
+Lists capture files under `captures/`, newest first. Takes no parameters.
+Populates the file dropdown.
+
+```json
+[{"filename": "2026-08/day1/capture.dat",
+  "path": "/srv/feitcsi/captures/2026-08/day1/capture.dat",
+  "size_bytes": 144104752,
+  "mtime": 1755500000.0}]
+```
+
+The walk is recursive, so captures may be organised into subdirectories.
+`filename` is the path **relative to `captures/`** — a top-level file is a bare
+name, a nested one carries its subdirectory, which keeps two files called
+`capture.dat` apart in the dropdown. `path` is absolute and is what the client
+sends back to `/api/meta` and `/api/tile`; a `filename` works there too — see
+[Capture paths](#capture-paths).
+
+Directory symlinks **are** followed, so a large archive can be mounted in with
+`ln -s /mnt/data/csi captures/archive`. Symlink cycles terminate, dangling
+links are skipped, and the walk stops at 8 levels deep. `.dat` is FeitCSI,
+`.bin` is MediaTek — but the suffix only decides what gets *listed*; the parser
+is chosen by sniffing the bytes, so a misnamed file still reads correctly.
+
 ### `GET /api/health`
 
 Returns `{"status": "ok"}`.
+
+## Capture paths
+
+Every endpoint that takes a `path` runs it through one chokepoint,
+`resolve_capture_path`, which confines reads to the capture roots. Requests
+outside them are `404`, whatever they name.
+
+Accepted spellings:
+
+| Form | Example |
+|---|---|
+| Root-relative, nested included | `capture.dat`, `2026-08/day1/x.dat` |
+| Legacy repo-root-relative | `captures/capture.dat` |
+| Absolute, inside a root | `/srv/feitcsi/captures/2026-08/day1/x.dat` |
+
+A `..` component is **rejected outright** rather than normalised, so no request
+can climb out of a root. `/etc/passwd`, `../pyproject.toml`, and an absolute
+path to anything outside the roots all return `404`.
+
+Symlinks *inside* a root are followed wherever they point, including outside
+it. Placing one requires filesystem access to the server, which is an
+operator's deliberate act — unlike a path an HTTP caller supplies. So the
+normal way to attach a large archive stays:
+
+```bash
+ln -s /mnt/data/csi captures/archive
+```
+
+### Extra roots
+
+`captures/` is always a root. A deployment that would rather point at a data
+mount than symlink it in can name more, separated by `:`:
+
+```bash
+FEITCSI_CAPTURE_ROOTS=/mnt/data/csi:/srv/archive npm run serve
+```
+
+Only `captures/` is walked by `/api/captures`; extra roots are readable by
+path but are not listed.
+
+> **This is confinement, not authentication.** The API still has no login and
+> `allow_origins=["*"]`. Anyone who can reach the port can read every capture
+> under every root. Keep it on loopback behind an SSH tunnel, or put a reverse
+> proxy with auth in front, before exposing it.
 
 ## Interpolation
 

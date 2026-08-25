@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +18,13 @@ from .index import parse_mac_filter, parse_mimo_filter
 
 DEFAULT_PATH = "captures/capture.dat"
 DEFAULT_WINDOW = 200
+
+CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
+# .dat = FeitCSI, .bin = MediaTek.
+CAPTURE_SUFFIXES = (".dat", ".bin")
+# Depth cap on the captures/ walk. Deep enough for any sane layout, and a
+# hard stop if a directory tree turns out to be pathological.
+MAX_CAPTURE_DEPTH = 8
 
 app = FastAPI(title="FeitCSI Parser API")
 
@@ -44,24 +53,93 @@ app.add_middleware(
 )
 
 
+ROOTS_ENV_VAR = "FEITCSI_CAPTURE_ROOTS"
+
+
+def capture_roots() -> list[Path]:
+    """Directories the API is allowed to read captures from.
+
+    ``captures/`` always, plus any ``os.pathsep``-separated paths named in
+    ``$FEITCSI_CAPTURE_ROOTS``.  Empty by default, so a stock deployment
+    reads from exactly one directory.
+
+    The env var exists for deployments that keep captures on a data mount and
+    would rather point at it than symlink it in; a symlink inside ``captures/``
+    remains the simpler option and is still followed.
+    """
+    roots = [CAPTURES_DIR]
+    extra = os.environ.get(ROOTS_ENV_VAR, "")
+    roots.extend(Path(part) for part in extra.split(os.pathsep) if part.strip())
+    return roots
+
+
+def _under_root(target: Path, root: Path) -> bool:
+    """True if *target* sits inside *root*, comparing both spellings.
+
+    ``root`` is checked as written and as resolved, because ``captures/`` may
+    itself be a symlink: an absolute path handed out by ``/api/captures`` is
+    spelled with the unresolved root, so comparing only against the resolved
+    one would reject the app's own output.
+    """
+    for base in {root, root.resolve()}:
+        if target == base or base in target.parents:
+            return True
+    return False
+
+
 def resolve_capture_path(path: str) -> Path:
     """Validate and resolve a capture file path.
 
-    This is the single chokepoint for all filesystem access from the API.
-    Currently permissive — it accepts any existing regular file, preserving
-    backwards compatibility for callers passing absolute paths.  Any future
-    restriction (e.g. confining to a captures/ directory, allow-listing
-    extensions) should be added here, not duplicated across handlers.
+    This is the single chokepoint for all filesystem access from the API, and
+    it confines every request to :func:`capture_roots`.
 
-    Rejects the empty string and anything that is not an existing regular
-    file.
+    Accepted spellings, all of which ``/api/captures`` or the README produce:
+
+    * root-relative, including nested — ``capture.dat``, ``2026-08/x.dat``
+    * legacy repo-root-relative — ``captures/capture.dat`` (``DEFAULT_PATH``)
+    * absolute, as long as it lies inside a root
+
+    A ``..`` component is rejected outright rather than normalised, so no
+    request can climb out of a root.  Symlinks *inside* a root are still
+    followed wherever they point: placing one requires filesystem access to
+    the server, which is a deliberate act by an operator, not something an
+    HTTP caller can arrange.
+
+    Rejects the empty string, anything outside every root, and anything that
+    is not an existing regular file.
     """
     if not path or not path.strip():
         raise HTTPException(status_code=400, detail="path parameter is required")
+
+    not_found = HTTPException(status_code=404, detail=f"File not found: {path}")
+    roots = capture_roots()
     p = Path(path)
-    if not p.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-    return p.resolve()
+
+    if p.is_absolute():
+        # Confine before touching the filesystem, and never on a resolved
+        # path -- resolving first would let a symlink inside a root decide
+        # the verdict, and those are allowed to point outside it.
+        if not any(_under_root(p, root) for root in roots):
+            raise not_found
+        if not p.is_file():
+            raise not_found
+        return p.resolve()
+
+    if ".." in p.parts:
+        raise not_found
+
+    candidates = [p]
+    # 'captures/capture.dat' is how DEFAULT_PATH and the README spell it.
+    if p.parts and p.parts[0] == CAPTURES_DIR.name:
+        candidates.append(Path(*p.parts[1:]))
+
+    for root in roots:
+        for candidate in candidates:
+            target = root / candidate
+            if target.is_file():
+                return target.resolve()
+
+    raise not_found
 
 
 @app.get("/api/snapshot")
@@ -258,35 +336,70 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
-# .dat = FeitCSI, .bin = MediaTek.
-CAPTURE_SUFFIXES = (".dat", ".bin")
+def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
+    """Yield capture files under *root*, descending into subdirectories.
+
+    Hand-rolled rather than ``rglob`` because ``rglob`` does not descend into
+    symlinked directories on Python 3.12, and a symlinked directory is exactly
+    how a large capture archive gets attached to ``captures/``.
+
+    *seen* holds the real paths of directories already visited, so a symlink
+    cycle terminates instead of recursing forever. Unreadable directories are
+    skipped rather than failing the whole listing.
+    """
+    if depth < 0:
+        return
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir()  # follows symlinks; False if broken
+        except OSError:
+            continue
+        if is_dir:
+            real = entry.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            yield from _walk_captures(entry, depth - 1, seen)
+        elif entry.suffix in CAPTURE_SUFFIXES and entry.is_file():
+            yield entry
 
 
 @app.get("/api/captures")
 def list_captures() -> list[dict]:
-    """List capture files in the captures/ directory.
+    """List capture files under the captures/ directory, recursively.
 
-    Returns filename, size_bytes, and mtime (ISO 8601) for each capture,
-    sorted by mtime descending (newest first). Missing dir → empty list.
+    Returns filename, path, size_bytes, and mtime for each capture, sorted by
+    mtime descending (newest first). Missing dir → empty list.
+
+    ``filename`` is the path relative to ``captures/``, so a nested capture
+    reads ``2026-08/capture.dat`` and stays distinguishable from a same-named
+    file in another subdirectory. A top-level capture is still a bare name.
+    ``path`` remains absolute and is what the client sends back.
 
     ``.dat`` is FeitCSI, ``.bin`` is MediaTek. The extension only decides
     what to *list*; which parser runs is decided by sniffing the bytes in
     ``tiles.get_index``, so a misnamed file still reads correctly.
     """
-    if not CAPTURES_DIR.is_dir():
+    root = CAPTURES_DIR
+    if not root.is_dir():
         return []
 
     files: list[dict] = []
-    for entry in CAPTURES_DIR.iterdir():
-        if entry.suffix in CAPTURE_SUFFIXES and entry.is_file():
+    for entry in _walk_captures(root, MAX_CAPTURE_DEPTH, {root.resolve()}):
+        try:
             st = entry.stat()
-            files.append({
-                "filename": entry.name,
-                "path": str(entry),
-                "size_bytes": st.st_size,
-                "mtime": st.st_mtime,
-            })
+        except OSError:
+            continue  # vanished or dangling between walk and stat
+        files.append({
+            "filename": entry.relative_to(root).as_posix(),
+            "path": str(entry),
+            "size_bytes": st.st_size,
+            "mtime": st.st_mtime,
+        })
 
     files.sort(key=lambda f: f["mtime"], reverse=True)
     return files
