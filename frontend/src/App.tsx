@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
+import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { pickMimo } from "./filters";
@@ -28,6 +28,9 @@ import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon,
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
+// Characters the capture trigger can show at w-72 / text-sm. Every capture
+// name in the repo fits whole; longer nested ones lose their middle.
+const CAPTURE_NAME_CHARS = 30;
 const DARK_KEY = "feitcsi-dark";
 
 // Preferred transmitter to show on load. 'all' interleaves every sender in
@@ -272,7 +275,21 @@ export function App() {
               items={captureItems}
             >
               <SelectTrigger id="path" className="w-72 h-8" size="sm">
-                <SelectValue placeholder={captures === null ? "Loading…" : "Select a .dat file"} />
+                {/* The trigger formats the selection itself rather than taking
+                    the list's label: it drops the size (the list still shows
+                    it) to spend the width on the name, and elides from the
+                    middle. These captures differ in their tails, so the CSS
+                    default of cutting the end throws away the only part that
+                    tells them apart. */}
+                <SelectValue placeholder={captures === null ? "Loading…" : "Select a .dat file"}>
+                  {(value) => {
+                    const cap = (captures ?? []).find((c) => c.path === value);
+                    if (!cap) {
+                      return captures === null ? "Loading…" : "Select a .dat file";
+                    }
+                    return truncateCaptureName(cap.filename, CAPTURE_NAME_CHARS);
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>

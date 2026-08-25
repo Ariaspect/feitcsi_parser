@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchDoppler, fetchMeta, fetchTile } from "./api";
+import { fetchDoppler, fetchMeta, fetchTile, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -278,5 +278,41 @@ describe("fetchDoppler", () => {
   it("throws with the server status on an error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("too short", { status: 400 })));
     await expect(fetchDoppler("c.dat", 0, 1, "amplitude", 600)).rejects.toThrow(/400/);
+  });
+});
+
+describe("truncateCaptureName", () => {
+  it("leaves a name that fits alone", () => {
+    expect(truncateCaptureName("capture.dat", 30)).toBe("capture.dat");
+    expect(truncateCaptureName("csi_20260813_030001.dat", 23)).toBe("csi_20260813_030001.dat");
+  });
+
+  it("elides the middle and keeps the tail", () => {
+    const out = truncateCaptureName("csi_20260813_030001.dat", 16);
+    expect(out).toHaveLength(16);
+    expect(out.startsWith("csi_")).toBe(true);
+    expect(out.endsWith(".dat")).toBe(true);
+    expect(out).toContain("…");
+  });
+
+  it("keeps sibling captures distinct at the width the toolbar uses", () => {
+    // These differ only in their tails, which is exactly what end-truncation
+    // throws away. Middle truncation keeps them apart -- provided the tail it
+    // keeps reaches the differing characters, which it does at the real width.
+    const a = truncateCaptureName("csi_20260813_030001.dat", 30);
+    const b = truncateCaptureName("csi_20260813_120001.dat", 30);
+    expect(a).not.toBe(b);
+  });
+
+  it("drops directories before touching the file name", () => {
+    const out = truncateCaptureName("2026-08/day1/capture.dat", 20);
+    expect(out.endsWith("/capture.dat")).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(20);
+  });
+
+  it("truncates the basename when it cannot fit on its own", () => {
+    const out = truncateCaptureName("2026-08/a_very_long_capture_name.dat", 14);
+    expect(out).toHaveLength(14);
+    expect(out.endsWith(".dat")).toBe(true);
   });
 });

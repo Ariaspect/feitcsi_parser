@@ -38,6 +38,39 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+/** Shorten *text* to *max* characters, eliding from the middle.
+ *
+ * End-truncation is the CSS default and the wrong choice for capture names:
+ * these differ in their *tails* (`csi_20260813_030001.dat` vs
+ * `csi_20260813_120001.dat`), so cutting the end throws away the only part
+ * that identifies the file, extension included. */
+export function middleTruncate(text: string, max: number): string {
+  if (max <= 1) return text.slice(0, Math.max(0, max));
+  if (text.length <= max) return text;
+  const keep = max - 1; // one char for the ellipsis
+  const head = Math.ceil(keep / 2);
+  const tail = keep - head;
+  return `${text.slice(0, head)}\u2026${tail > 0 ? text.slice(text.length - tail) : ""}`;
+}
+
+/** Fit a capture name into *max* characters, keeping the basename whole.
+ *
+ * Captures may be nested (`/api/captures` reports a path relative to
+ * `captures/`), and the directories are the disposable part — the file itself
+ * is what identifies the capture. So the directory prefix is elided first, and
+ * only a basename that cannot fit on its own is truncated. */
+export function truncateCaptureName(name: string, max: number): string {
+  if (name.length <= max) return name;
+
+  const cut = name.lastIndexOf("/");
+  if (cut < 0) return middleTruncate(name, max);
+
+  const base = name.slice(cut + 1);
+  // "…/" costs 2 characters; below that the directory cannot be shown at all.
+  if (base.length + 2 >= max) return middleTruncate(base, max);
+  return `${middleTruncate(name.slice(0, cut), max - base.length - 1)}/${base}`;
+}
+
 function filterParams(mimo?: string | null, sourceMac?: string | null): string {
   let p = "";
   if (mimo && mimo !== "all") p += `&mimo=${encodeURIComponent(mimo)}`;
