@@ -34,7 +34,14 @@ from . import mtk
 from .batch import decode_frames as _decode_feitcsi
 from .cir import csi_to_cir_centred
 from .index import FrameIndex
-from .doppler import gap_limit_for, resample_uniform, stft_average, uniform_grid
+from .doppler import (
+    DEFAULT_MAX_GAP_FRACTION,
+    DEFAULT_ZERO_PAD,
+    gap_limit_for,
+    resample_uniform,
+    stft_average,
+    uniform_grid,
+)
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
 from .ratio import (
     CONTEXT_FRAMES,
@@ -660,6 +667,10 @@ def _interpolate_time_gaps(
 # would dominate an FFT and read as motion that is not there.
 DOPPLER_METRICS: tuple[str, ...] = ("amplitude", "csi_ratio_phase_time_unwrapped")
 
+# Floor on a clamped window. Below this a spectrogram column is too few samples
+# to carry a meaningful spectrum, and the honest answer is an error.
+MIN_DOPPLER_WIN = 8
+
 
 def compute_doppler(
     path: Path,
@@ -667,8 +678,10 @@ def compute_doppler(
     t1: float,
     metric: str,
     *,
-    win_seconds: float = 30.0,
+    win_seconds: float = 10.0,
     overlap: float = 0.5,
+    max_gap_fraction: float = DEFAULT_MAX_GAP_FRACTION,
+    zero_pad: int = DEFAULT_ZERO_PAD,
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
@@ -684,6 +697,13 @@ def compute_doppler(
     window is given in *seconds* for the same reason: frame rate varies from
     5 Hz to 18 Hz across captures, so a fixed frame count would mean a
     different physical window on every file.
+
+    A window longer than the range holds is *clamped* to what is available
+    rather than refused. Zooming in is the normal way to use these panels, and
+    every zoom past the window length would otherwise return 400 and leave the
+    panel showing stale pixels. The window actually used comes back in
+    ``win_seconds``, so the caller can report what it got rather than what it
+    asked for.
     """
     if metric not in DOPPLER_METRICS:
         raise ValueError(
@@ -701,20 +721,30 @@ def compute_doppler(
         raise ValueError("fewer than 2 frames in range")
 
     times = times_all[frame_ids]
-    grid_times, fs = uniform_grid(times)
-    # Even window only: with an odd length rfft has no exact Nyquist bin, so
-    # the axis would stop at (win-1)/(2*win)*fs and the panel's top label
-    # would quietly disagree with the capture's real ceiling.
+
+    # Sample rate comes from the whole (filtered) capture, not from the frames
+    # in view. Taking it from the visible slice makes the frequency axis
+    # rescale as the user zooms: capture.dat's 1st-percentile interval is
+    # 0.42 ms, so a short slice that happens to contain a burst reports 1144 Hz
+    # against the capture's true 5.1 Hz, and the panel's Hz labels become
+    # nonsense. A filter may legitimately change the rate, so it is applied --
+    # a time window may not.
+    filtered_times = times_all[mask]
+    _, fs = uniform_grid(filtered_times if filtered_times.size >= 2 else times)
+    step = 1.0 / fs
+    n_grid = int(np.floor((times[-1] - times[0]) / step)) + 1
+    grid_times = times[0] + np.arange(n_grid, dtype=float) * step
+    # Clamp rather than refuse: a zoom past the window length is ordinary use.
+    # MIN_DOPPLER_WIN keeps a clamped window wide enough to mean something.
     win = int(round(win_seconds * fs))
-    win += win % 2
-    if win < 2:
+    win = min(win, int(grid_times.size))
+    # Round DOWN to even -- rounding up would push a clamped window back past
+    # the samples that are actually there.
+    win -= win % 2
+    if win < MIN_DOPPLER_WIN:
         raise ValueError(
-            f"win_seconds={win_seconds} is under two samples at {fs:.2f} Hz"
-        )
-    if grid_times.size < win:
-        raise ValueError(
-            f"range holds {grid_times.size} samples, shorter than the "
-            f"{win}-sample ({win_seconds:.1f} s) window"
+            f"range holds {grid_times.size} samples at {fs:.2f} Hz, too few for "
+            f"a {MIN_DOPPLER_WIN}-sample minimum window"
         )
 
     reference = (
@@ -729,19 +759,26 @@ def compute_doppler(
         path, index, frame_ids, metric, reference, interpolate
     )
 
-    samples = resample_uniform(times, values, grid_times, gap_limit_for(times))
+    samples, fabricated = resample_uniform(
+        times, values, grid_times, gap_limit_for(times)
+    )
     hop = max(1, int(round(win * (1.0 - overlap))))
-    spec, freqs = stft_average(samples, fs, win, hop)
+    spec, freqs = stft_average(
+        samples, fs, win, hop,
+        fabricated=fabricated,
+        max_gap_fraction=max_gap_fraction,
+        zero_pad=zero_pad,
+    )
 
     finite = spec[np.isfinite(spec)]
-    step = 1.0 / fs
     n_out = spec.shape[1]
     return spec.astype(np.float32), {
         "fs": float(fs),
         "f_max": float(freqs[-1]),
         "win": int(win),
         "hop": int(hop),
-        "win_seconds": float(win * step),
+        "win_seconds": float(win * step),   # what was used, not what was asked
+        "blank_columns": int(np.all(~np.isfinite(spec), axis=0).sum()),
         "frames_used": int(frame_ids.size),
         "t_min": float(times_all[0]) if times_all.size else 0.0,
         "t_max": float(times_all[-1]) if times_all.size else 0.0,

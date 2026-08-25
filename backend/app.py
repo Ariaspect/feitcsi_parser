@@ -66,6 +66,7 @@ app.add_middleware(
         "X-Doppler-Frames",
         "X-Doppler-ColT0",
         "X-Doppler-ColT1",
+        "X-Doppler-Blank",
     ],
 )
 
@@ -354,8 +355,9 @@ def doppler(
     t0: float = Query(..., description="Start of requested time window (seconds)"),
     t1: float = Query(..., description="End of requested time window (seconds)"),
     metric: str = Query("amplitude", description=f"One of: {', '.join(DOPPLER_METRICS)}"),
-    win_seconds: float = Query(30.0, gt=0, le=600, description="STFT window length in seconds"),
+    win_seconds: float = Query(10.0, gt=0, le=600, description="STFT window length in seconds; clamped to the range if longer"),
     overlap: float = Query(0.5, ge=0.0, lt=1.0, description="Window overlap fraction"),
+    max_gap_fraction: float = Query(0.5, gt=0.0, le=1.0, description="Blank a column once more than this fraction of its window is interpolated across dropouts"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
     source_mac: str | None = Query(None, description="Source MAC filter"),
     interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
@@ -375,6 +377,11 @@ def doppler(
     range, so ``FMax`` is this file's true Nyquist rather than a function of
     any requested width. Motion above it aliases: at 5 GHz a 1 m/s movement
     sits near 33 Hz, well above every capture this was built against.
+
+    A window longer than the range holds is clamped rather than refused, so
+    zooming in never blanks the panel; ``X-Doppler-WinSeconds`` reports what
+    was actually used. ``X-Doppler-Blank`` counts columns dropped for being
+    mostly interpolated across dropouts.
     """
     p = resolve_capture_path(path)
 
@@ -388,6 +395,7 @@ def doppler(
             p, t0, t1, metric,
             win_seconds=win_seconds,
             overlap=overlap,
+            max_gap_fraction=max_gap_fraction,
             mimo=mimo_filter,
             source_mac=parse_mac_filter(source_mac),
             interpolate=interpolate,
@@ -408,6 +416,7 @@ def doppler(
             "X-Doppler-Win": str(meta["win"]),
             "X-Doppler-Hop": str(meta["hop"]),
             "X-Doppler-WinSeconds": str(meta["win_seconds"]),
+            "X-Doppler-Blank": str(meta["blank_columns"]),
             "X-Doppler-Frames": str(meta["frames_used"]),
             "X-Doppler-ColT0": str(meta["col_t0"]),
             "X-Doppler-ColT1": str(meta["col_t1"]),

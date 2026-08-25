@@ -22,20 +22,59 @@ def test_uniform_grid_uses_the_median_interval() -> None:
     assert grid[-1] <= times[-1] + 1e-9
 
 
-def test_resample_blanks_samples_inside_a_large_gap() -> None:
-    """A 5 s hole in a 10 Hz capture must not be interpolated into signal."""
+def test_resample_reports_fabricated_samples_without_blanking_them() -> None:
+    """A 5 s hole is interpolated, and flagged so the caller can judge it.
+
+    Writing NaN here instead would force a whole window to die for one missed
+    packet; the caller decides proportionally.
+    """
     times = np.array([0.0, 0.1, 0.2, 5.2, 5.3, 5.4])
     values = np.arange(6, dtype=float).reshape(6, 1)
     grid, _ = uniform_grid(times)
     # Explicit limit: with only five intervals the 95th percentile is itself
     # dragged up by the outlier. gap_limit_for is exercised separately below,
     # on a distribution shaped like a real capture's.
-    out = resample_uniform(times, values, grid, gap_limit=0.25)
+    out, fabricated = resample_uniform(times, values, grid, gap_limit=0.25)
 
     inside = (grid > 0.2 + 1e-9) & (grid < 5.2 - 1e-9)
     assert inside.any(), "fixture must place samples strictly inside the gap"
-    assert np.all(np.isnan(out[inside, 0]))
-    assert np.isfinite(out[grid <= 0.2, 0]).all()
+    assert np.array_equal(fabricated, inside)
+    assert np.isfinite(out).all(), "values are interpolated, not blanked"
+
+
+def test_stft_blanks_only_windows_that_are_mostly_fabricated() -> None:
+    """The proportional rule: a minority of invented samples is tolerated.
+
+    Blanking on the mere presence of a gap costs 32.5% of columns on a real
+    capture whose actual dead time is 6.3%.
+    """
+    fs, win, hop = 20.0, 128, 64
+    samples = _tone(2.0, fs, 1024, n_cols=2)
+
+    light = np.zeros(1024, dtype=bool)
+    light[:8] = True                    # 6% of the first window
+    spec, _ = stft_average(samples, fs, win, hop, fabricated=light,
+                           max_gap_fraction=0.5)
+    assert np.isfinite(spec).all(), "a 6% gap must not blank a column"
+
+    heavy = np.zeros(1024, dtype=bool)
+    heavy[:100] = True                  # 78% of the first window
+    spec, _ = stft_average(samples, fs, win, hop, fabricated=heavy,
+                           max_gap_fraction=0.5)
+    assert np.all(np.isnan(spec[:, 0])), "a mostly-invented column must blank"
+    assert np.isfinite(spec[:, -1]).all(), "later columns are unaffected"
+
+
+def test_stft_zero_pad_refines_the_frequency_grid() -> None:
+    """Zero-padding adds rows and keeps the axis ending at fs/2."""
+    fs, win, hop = 20.0, 128, 64
+    plain, f_plain = stft_average(_tone(2.0, fs, 1024), fs, win, hop)
+    padded, f_pad = stft_average(_tone(2.0, fs, 1024), fs, win, hop, zero_pad=256)
+
+    assert padded.shape[0] > plain.shape[0]
+    assert padded.shape[1] == plain.shape[1], "columns must not change"
+    assert f_pad[-1] == pytest.approx(fs / 2)
+    assert f_pad[-1] == pytest.approx(f_plain[-1])
 
 
 def test_stft_finds_a_known_tone_with_row_zero_highest() -> None:
@@ -137,7 +176,7 @@ def test_compute_doppler_shape_metadata_and_nyquist() -> None:
     spec, meta = compute_doppler(p, t0, t1, "amplitude", win_seconds=10.0)
 
     assert spec.dtype == np.float32
-    assert spec.shape[0] == meta["win"] // 2 + 1
+    assert spec.shape[0] > meta["win"] // 2      # zero-padded frequency grid
     assert spec.shape[1] >= 1
     assert meta["fs"] == pytest.approx(expected_fs, rel=1e-6)
     assert meta["f_max"] == pytest.approx(meta["fs"] / 2)
@@ -153,10 +192,49 @@ def test_compute_doppler_rejects_a_tile_only_metric() -> None:
         compute_doppler(_capture_or_skip(), 0.0, 1e9, "csi_cir")
 
 
-def test_compute_doppler_rejects_a_window_longer_than_the_range() -> None:
+def test_compute_doppler_clamps_a_window_longer_than_the_range() -> None:
+    """Zooming past the window length must not blank the panel.
+
+    It previously raised, which surfaced as a 400 the frontend swallowed --
+    the panel silently kept stale pixels.
+    """
     from backend.tiles import compute_doppler, get_index
 
     p = _capture_or_skip()
     t0 = float(get_index(p).times[0])
-    with pytest.raises(ValueError, match="shorter than"):
-        compute_doppler(p, t0, t0 + 5.0, "amplitude", win_seconds=600.0)
+    spec, meta = compute_doppler(p, t0, t0 + 20.0, "amplitude", win_seconds=600.0)
+
+    assert spec.shape[1] >= 1
+    assert meta["win_seconds"] < 600.0, "the window must report what it used"
+    assert meta["win_seconds"] <= 20.0
+
+
+def test_compute_doppler_still_refuses_a_range_too_short_to_mean_anything() -> None:
+    """Clamping has a floor: a couple of samples is not a spectrum."""
+    from backend.tiles import compute_doppler, get_index
+
+    p = _capture_or_skip()
+    t0 = float(get_index(p).times[0])
+    with pytest.raises(ValueError, match="too few"):
+        compute_doppler(p, t0, t0 + 1.0, "amplitude", win_seconds=30.0)
+
+
+def test_compute_doppler_sample_rate_is_stable_across_zoom() -> None:
+    """The frequency axis must not rescale as the user zooms in time.
+
+    Taking fs from the visible slice made capture.dat report 1144 Hz on a 1 s
+    view against its true 5.1 Hz, because its 1st-percentile interval is
+    0.42 ms and a short slice can be all burst.
+    """
+    from backend.tiles import compute_doppler, get_index
+
+    p = _capture_or_skip()
+    t = np.asarray(get_index(p).times, dtype=float)
+    t0 = float(t[0])
+
+    rates = []
+    for span in (float(t[-1] - t[0]), 100.0, 20.0):
+        _, meta = compute_doppler(p, t0, t0 + span, "amplitude", win_seconds=10.0)
+        rates.append(meta["fs"])
+
+    assert max(rates) == pytest.approx(min(rates), rel=1e-9)

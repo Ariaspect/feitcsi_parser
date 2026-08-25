@@ -201,8 +201,9 @@ renderer draws it. The body is `(win // 2 + 1, n_windows)`, row-major,
 Query params:
 - `path`, `t0`, `t1` — as `/api/tile`
 - `metric` — `amplitude` or `csi_ratio_phase_time_unwrapped`
-- `win_seconds` — STFT window length in seconds (default 30, max 600)
+- `win_seconds` — STFT window length in seconds (default 10, max 600). **Clamped** to what the range holds if longer, so zooming in never blanks the panel; `X-Doppler-WinSeconds` reports what was used
 - `overlap` — window overlap fraction (default 0.5)
+- `max_gap_fraction` — blank a column once more than this fraction of its window is interpolated across dropouts (default 0.5)
 - `mimo`, `source_mac`, `interpolate` — as `/api/tile`
 
 | Header | Meaning |
@@ -211,16 +212,22 @@ Query params:
 | `X-Doppler-Fs` | The capture's **own median frame rate** over the frames in range. |
 | `X-Doppler-FMax` | Nyquist, `Fs/2`. This file's real ceiling. |
 | `X-Doppler-Win` / `X-Doppler-Hop` | Window and hop, in samples. `Win` is always even. |
-| `X-Doppler-WinSeconds` | The window actually used, in seconds. |
+| `X-Doppler-WinSeconds` | The window actually used, in seconds — may be less than requested. |
+| `X-Doppler-Blank` | Columns dropped for being mostly interpolated across dropouts. |
 | `X-Doppler-Frames` | Frames that fed the transform. |
 | `X-Doppler-ColT0` / `X-Doppler-ColT1` | First and last **column centres** — half a window inside the requested range. |
 
 `X-Doppler-Fs` comes from frame timing, never from a requested width.
 Resampling a 5 Hz capture onto a wider grid manufactures peaks above its own
 Nyquist; the same mistake decimates a faster capture and truncates the top of
-its band.
+its band. It is measured over the whole (filtered) capture rather than the
+frames in view, so the frequency axis does not rescale as you zoom —
+`capture.dat`'s 1st-percentile interval is 0.42 ms, and a short slice that
+happens to be all burst would otherwise report 1144 Hz against its true
+5.1 Hz.
 
-Returns `400` for an unknown metric or a window longer than the range holds.
+Returns `400` for an unknown metric, or a range too short to hold even a
+minimum 8-sample window.
 
 ### `GET /api/captures`
 
@@ -293,11 +300,24 @@ The window is set in *seconds*, not frames, because frame rate varies from 5 to
 window per file. Longer window, finer frequency resolution, fewer columns.
 
 Frames are resampled onto a uniform grid first, at the capture's median rate.
-A window spanning a gap wider than 2× the 95th-percentile inter-frame interval
-comes out NaN rather than carrying an interpolated ramp: a 23-second hole must
-not become signal. Subcarriers that are non-finite for the whole capture
-(DC/guard band, dropped pilots — 11 of 256 on an MTK file) are excluded from
-the average rather than poisoning it.
+Dropouts are bridged by interpolation, but only proportionally: a column is
+blanked once more than `max_gap_fraction` (default 50%) of its window was
+invented.
+
+Bridging *every* gap unconditionally is the tempting simplification and is
+wrong here. These captures hold six holes over 10 seconds, one of 22.9 s, and
+interpolating those produces a perfectly flat stretch — and flat reads as "no
+motion", not "no data", which on a presence panel is the one lie that matters.
+Blanking on *any* gap is equally wrong in the other direction: on
+`csi_20260813_030001.dat`, 130 gaps of which 66% are under a second (35 s in
+total) blanked **32.3%** of columns against 6.3% real dead time. The
+proportional rule leaves **3.8%** blank, and the 22.9 s hole still shows as a
+hole.
+
+Subcarriers that are non-finite for the whole capture (DC/guard band, dropped
+pilots — 11 of 256 on an MTK file) are excluded from the average rather than
+poisoning it. Each window is zero-padded before the FFT, which interpolates the
+frequency axis for a smoother panel without claiming extra resolution.
 
 ## Capture paths
 

@@ -96,7 +96,7 @@ export function App() {
   // STFT window, in seconds rather than frames: frame rate runs 5-18 Hz across
   // captures, so a fixed frame count would mean a different physical window on
   // every file. Longer window = finer frequency resolution, fewer columns.
-  const [winSeconds, setWinSeconds] = useState<number>(30);
+  const [winSeconds, setWinSeconds] = useState<number>(10);
   // Row count and Nyquist are properties of the capture's own frame rate, so
   // they are not known until the first response comes back.
   const [dopplerGeom, setDopplerGeom] = useState<{ rows: number; fMax: number } | null>(null);
@@ -652,6 +652,8 @@ export function App() {
                       5 GHz a 1 m/s movement sits near 33 Hz. What is in reach is
                       respiration and slow motion — <b>shift + wheel</b> zooms the
                       frequency axis, and that band is the bottom few percent of it.
+                      Blank columns are windows more than half interpolated across a
+                      capture dropout; short hiccups are bridged rather than blanked.
                     </p>
                   </>
                 ) : (

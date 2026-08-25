@@ -14,8 +14,20 @@ manufactured entirely by the interpolator. The same mistake decimates a faster
 capture and silently truncates the top of its band. Both were observed while
 prototyping this module.
 
-Real gaps stay holes. A window spanning one comes out NaN rather than carrying
-an interpolated ramp that would read as signal.
+Gaps are bridged by interpolation, but only up to a point. Bridging every gap
+unconditionally is the obvious choice and is what a notebook doing this by hand
+usually does -- a missed packet or two amid a 50 ms cadence is genuinely safe to
+fill in. It stops being safe at scale: this repo's FeitCSI captures hold six
+holes over 10 seconds, one of 22.9 s, and interpolating those produces a
+perfectly flat stretch. Flat reads as "no motion", not as "no data", which on a
+presence panel is the one lie that matters -- an empty room is exactly the
+signal being looked for.
+
+So the rule is proportional: a window is kept when the fabricated samples are a
+minority of it and blanked when they dominate. Measured on
+csi_20260813_030001.dat (130 gaps, 6.3% dead time), blanking on *any* gap kills
+32.5% of columns at a 30 s window; blanking above 50% of a window kills 3.8%,
+while the 22.9 s hole still shows as a hole.
 
 What this can and cannot see: Doppler shift is f_d = 2v/lambda, so at 5 GHz a
 1 m/s hand movement sits near 33 Hz -- far above the +/-2.5 to +/-8.9 Hz
@@ -34,6 +46,17 @@ import numpy as np
 # a dropout rather than jitter. Matches the convention backend.tiles already
 # uses when filling tile columns, so the two panels agree about what a hole is.
 DEFAULT_GAP_FACTOR = 2.0
+
+# A window is blanked once more than this fraction of it is interpolated across
+# dropouts. Below it the fabricated samples are a minority the Hann taper and
+# per-window detrend absorb; above it the column would mostly be invention.
+DEFAULT_MAX_GAP_FRACTION = 0.5
+
+# Extra zero-padded samples appended to each window before the FFT. Adds no
+# information -- it interpolates the frequency axis -- but a spectrogram drawn
+# on a canvas reads far better with a finer grid than the raw window length
+# gives, especially at the short windows that suit respiration.
+DEFAULT_ZERO_PAD = 512
 
 
 def uniform_grid(times: np.ndarray) -> tuple[np.ndarray, float]:
@@ -73,12 +96,22 @@ def resample_uniform(
     values: np.ndarray,
     grid_times: np.ndarray,
     gap_limit: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Linearly resample ``(n_frames, n_cols)`` *values* onto *grid_times*.
 
-    Samples landing strictly inside a gap wider than *gap_limit* are NaN. A
-    column that is entirely NaN on input stays entirely NaN, and one dead
-    subcarrier never blanks its neighbours -- the finite mask is per column.
+    Returns ``(samples, fabricated)``. *samples* is interpolated everywhere,
+    including across dropouts; *fabricated* is a 1-D boolean mask over
+    *grid_times*, True where a sample falls strictly inside a gap wider than
+    *gap_limit* and is therefore invented rather than measured.
+
+    Interpolating first and reporting the mask separately, rather than writing
+    NaN here, is what lets the caller decide *proportionally* -- a window that
+    is 2% fabricated is fine, one that is 90% fabricated is not. Writing NaN
+    at this layer forces the whole window to die for a single missed packet.
+
+    A column that is entirely non-finite on input stays entirely non-finite,
+    and one dead subcarrier never blanks its neighbours: the finite mask is
+    per column.
     """
     times = np.asarray(times, dtype=float)
     values = np.asarray(values, dtype=float)
@@ -98,15 +131,16 @@ def resample_uniform(
             continue
         out[:, col] = np.interp(grid_times, times[finite], series[finite])
 
-    # Blank grid samples inside a real dropout. Computed once against the frame
-    # times rather than per column: a gap is a property of when frames arrived,
-    # not of any one subcarrier.
+    # Mark samples inside a real dropout. Computed once against the frame times
+    # rather than per column: a gap is a property of when frames arrived, not
+    # of any one subcarrier.
+    fabricated = np.zeros(grid_times.size, dtype=bool)
     dt = np.diff(times)
     for start, width in zip(times[:-1], dt):
         if width > gap_limit:
-            out[(grid_times > start) & (grid_times < start + width), :] = np.nan
+            fabricated |= (grid_times > start) & (grid_times < start + width)
 
-    return out
+    return out, fabricated
 
 
 def stft_average(
@@ -114,6 +148,10 @@ def stft_average(
     fs: float,
     win: int,
     hop: int,
+    *,
+    fabricated: np.ndarray | None = None,
+    max_gap_fraction: float = DEFAULT_MAX_GAP_FRACTION,
+    zero_pad: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Subcarrier-averaged magnitude spectrogram of ``(n_samples, n_cols)``.
 
@@ -136,9 +174,12 @@ def stft_average(
       it in makes bin 0 swamp the panel.
 
     * **A NaN anywhere in a window poisons that whole column**, because each
-      output bin sums over the entire window. That is correct -- the window
-      spans a real dropout -- so the column stays NaN rather than being
-      zero-filled, which would report silence as signal.
+      output bin sums over the entire window. Which is why *fabricated* is a
+      mask rather than NaN in the data: a column is blanked when more than
+      *max_gap_fraction* of it was interpolated across dropouts, and kept
+      otherwise. Blanking on the mere presence of a gap makes one missed
+      packet cost an entire window -- 32.5% of columns on a real capture whose
+      actual dead time is 6.3%.
 
     Two different things produce NaN and they are *not* handled alike. A
     column that is non-finite for the whole capture is a structural null --
@@ -165,13 +206,30 @@ def stft_average(
             f"{win}-sample window"
         )
 
+    if zero_pad < 0:
+        raise ValueError("zero_pad must not be negative")
+
     n_samples, n_cols = samples.shape
     n_out = (n_samples - win) // hop + 1
     starts = np.arange(n_out) * hop
     offsets = np.arange(win)
     taper = np.hanning(win)
+    # Even transform length, so rfft has a true Nyquist bin and the axis really
+    # ends at fs/2 rather than just short of it.
+    nfft = win + zero_pad
+    nfft += nfft % 2
 
-    acc = np.zeros((win // 2 + 1, n_out), dtype=float)
+    # Columns whose window is mostly invention, decided before any transform.
+    blank = np.zeros(n_out, dtype=bool)
+    if fabricated is not None:
+        fab = np.asarray(fabricated, dtype=bool)
+        if fab.shape != (n_samples,):
+            raise ValueError(
+                f"fabricated must be 1-D of length {n_samples}, got {fab.shape}"
+            )
+        blank = fab[starts[:, None] + offsets].mean(axis=1) > max_gap_fraction
+
+    acc = np.zeros((nfft // 2 + 1, n_out), dtype=float)
     contributing = 0
     for col in range(n_cols):
         series = samples[:, col]
@@ -179,14 +237,15 @@ def stft_average(
             continue                                       # structural null
         seg = series[starts[:, None] + offsets]            # (n_out, win)
         seg = seg - seg.mean(axis=1, keepdims=True)        # detrend per window
-        acc += np.abs(np.fft.rfft(seg * taper, axis=1)).T
+        acc += np.abs(np.fft.rfft(seg * taper, n=nfft, axis=1)).T
         contributing += 1
 
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / fs)
     if contributing == 0:
-        return np.full((win // 2 + 1, n_out), np.nan), np.fft.rfftfreq(win, d=1.0 / fs)
+        return np.full((nfft // 2 + 1, n_out), np.nan), freqs
 
     spec = acc / contributing
-    freqs = np.fft.rfftfreq(win, d=1.0 / fs)
+    spec[:, blank] = np.nan
     # Row 0 = highest frequency, so the renderer's top-down row order puts fast
     # motion at the top of the panel.
     return spec[::-1, :], freqs

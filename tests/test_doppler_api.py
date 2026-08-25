@@ -33,14 +33,14 @@ def test_doppler_grid_matches_its_headers() -> None:
     h = r.headers
     grid = np.frombuffer(r.content, dtype="<f4")
     assert grid.size == int(h["X-Doppler-Width"]) * int(h["X-Doppler-Height"])
-    assert int(h["X-Doppler-Win"]) // 2 + 1 == int(h["X-Doppler-Height"])
+    assert int(h["X-Doppler-Height"]) > int(h["X-Doppler-Win"]) // 2   # zero-padded
     assert float(h["X-Doppler-FMax"]) == pytest.approx(float(h["X-Doppler-Fs"]) / 2)
     assert float(h["X-Doppler-ColT0"]) <= float(h["X-Doppler-ColT1"])
 
 
 @pytest.mark.parametrize("params,detail", [
     ({"metric": "csi_cir"}, "metric"),
-    ({"metric": "amplitude", "win_seconds": 600.0, "t1_offset": 5.0}, "shorter than"),
+    ({"metric": "amplitude", "win_seconds": 30.0, "t1_offset": 1.0}, "too few"),
 ])
 def test_doppler_rejects_bad_parameters(params: dict, detail: str) -> None:
     from backend.tiles import get_index
@@ -53,6 +53,21 @@ def test_doppler_rejects_bad_parameters(params: dict, detail: str) -> None:
     r = TestClient(app).get("/api/doppler", params={"path": str(p), "t0": t0, "t1": t1, **params})
     assert r.status_code == 400
     assert detail in r.json()["detail"]
+
+
+def test_doppler_clamps_rather_than_refusing_a_long_window() -> None:
+    """Zooming past the window length returns a spectrogram, not a 400."""
+    from backend.tiles import get_index
+
+    p = _capture_or_skip()
+    t0 = float(get_index(p).times[0])
+    r = TestClient(app).get("/api/doppler", params={
+        "path": str(p), "t0": t0, "t1": t0 + 20.0,
+        "metric": "amplitude", "win_seconds": 600.0,
+    })
+    assert r.status_code == 200
+    assert float(r.headers["X-Doppler-WinSeconds"]) < 600.0
+    assert "X-Doppler-Blank" in r.headers
 
 
 def test_doppler_refuses_a_path_outside_the_capture_roots() -> None:
