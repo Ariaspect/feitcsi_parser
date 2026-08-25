@@ -423,7 +423,15 @@ def _decode_block_cached(
     boundary would be decided on half of them — visible as a speckled seam
     every BLOCK_SIZE frames.
     """
-    key = (str(path), metric, block_idx, _block_frame_count(index, block_idx), interpolate)
+    # One observation of index.count for the whole call. A growing capture is
+    # extended in place by other requests, so reading it again below could size
+    # the block against a different count than the key names: the lookup key
+    # and the key the block is finally stored under would disagree, and every
+    # poll on a growing capture would miss the cache and re-decode.
+    total = index.count
+    n_block = max(0, min(BLOCK_SIZE, total - block_idx * BLOCK_SIZE))
+
+    key = (str(path), metric, block_idx, n_block, interpolate)
     cached = _block_cache.get(key)
     if cached is not None:
         return cached
@@ -431,10 +439,10 @@ def _decode_block_cached(
     derived = DERIVED_METRICS.get(metric)
     if derived is not None:
         start = block_idx * BLOCK_SIZE
-        stop = min(start + BLOCK_SIZE, index.count)
+        stop = start + n_block
         if derived.needs_reference:
             lead = min(CONTEXT_FRAMES, start)
-            trail = min(CONTEXT_FRAMES, index.count - stop)
+            trail = min(CONTEXT_FRAMES, total - stop)
             bases = [
                 _base_with_context(
                     path, index, block_idx, m, lead, trail, reference,
@@ -463,7 +471,7 @@ def _decode_block_cached(
         return block
 
     block_start = block_idx * BLOCK_SIZE
-    block_end = min(block_start + BLOCK_SIZE, index.count)
+    block_end = block_start + n_block
     block_ids = np.arange(block_start, block_end)
     amp, phase, ratio_amp, ratio_phase = decode_frames(
         path, index, block_ids, interpolate=interpolate
@@ -476,10 +484,9 @@ def _decode_block_cached(
         "csi_ratio_phase": ratio_phase,
     }
     for m, arr in _metrics.items():
-        _block_cache.put(
-            (str(path), m, block_idx, _block_frame_count(index, block_idx), interpolate),
-            arr,
-        )
+        # Same n_block the key above was built from, so what the key promises
+        # and what the array holds cannot diverge.
+        _block_cache.put((str(path), m, block_idx, n_block, interpolate), arr)
     with _block_cache._lock:
         _block_cache.frames_decoded += len(block_ids)
 
@@ -585,12 +592,16 @@ def _decode_via_blocks(
             interpolate=interpolate,
         )
 
-        # How many of our frame_ids fall in this block?
-        block_end = min(block_start + BLOCK_SIZE, index.count)
-        avail = block_end - fid
-        take = min(avail, n - pos)
-
+        # How many of our frame_ids fall in this block? Bounded by what the
+        # block actually holds, not by index.count, which another request may
+        # have moved since these frame_ids were chosen.
         local_start = fid - block_start
+        avail = len(block) - local_start
+        take = min(avail, n - pos)
+        if take <= 0:
+            # The capture shrank under us; return the rows that are still real.
+            return out[:pos]
+
         out[pos : pos + take] = block[local_start : local_start + take]
         pos += take
 
@@ -813,7 +824,16 @@ def _decode_for_doppler(
         )
         start = block_idx * BLOCK_SIZE
         wanted = frame_ids[(frame_ids >= start) & (frame_ids < start + BLOCK_SIZE)]
-        rows.append(block[wanted - start])
+        # frame_ids was taken from an earlier observation of the index. If the
+        # capture shrank since -- a replaced or truncated live file rebuilds the
+        # index from scratch -- ids past the end of the block no longer refer to
+        # anything. Drop them rather than raising: the window is a frame or two
+        # short for one poll, and the next one sees the rebuilt capture.
+        wanted = wanted[wanted - start < len(block)]
+        if wanted.size:
+            rows.append(block[wanted - start])
+    if not rows:
+        return np.empty((0, index.num_subcarriers), dtype=np.float32)
     return np.concatenate(rows, axis=0)
 
 
