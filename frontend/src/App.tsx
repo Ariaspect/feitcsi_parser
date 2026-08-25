@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
+import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -86,6 +87,10 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
+  // A default applies until the user overrides it. Without this, picking 'all'
+  // deliberately and then loading another capture would snap the selection
+  // back to 2x1 and quietly fight the user.
+  const mimoTouched = useRef(false);
   const [sourceMac, setSourceMac] = useState<string>(DEFAULT_SOURCE_MAC);
   // Linear interpolation of gaps in both axes: structural nulls (pilots,
   // DC/guard band) along subcarrier, and sampling gaps along time. On by
@@ -209,6 +214,9 @@ export function App() {
         setSourceMac((prev) =>
           prev === "all" || f.source_macs.includes(prev) ? prev : "all",
         );
+        // Same honesty check for MIMO, plus a convenience default. See
+        // filters.ts for why a default stops applying once the user chooses.
+        setMimo((prev) => pickMimo(prev, f.mimo_modes, mimoTouched.current));
       })
       .catch(() => {});
     return () => {
@@ -313,7 +321,10 @@ export function App() {
             <Label htmlFor="mimo" className="text-[10px] text-muted-foreground uppercase tracking-wide">MIMO</Label>
             <Select
               value={mimo}
-              onValueChange={(v) => setMimo(v ?? "all")}
+              onValueChange={(v) => {
+                mimoTouched.current = true;
+                setMimo(v ?? "all");
+              }}
               items={mimoItems}
               disabled={!filters || filters.mimo_modes.length <= 1}
             >
