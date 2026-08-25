@@ -31,6 +31,9 @@ const DEFAULT_REFRESH_MS = 300;
 // Characters the capture trigger can show at w-72 / text-sm. Every capture
 // name in the repo fits whole; longer nested ones lose their middle.
 const CAPTURE_NAME_CHARS = 30;
+// The dropdown list is allowed to grow past the trigger, so it can afford a
+// much longer name before eliding.
+const CAPTURE_LIST_CHARS = 44;
 const DARK_KEY = "feitcsi-dark";
 
 // Preferred transmitter to show on load. 'all' interleaves every sender in
@@ -248,7 +251,10 @@ export function App() {
   };
 
   const captureItems = (captures ?? []).map((c) => ({
-    label: `${c.filename}  (${formatBytes(c.size_bytes)})`,
+    // The list gets far more room than the trigger (the popup sizes to its
+    // content below), so it shows the size too and only elides a name long
+    // enough to beat even that.
+    label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
     value: c.path,
   }));
 
@@ -291,7 +297,18 @@ export function App() {
                   }}
                 </SelectValue>
               </SelectTrigger>
-              <SelectContent>
+              {/* The shared popup is pinned to the trigger width
+                  (w-(--anchor-width)) with overflow-x-hidden, which clipped
+                  every capture label. Widths are set inline rather than by
+                  class so they beat that rule outright instead of depending on
+                  how twMerge resolves two width utilities. */}
+              <SelectContent
+                style={{
+                  width: "auto",
+                  minWidth: "var(--anchor-width)",
+                  maxWidth: "min(34rem, calc(100vw - 2rem))",
+                }}
+              >
                 <SelectGroup>
                   {captureItems.map((item) => (
                     <SelectItem key={item.value} value={item.value}>
