@@ -42,3 +42,28 @@ def mixed_geometry_file(tmp_path: Path) -> Path:
     target = tmp_path / "mixed.dat"
     target.write_bytes(bytes(data))
     return target
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _allow_tmp_capture_root(tmp_path_factory: pytest.TempPathFactory):
+    """Let the API read fixtures built under pytest's temp directory.
+
+    ``resolve_capture_path`` confines reads to ``backend.app.capture_roots()``.
+    Most fixtures here are synthesised into ``tmp_path`` rather than dropped in
+    the real ``captures/``, so the temp root is registered for the test session
+    the same way a deployment would register a data mount.
+    """
+    import os
+
+    from backend.app import ROOTS_ENV_VAR
+
+    base = str(tmp_path_factory.getbasetemp())
+    previous = os.environ.get(ROOTS_ENV_VAR)
+    os.environ[ROOTS_ENV_VAR] = base if not previous else f"{previous}{os.pathsep}{base}"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(ROOTS_ENV_VAR, None)
+        else:
+            os.environ[ROOTS_ENV_VAR] = previous
