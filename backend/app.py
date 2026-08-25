@@ -13,7 +13,14 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from .stream import get_stream
-from .tiles import TILE_METRICS, compute_tile, get_index, reset_tile_caches
+from .tiles import (
+    DOPPLER_METRICS,
+    TILE_METRICS,
+    compute_doppler,
+    compute_tile,
+    get_index,
+    reset_tile_caches,
+)
 from .index import parse_mac_filter, parse_mimo_filter
 
 DEFAULT_PATH = "captures/capture.dat"
@@ -49,6 +56,16 @@ app.add_middleware(
         "X-Tile-PLow",
         "X-Tile-PHigh",
         "X-Tile-Filled",
+        "X-Doppler-Width",
+        "X-Doppler-Height",
+        "X-Doppler-Fs",
+        "X-Doppler-FMax",
+        "X-Doppler-Win",
+        "X-Doppler-Hop",
+        "X-Doppler-WinSeconds",
+        "X-Doppler-Frames",
+        "X-Doppler-ColT0",
+        "X-Doppler-ColT1",
     ],
 )
 
@@ -327,6 +344,79 @@ def tile(
             "X-Tile-PLow": str(meta["p_low"]),
             "X-Tile-PHigh": str(meta["p_high"]),
             "X-Tile-Filled": str(meta["filled_columns"]),
+        },
+    )
+
+
+@app.get("/api/doppler")
+def doppler(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    metric: str = Query("amplitude", description=f"One of: {', '.join(DOPPLER_METRICS)}"),
+    win_seconds: float = Query(30.0, gt=0, le=600, description="STFT window length in seconds"),
+    overlap: float = Query(0.5, ge=0.0, lt=1.0, description="Window overlap fraction"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> Response:
+    """Subcarrier-averaged Doppler spectrogram, as raw little-endian float32.
+
+    The body is a bare ``(win // 2 + 1, n_windows)`` array, row-major, row 0 =
+    highest Doppler frequency -- the same row order ``/api/tile`` uses, so the
+    same client-side renderer draws it.
+
+    The frequency axis runs 0 to ``X-Doppler-FMax`` and is **one-sided**:
+    amplitude and unwrapped phase are real signals, so their spectra are
+    conjugate-symmetric and the sign of the Doppler shift is not recoverable.
+    Approaching and receding motion are indistinguishable here.
+
+    ``X-Doppler-Fs`` is the capture's own median frame rate over the frames in
+    range, so ``FMax`` is this file's true Nyquist rather than a function of
+    any requested width. Motion above it aliases: at 5 GHz a 1 m/s movement
+    sits near 33 Hz, well above every capture this was built against.
+    """
+    p = resolve_capture_path(path)
+
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        spec, meta = compute_doppler(
+            p, t0, t1, metric,
+            win_seconds=win_seconds,
+            overlap=overlap,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+        )
+    except ValueError as exc:
+        # Bad metric, or a window the requested range cannot hold. Both are
+        # the caller's parameters rather than a server fault.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return Response(
+        content=spec.astype("<f4", copy=False).tobytes(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Doppler-Width": str(spec.shape[1]),
+            "X-Doppler-Height": str(spec.shape[0]),
+            "X-Doppler-Fs": str(meta["fs"]),
+            "X-Doppler-FMax": str(meta["f_max"]),
+            "X-Doppler-Win": str(meta["win"]),
+            "X-Doppler-Hop": str(meta["hop"]),
+            "X-Doppler-WinSeconds": str(meta["win_seconds"]),
+            "X-Doppler-Frames": str(meta["frames_used"]),
+            "X-Doppler-ColT0": str(meta["col_t0"]),
+            "X-Doppler-ColT1": str(meta["col_t1"]),
+            "X-Capture-TMin": str(meta["t_min"]),
+            "X-Capture-TMax": str(meta["t_max"]),
+            "X-Tile-VMin": str(meta["vmin"]),
+            "X-Tile-VMax": str(meta["vmax"]),
+            "X-Tile-PLow": str(meta["p_low"]),
+            "X-Tile-PHigh": str(meta["p_high"]),
         },
     )
 
