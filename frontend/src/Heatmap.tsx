@@ -38,6 +38,23 @@ interface HeatmapProps {
    * (scMin/scMax, halfN), different physical meaning, so only the label
    * changes. */
   axisLabel?: string;
+  /** Maps the row axis onto physical units for labelling, as
+   *  `[valueAtBottomRow, valueAtTopRow]` at full extent. Omit to label rows by
+   *  their centred index, which is what every subcarrier panel wants. The
+   *  Doppler panels pass `[0, fMax]` to get a hertz axis without this
+   *  component needing to know what a hertz is. Zooming still works: ticks
+   *  stay in row units internally and are converted only for display. */
+  yDomain?: [number, number];
+  /** Fetches the grid for a view. Defaults to /api/tile via fetchTile. The
+   *  Doppler panels pass a fetchDoppler-backed function instead — the two
+   *  endpoints take different parameters but return the same binary contract,
+   *  so the seam is a function rather than another metric name. */
+  source?: (
+    t0: number,
+    t1: number,
+    width: number,
+    signal: AbortSignal,
+  ) => Promise<Tile>;
   /** Link between stacked heatmaps' time axes. When the user zooms or resets
    * one plot, the other mirrors the time window (but not the subcarrier band).
    * Omit for a standalone heatmap. */
@@ -102,6 +119,13 @@ interface PropsMirror {
   palette: readonly string[];
   height: number;
   axisLabel: string;
+  yDomain?: [number, number];
+  source?: (
+    t0: number,
+    t1: number,
+    width: number,
+    signal: AbortSignal,
+  ) => Promise<Tile>;
   timeLink?: TimeLink;
   mimo?: string | null;
   sourceMac?: string | null;
@@ -140,6 +164,8 @@ export function Heatmap({
   palette = VIRIDIS,
   height = 400,
   axisLabel = "Subcarrier bin",
+  yDomain,
+  source,
   timeLink,
   mimo,
   sourceMac,
@@ -211,6 +237,8 @@ export function Heatmap({
     palette,
     height,
     axisLabel,
+    yDomain,
+    source,
     timeLink,
     mimo,
     sourceMac,
@@ -492,11 +520,25 @@ export function Heatmap({
         .domain([view.scMin, view.scMax])
         .range([plot.y + plot.h, plot.y]);
       const scFmt = scScale.tickFormat(6);
+      // With a yDomain the row index is an implementation detail: convert each
+      // tick to the physical unit before drawing it. Doppler's interesting
+      // band is the bottom few percent of the axis, so labels carry enough
+      // decimals to stay distinct once zoomed in.
+      const rowsFull = 2 * props.halfN;
+      const fmtRow = (sc: number): string => {
+        if (!props.yDomain) return scFmt(sc);
+        const [lo, hi] = props.yDomain;
+        const frac = rowsFull > 1 ? (sc + props.halfN) / (rowsFull - 1) : 0;
+        const value = lo + (hi - lo) * frac;
+        const span = Math.abs((hi - lo) * ((view.scMax - view.scMin) / rowsFull));
+        const decimals = span >= 100 ? 0 : span >= 10 ? 1 : span >= 1 ? 2 : 3;
+        return value.toFixed(decimals);
+      };
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       for (const sc of scScale.ticks(6)) {
         const y = scScale(sc);
-        ctx.fillText(scFmt(sc), plot.x - 6, y);
+        ctx.fillText(fmtRow(sc), plot.x - 6, y);
         ctx.beginPath();
         ctx.moveTo(plot.x, y);
         ctx.lineTo(plot.x - 4, y);
@@ -750,17 +792,19 @@ export function Heatmap({
       const seq = ++seqRef.current;
 
       try {
-        const tile = await fetchTile(
-          props.path,
-          t0,
-          t1,
-          width,
-          props.metric,
-          controller.signal,
-          props.mimo,
-          props.sourceMac,
-          props.interpolate,
-        );
+        const tile = props.source
+          ? await props.source(t0, t1, width, controller.signal)
+          : await fetchTile(
+              props.path,
+              t0,
+              t1,
+              width,
+              props.metric,
+              controller.signal,
+              props.mimo,
+              props.sourceMac,
+              props.interpolate,
+            );
         // Drop stale responses — a newer request may have been issued while
         // this one was in flight. Aborting alone is not sufficient: the fetch
         // can still resolve between abort() and the abort taking effect.
