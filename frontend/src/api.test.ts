@@ -266,7 +266,7 @@ describe("fetchDoppler", () => {
   });
 
   it("sends win_seconds and the filter params", async () => {
-    const spy = vi.fn(async () => dopplerResponse(4, 5));
+    const spy = vi.fn(async (_url: string) => dopplerResponse(4, 5));
     vi.stubGlobal("fetch", spy);
     await fetchDoppler("c.dat", 1, 2, "amplitude", 45, undefined, "2x2", "aa:bb");
     const url = String(spy.mock.calls[0][0]);
