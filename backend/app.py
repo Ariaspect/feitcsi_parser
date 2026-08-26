@@ -12,11 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
     DOPPLER_METRICS,
     TILE_METRICS,
     compute_doppler,
+    compute_presence,
     compute_tile,
     get_index,
     reset_tile_caches,
@@ -442,6 +444,115 @@ def doppler(
             "X-Tile-PHigh": str(meta["p_high"]),
         },
     )
+
+
+def _nullable(values: np.ndarray) -> list[float | None]:
+    """Serialise a float array with non-finite entries as JSON ``null``.
+
+    ``json.dumps`` writes a bare ``NaN``, which is not JSON and which
+    ``JSON.parse`` rejects outright -- so a single blanked window would take
+    the whole response down. ``null`` is also the right thing for a chart to
+    receive: it draws a break in the line rather than a zero, which is exactly
+    what a window with no verdict should look like.
+    """
+    return [float(v) if np.isfinite(v) else None for v in np.asarray(values, dtype=float)]
+
+
+@app.get("/api/presence")
+def presence(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    channel: str = Query("complex", description=f"One of: {', '.join(CHANNELS)}"),
+    window_seconds: float = Query(12.0, gt=0, le=600, description="Analysis window length in seconds; clamped to the range if longer"),
+    hop_seconds: float = Query(1.0, gt=0, le=60, description="Step between windows in seconds"),
+    rpm_lo: float = Query(9.0, gt=0, le=120, description="Slowest breathing rate considered"),
+    rpm_hi: float = Query(30.0, gt=0, le=120, description="Fastest breathing rate considered"),
+    bandpass_lo: float = Query(0.1, gt=0, le=5, description="Bandpass low edge (Hz)"),
+    bandpass_hi: float = Query(0.6, gt=0, le=5, description="Bandpass high edge (Hz)"),
+    motion_frac_lo: float = Query(0.10, gt=0, le=5, description="Fractional channel change below which the motion gate is fully open"),
+    motion_frac_hi: float = Query(0.25, gt=0, le=5, description="Fractional channel change above which a window counts as gross motion"),
+    max_gap_fraction: float = Query(0.5, gt=0.0, le=1.0, description="Report a window as unknown once more than this fraction of it is interpolated across dropouts"),
+    smooth_windows: int = Query(3, ge=1, le=51, description="Windows averaged when smoothing the score"),
+    present_threshold: float = Query(0.25, ge=0.0, le=1.0, description="Score above which a still occupant is reported"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """Motion level and static-presence verdicts over a time range, as JSON.
+
+    One entry per analysis window in each series, on the capture's own clock,
+    so the result drops straight onto the time axis the heatmaps share.
+
+    JSON rather than the binary framing ``/api/tile`` and ``/api/doppler`` use:
+    the payload is a handful of scalar series a few hundred entries long, not
+    a grid, so binary would save nothing worth the loss of being able to read
+    a response.
+
+    ``state`` is the verdict per window and is the only field a caller needs
+    to draw the strip; everything else is the evidence it was built from.
+    ``unknown`` marks windows assembled mostly from samples interpolated
+    across a capture dropout -- those report no score and no rate, because the
+    alternative is reporting invented data as an empty room.
+
+    **Filter by source MAC.** Frames from different transmitters are different
+    channels, and interleaving two of them makes consecutive samples alternate
+    between unrelated propagation paths. Measured on captures/capture.dat,
+    that lifts the fractional motion level from 0.37-0.47 per transmitter to
+    0.53 mixed -- decorrelation read as movement.
+    """
+    p = resolve_capture_path(path)
+
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = compute_presence(
+            p, t0, t1,
+            channel=channel,
+            window_seconds=window_seconds,
+            hop_seconds=hop_seconds,
+            rate_band_rpm=(rpm_lo, rpm_hi),
+            bandpass_hz=(bandpass_lo, bandpass_hi),
+            motion_frac_lo=motion_frac_lo,
+            motion_frac_hi=motion_frac_hi,
+            max_gap_fraction=max_gap_fraction,
+            smooth_windows=smooth_windows,
+            present_threshold=present_threshold,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+        )
+    except ValueError as exc:
+        # A band the capture's rate cannot reach, a window too short for the
+        # rate band, an empty range: all the caller's parameters rather than
+        # a server fault.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "state": result["state"],
+        "score": _nullable(result["score"]),
+        "periodicity": _nullable(result["periodicity"]),
+        "tonality": _nullable(result["tonality"]),
+        "motion_gate": _nullable(result["motion_gate"]),
+        "motion_level": _nullable(result["motion_level"]),
+        "rate_rpm": _nullable(result["rate_rpm"]),
+        "unknown": [bool(v) for v in result["unknown"]],
+        "fs_hz": result["fs_hz"],
+        "win": result["win"],
+        "hop": result["hop"],
+        "window_seconds": result["window_seconds"],
+        "rpm_floor_eff": result["rpm_floor_eff"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
+        "params": result["params"],
+        "warnings": result["warnings"],
+    }
 
 
 @app.get("/api/health")

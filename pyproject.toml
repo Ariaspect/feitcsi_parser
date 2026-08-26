@@ -11,6 +11,9 @@ dependencies = [
     "CSIKit>=2.5",
     "fastapi>=0.115",
     "numpy>=1.26",
+    # backend.presence needs butter/filtfilt for the respiration bandpass.
+    # It arrives with CSIKit today, but importing it directly makes it ours.
+    "scipy>=1.11",
     "uvicorn[standard]>=0.30",
 ]
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
+import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
 import { Button } from "@/components/ui/button";
@@ -490,6 +491,7 @@ export function App() {
             <TabsList>
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
+              <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -726,6 +728,18 @@ export function App() {
                   </div>
                 )}
               </div>
+            </TabsContent>
+
+            <TabsContent value="presence">
+              <Presence
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
             </TabsContent>
           </Tabs>
         ) : (
