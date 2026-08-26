@@ -8,13 +8,23 @@ motion of a few millimetres at 0.2-0.5 Hz. So "loud" and "quiet" alone cannot
 tell an empty room from a sleeping one; the quiet case has to be decided on
 *periodicity*, not on energy.
 
-That is the whole shape of this module: a dimensionless motion level answers
-"is anything happening", and a windowed autocorrelation of the CSI ratio
-answers "is what is happening a chest". The maths is a port of the detector in
-the BFI_Raspberry project (``bfi_core.breathing_score``), which ran on
-beamforming-feedback V matrices; the arithmetic carries over unchanged because
-both pipelines end up holding the same thing -- a complex per-subcarrier
-channel ratio sampled over time.
+That is the shape of this module, on three axes rather than two. A
+dimensionless motion level answers "is anything happening". The *channel
+offset* from a known-empty reference answers "is the room different from when
+it was empty" -- which is what a motionless body actually produces: it does
+not modulate the channel, it displaces it. And a windowed autocorrelation
+answers "is any of this a chest", reported as evidence beside the verdict
+rather than as the verdict itself.
+
+The autocorrelation maths is a port of the detector in the BFI_Raspberry
+project (``bfi_core.breathing_score``), which ran on beamforming-feedback V
+matrices; the arithmetic carries over unchanged because both pipelines end up
+holding the same thing -- a complex per-subcarrier channel ratio sampled over
+time. What did not carry over is the idea that it could decide occupancy on
+its own. Measured on captures/lg_csi_captures/20260825/20260825_185637.bin --
+a deliberate walk-in, sit-still, walk-out -- periodicity ran *higher* in the
+empty room (0.102) than with the occupant sitting still (0.076), so a branch
+that votes on it alone votes wrong. It reports a rate; it does not decide.
 
 Three things differ here, and each one matters:
 
@@ -31,15 +41,25 @@ Three things differ here, and each one matters:
   the one answer it must never invent: "empty room". Here a window that is
   mostly fabricated is reported as ``unknown`` and never as ``empty``.
 
-* **Absence is a claim, so it is gated.** Every window carries the pieces the
-  verdict was built from -- periodicity, tonality, motion gate, motion level --
-  so a caller can always see *why* a stretch was called empty rather than
-  taking the word for it.
+* **Absence is a claim, so it needs a reference.** ``empty`` means "matched a
+  room known to be empty", and without a stretch of capture the caller has
+  named as empty there is nothing to match -- so every non-moving window comes
+  back ``unknown`` instead. This is not caution for its own sake: the same
+  capture above returned ``empty`` for all 584 of its windows under the
+  previous design, occupant and all. Every window also carries the pieces the
+  verdict was built from -- channel offset, motion level and its multiple of
+  the room's floor, periodicity, tonality, motion gate -- so a caller can
+  always see *why*.
 
 What this can see, and cannot: respiration at 9-30 rpm needs a sample rate
 above ~1 Hz, and these captures run 5-18 Hz, so the band is comfortably in
 reach. Heartbeat (0.8-2 Hz, ~0.5 mm) is not attempted -- it sits under
 respiration harmonics and would need an SNR this pipeline does not have.
+Neither is a sleeper whose displacement the reference already contains: if the
+reference range was recorded with them in it, they *are* the empty room as far
+as this module is concerned. The reference has to come from a stretch that was
+genuinely empty, which is a fact about the world and not one the data can
+supply.
 """
 
 from __future__ import annotations
@@ -60,7 +80,13 @@ CHANNELS = ("complex", "phase", "magnitude")
 # Defaults carried over from bfi_core, where they were tuned against labelled
 # walk-in / sit-still / walk-out captures. They are a starting point on raw
 # CSI, not a calibration: nothing here has been fitted to this hardware.
-DEFAULT_WINDOW_SECONDS = 12.0
+# 30 s rather than the 12 s carried over from bfi_core. ``lag_hi`` below caps
+# the slowest reachable rate at ``120 / window_seconds`` rpm, so a 12 s window
+# reaches only 10 rpm -- above a resting adult's 11-15 rpm, and above the 9 rpm
+# this module advertises by default, which is why every call at the old
+# default emitted a rate-floor warning. 30 s reaches 4 rpm. The hop is
+# unchanged, so the strip keeps its one-second resolution.
+DEFAULT_WINDOW_SECONDS = 30.0
 DEFAULT_HOP_SECONDS = 1.0
 DEFAULT_RATE_BAND_RPM = (9.0, 30.0)
 DEFAULT_BANDPASS_HZ = (0.1, 0.6)
@@ -70,6 +96,33 @@ DEFAULT_TONALITY_FLAT_LO = 0.5
 DEFAULT_TONALITY_FLAT_HI = 0.95
 DEFAULT_SMOOTH_WINDOWS = 3
 DEFAULT_PRESENT_THRESHOLD = 0.25
+
+# How far a window's channel state must sit from the empty-room reference
+# before a still occupant is claimed, in units of how much that same empty
+# room wandered on its own (``dev_p95``). Expressing it that way is what makes
+# one number work across radios: the absolute deviation that means "occupied"
+# is a property of the room and the hardware, the *ratio* to the room's own
+# variability is not. Measured on
+# captures/lg_csi_captures/20260825/20260825_185637.bin, a reference taken
+# from the empty tail has dev_p95 = 0.62 dB while an occupant sitting still
+# reads 2.32 dB at the 5th percentile -- 3.75x -- so 3.0 separates them with
+# margin on both sides.
+DEFAULT_BASELINE_DEV_K = 3.0
+
+# Gross motion as a multiple of the room's own fractional-motion floor. The
+# absolute test alone cannot do this job: on the capture above the floor is
+# 0.069 and a walk-through peaks at 0.185, so the 0.25 absolute threshold
+# never fired while the walk was 2.7x the floor.
+DEFAULT_MOTION_RATIO_HI = 2.0
+
+# The in-band weight compares respiration-band power against a shoulder just
+# outside the band on *both* sides, spanning these multiples of the band
+# edges. Weighting against everything above the band instead -- which is what
+# this did -- measures 1/f drift rather than a chest, because drift is
+# enormous below 0.5 Hz and absent above it. On the capture above that made an
+# empty room outscore an occupied one on periodicity (0.102 against 0.076).
+SHOULDER_LO_FACTOR = 1.0 / 3.0
+SHOULDER_HI_FACTOR = 3.0
 
 # A window blanked once more than this fraction of it was interpolated across
 # a dropout. Same constant and same reasoning as backend.doppler, so the
@@ -161,6 +214,176 @@ def fractional_motion(ratio: np.ndarray) -> np.ndarray:
     if alive.any():
         frac[alive] = np.nanmean(step[alive], axis=1)
     return frac
+
+
+def amplitude_profile(ratio: np.ndarray) -> np.ndarray:
+    """Per-subcarrier median ratio amplitude in dB, over the samples given.
+
+    The *static* state of the channel, which is exactly what every other part
+    of this module throws away: ``channel_from_ratio`` mean-removes each
+    subcarrier so that a constant offset never reaches the autocorrelation. A
+    body parked in a room is a constant offset, so absence and stillness are
+    indistinguishable once the mean is gone, and something has to hold on to
+    it. This is that something.
+
+    Median rather than mean so a burst of movement inside the range does not
+    drag the profile with it -- the profile is meant to describe where the
+    channel *sits*, not how far it travelled.
+
+    dB rather than linear because a multipath displacement is multiplicative:
+    the same body moves a strong subcarrier and a weak one by similar
+    fractions, and only in dB do those become the same number. Kept at full
+    subcarrier width, with NaN where a bin never carried a ratio, so that
+    profiles from two different ranges -- or two different captures -- line up
+    bin for bin.
+    """
+    mag = np.abs(np.asarray(ratio))
+    if mag.ndim != 2:
+        raise ValueError(f"ratio must be 2-D (n_samples, n_sc), got {mag.shape}")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        db = 20.0 * np.log10(np.where(mag > 0.0, mag, np.nan))
+    alive = np.isfinite(db).any(axis=0)
+    profile = np.full(db.shape[1], np.nan, dtype=float)
+    if alive.any():
+        profile[alive] = np.nanmedian(db[:, alive], axis=0)
+    return profile
+
+
+def baseline_deviation(profile: np.ndarray, reference: np.ndarray) -> float:
+    """Mean absolute dB distance between a window's profile and a reference.
+
+    Averaged over the subcarriers finite in *both*, because the two sides need
+    not agree about which bins are alive: a reference taken from another
+    capture, or from a stretch where one transmitter was quiet, carries a
+    different set of structural nulls. Bins missing on either side are
+    dropped rather than filled -- an invented bin would contribute an invented
+    distance, and this number is the whole evidence for a presence claim.
+
+    Returns NaN when nothing is comparable, which the caller must treat as
+    "no verdict" rather than as "no deviation".
+    """
+    profile = np.asarray(profile, dtype=float)
+    reference = np.asarray(reference, dtype=float)
+    if profile.shape != reference.shape:
+        raise ValueError(
+            f"profile {profile.shape} and reference {reference.shape} must match -- "
+            "a reference from a capture with different subcarrier geometry "
+            "cannot be compared bin for bin"
+        )
+    both = np.isfinite(profile) & np.isfinite(reference)
+    if not both.any():
+        return float("nan")
+    return float(np.mean(np.abs(profile[both] - reference[both])))
+
+
+def _weight_from_power(
+    power: np.ndarray, freqs: np.ndarray, band: tuple[float, float]
+) -> np.ndarray:
+    """Per-column in-band power against its own two-sided shoulder.
+
+    See ``SHOULDER_LO_FACTOR``: the denominator has to contain the sub-band
+    drift, or the weight ranks subcarriers by how much they wander rather than
+    by how much of a chest they carry. Falls back to everything above the band
+    when the window is too short to resolve a shoulder below it.
+    """
+    lo, hi = float(band[0]), float(band[1])
+    in_mask = (freqs >= lo) & (freqs <= hi)
+    shoulder = ((freqs >= lo * SHOULDER_LO_FACTOR) & (freqs < lo)) | (
+        (freqs > hi) & (freqs <= hi * SHOULDER_HI_FACTOR)
+    )
+    if not shoulder.any():
+        shoulder = freqs > hi
+    return power[in_mask, :].sum(axis=0) / (power[shoulder, :].sum(axis=0) + 1e-12)
+
+
+def in_band_weight(
+    sig: np.ndarray, fs: float, band: tuple[float, float]
+) -> np.ndarray:
+    """How much respiration-band evidence each subcarrier carries.
+
+    Used to weight subcarriers before their autocorrelations are averaged: a
+    real chest moves them all coherently, so weighting by evidence reinforces
+    the signature while independent noise does not survive the average.
+    """
+    sig = np.asarray(sig)
+    if sig.ndim != 2:
+        raise ValueError(f"sig must be 2-D (n_samples, n_sc), got {sig.shape}")
+    n = sig.shape[0]
+    sig = np.nan_to_num(sig - np.nanmean(sig, axis=0, keepdims=True))
+    taper = np.hanning(n)[:, None]
+    if np.iscomplexobj(sig):
+        power = np.abs(np.fft.fft(sig * taper, axis=0)) ** 2
+        freqs = np.abs(np.fft.fftfreq(n, d=1.0 / fs))
+    else:
+        power = np.abs(np.fft.rfft(sig * taper, axis=0)) ** 2
+        freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    return _weight_from_power(power, freqs, band)
+
+
+def presence_reference(
+    ratio: np.ndarray,
+    fs: float,
+    *,
+    window_seconds: float = DEFAULT_WINDOW_SECONDS,
+    hop_seconds: float = DEFAULT_HOP_SECONDS,
+) -> dict[str, Any]:
+    """Reduce a stretch of known-empty capture to what a verdict needs.
+
+    Three numbers, each with one job. ``profile`` is what a window's channel
+    state is compared against. ``dev_p95`` is how far the empty room's own
+    windows strayed from that profile, which is the unit the presence
+    threshold is expressed in -- an absolute dB threshold would have to be
+    re-tuned per radio and per room, a multiple of the room's own wander does
+    not. ``motion_floor`` is the fractional-motion noise floor here, which is
+    emphatically not zero: 0.069 on
+    captures/lg_csi_captures/20260825/20260825_185637.bin.
+
+    The caller names the range. Deriving it instead -- taking the quietest
+    stretch of the range under analysis -- was tried and does not work: a
+    reference built from recent history absorbs an occupant who sits still for
+    a few minutes, and then reports the room as empty precisely while it is
+    not. Measured on the capture above with a 180 s lookback, the metric
+    inverts outright (1.51 dB occupied against 2.23 dB empty). An empty room
+    is a fact about the world, so it has to come from outside the data.
+    """
+    ratio = np.asarray(ratio)
+    if ratio.ndim != 2:
+        raise ValueError(f"ratio must be 2-D (n_samples, n_sc), got {ratio.shape}")
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError(f"fs must be positive and finite, got {fs}")
+
+    profile = amplitude_profile(ratio)
+    if not np.isfinite(profile).any():
+        raise ValueError("no subcarrier in the reference range carries a CSI ratio")
+
+    n_samples = ratio.shape[0]
+    win = min(max(MIN_WINDOW_SAMPLES, int(round(window_seconds * fs))), n_samples)
+    hop = max(1, int(round(hop_seconds * fs)))
+    frac_full = fractional_motion(ratio)
+
+    devs, levels = [], []
+    for start in range(0, n_samples - win + 1, hop):
+        devs.append(baseline_deviation(amplitude_profile(ratio[start : start + win]), profile))
+        seg = frac_full[start : start + win - 1]
+        if seg.size and np.isfinite(seg).any():
+            levels.append(float(np.nanmedian(seg)))
+
+    dev_a = np.asarray(devs, dtype=float)
+    level_a = np.asarray(levels, dtype=float)
+    finite_dev = dev_a[np.isfinite(dev_a)]
+    finite_lvl = level_a[np.isfinite(level_a)]
+    if finite_dev.size == 0 or finite_lvl.size == 0:
+        raise ValueError("the reference range holds no measurable window")
+
+    return {
+        "profile": profile,
+        # A floor under both, so a pathologically quiet reference cannot make
+        # every later window look like an occupant by dividing by nothing.
+        "dev_p95": max(float(np.percentile(finite_dev, 95)), 1e-3),
+        "motion_floor": max(float(np.median(finite_lvl)), 1e-6),
+        "n_windows": int(finite_dev.size),
+        "window_seconds": float(win / fs),
+    }
 
 
 def channel_from_ratio(ratio: np.ndarray, channel: str) -> np.ndarray:
@@ -270,34 +493,59 @@ def moving_average(y: np.ndarray, k: int) -> np.ndarray:
 
 
 def classify(
-    score: np.ndarray,
     motion_level: np.ndarray,
     unknown: np.ndarray,
     *,
-    present_threshold: float = DEFAULT_PRESENT_THRESHOLD,
+    baseline_dev: np.ndarray | None = None,
+    motion_ratio: np.ndarray | None = None,
+    baseline_dev_threshold: float | None = None,
     motion_frac_hi: float = DEFAULT_MOTION_FRAC_HI,
+    motion_ratio_hi: float = DEFAULT_MOTION_RATIO_HI,
 ) -> list[str]:
     """Reduce the per-window quantities to one verdict each.
 
     Order is the whole content of this function. ``unknown`` is tested first
     because a window built mostly from invented samples has no verdict to
     give, and the failure that matters is reporting it as ``empty``. Motion is
-    tested next: a walking person is present regardless of whether a chest
-    signature survived the disturbance, so gross motion decides on its own.
-    Only then does the breathing score get to speak, and ``empty`` is what is
-    left when nothing else claimed the window -- the weakest claim, made last.
+    tested next: a walking person is present regardless of what their channel
+    offset looks like, so gross motion decides on its own, and it decides on
+    either the absolute fractional change or its multiple of the room's own
+    floor -- whichever fires, because the absolute one demonstrably does not
+    fire on every radio. Only then does the channel offset get to speak.
+
+    ``empty`` is the weakest claim and is made last, and only when there is a
+    reference to make it against. Without one this returns ``unknown`` for
+    every window that is not moving: absence measured against nothing is not a
+    measurement. The breathing score is not consulted at all -- it is
+    evidence, reported alongside, and it does not vote.
     """
-    score = np.asarray(score, dtype=float)
     motion_level = np.asarray(motion_level, dtype=float)
     unknown = np.asarray(unknown, dtype=bool)
+    n = motion_level.size
+
+    dev = (
+        np.full(n, np.nan)
+        if baseline_dev is None
+        else np.asarray(baseline_dev, dtype=float)
+    )
+    ratio = (
+        np.full(n, np.nan)
+        if motion_ratio is None
+        else np.asarray(motion_ratio, dtype=float)
+    )
+    referenced = baseline_dev_threshold is not None and np.isfinite(
+        baseline_dev_threshold
+    )
 
     states: list[str] = []
-    for s, m, u in zip(score, motion_level, unknown):
+    for m, u, d, r in zip(motion_level, unknown, dev, ratio):
         if u or not np.isfinite(m):
             states.append(STATE_UNKNOWN)
-        elif m > motion_frac_hi:
+        elif m > motion_frac_hi or (np.isfinite(r) and r > motion_ratio_hi):
             states.append(STATE_MOVING)
-        elif np.isfinite(s) and s > present_threshold:
+        elif not referenced or not np.isfinite(d):
+            states.append(STATE_UNKNOWN)
+        elif d > baseline_dev_threshold:
             states.append(STATE_PRESENT)
         else:
             states.append(STATE_EMPTY)
@@ -321,6 +569,9 @@ def presence_windows(
     max_gap_fraction: float = DEFAULT_MAX_GAP_FRACTION,
     smooth_windows: int = DEFAULT_SMOOTH_WINDOWS,
     present_threshold: float = DEFAULT_PRESENT_THRESHOLD,
+    reference: dict[str, Any] | None = None,
+    baseline_dev_k: float = DEFAULT_BASELINE_DEV_K,
+    motion_ratio_hi: float = DEFAULT_MOTION_RATIO_HI,
 ) -> dict[str, Any]:
     """Sliding-window motion and breathing analysis of a uniformly sampled ratio.
 
@@ -383,7 +634,11 @@ def presence_windows(
                 f"fabricated must be 1-D of length {n_samples}, got {fab.shape}"
             )
 
-    # Structural nulls out before anything averages across subcarriers.
+    # Profiles are taken at full subcarrier width, before the dead bins are
+    # dropped: a reference and a window must line up bin for bin, and the two
+    # need not agree about which bins are dead. Everything downstream of here
+    # averages across subcarriers and so works on the live subset instead.
+    ratio_full = ratio
     live = live_subcarriers(ratio)
     if not live.any():
         raise ValueError("no subcarrier in this range carries a CSI ratio")
@@ -436,7 +691,6 @@ def presence_windows(
     else:
         freqs = np.fft.rfftfreq(win, d=1.0 / fs)
     band_mask = (freqs >= band_lo_hz) & (freqs <= band_hi_hz)
-    out_mask = freqs > band_hi_hz
     if not band_mask.any():
         raise ValueError(
             f"a {win / fs:.1f} s window resolves {fs / win:.3f} Hz, too coarse to "
@@ -447,6 +701,9 @@ def presence_windows(
     starts = range(0, n_samples - win + 1, hop)
     centres, periodicity_l, tonality_l = [], [], []
     motion_gate_l, motion_level_l, rate_l, unknown_l = [], [], [], []
+    baseline_dev_l: list[float] = []
+
+    ref_profile = None if reference is None else np.asarray(reference["profile"])
 
     for start in starts:
         stop = start + win
@@ -462,9 +719,7 @@ def presence_windows(
             power = np.abs(np.fft.fft(seg_raw * taper, axis=0)) ** 2
         else:
             power = np.abs(np.fft.rfft(seg_raw * taper, axis=0)) ** 2
-        band_pow = power[band_mask, :].sum(axis=0)
-        out_pow = power[out_mask, :].sum(axis=0) + 1e-12
-        weight = band_pow / out_pow
+        weight = _weight_from_power(power, freqs, (band_lo_hz, band_hi_hz))
 
         ac = autocorr_columns(seg_bp)
         w_sum = float(weight.sum())
@@ -499,6 +754,12 @@ def presence_windows(
             else 0.0
         )
 
+        baseline_dev_l.append(
+            float("nan")
+            if ref_profile is None
+            else baseline_deviation(amplitude_profile(ratio_full[start:stop]), ref_profile)
+        )
+
         centres.append((start + win / 2.0) / fs)
         periodicity_l.append(periodicity)
         tonality_l.append(tonality)
@@ -513,6 +774,7 @@ def presence_windows(
     motion_level_a = np.asarray(motion_level_l, dtype=float)
     rate_a = np.asarray(rate_l, dtype=float)
     unknown_a = np.asarray(unknown_l, dtype=bool)
+    baseline_dev_a = np.asarray(baseline_dev_l, dtype=float)
 
     score = moving_average(
         periodicity_a * tonality_a * motion_gate_a, int(smooth_windows)
@@ -524,8 +786,30 @@ def presence_windows(
     score[unknown_a] = np.nan
     rate_a[unknown_a] = np.nan
     motion_level_a[unknown_a] = np.nan
+    baseline_dev_a[unknown_a] = np.nan
+
+    # The breathing score is evidence now, not a verdict, and this is the job
+    # ``present_threshold`` keeps: it decides whether the rate this window
+    # found is worth reporting at all. A rate read off an autocorrelation peak
+    # that cleared nothing is a number with no claim behind it, so it is
+    # blanked rather than drawn.
+    breathing_a = np.isfinite(score) & (score > present_threshold)
+    rate_a[~breathing_a] = np.nan
+
+    if reference is None:
+        motion_ratio_a = np.full(motion_level_a.shape, np.nan)
+        dev_threshold: float | None = None
+    else:
+        motion_ratio_a = motion_level_a / float(reference["motion_floor"])
+        dev_threshold = float(baseline_dev_k) * float(reference["dev_p95"])
 
     warnings: list[str] = []
+    if reference is None:
+        warnings.append(
+            "no empty-room reference was given, so absence cannot be measured -- "
+            "every window that is not moving is reported as unknown rather than "
+            "as an empty room"
+        )
     if rpm_floor_eff > rpm_lo * 1.05:
         warnings.append(
             f"a {win / fs:.1f} s window reaches only {rpm_floor_eff:.0f} rpm, not the "
@@ -544,20 +828,33 @@ def presence_windows(
         "tonality": tonality_a,
         "motion_gate": motion_gate_a,
         "motion_level": motion_level_a,
+        "motion_ratio": motion_ratio_a,
+        "baseline_dev": baseline_dev_a,
+        "breathing": breathing_a,
         "rate_rpm": rate_a,
         "unknown": unknown_a,
         "state": classify(
-            score,
             motion_level_a,
             unknown_a,
-            present_threshold=present_threshold,
+            baseline_dev=baseline_dev_a,
+            motion_ratio=motion_ratio_a,
+            baseline_dev_threshold=dev_threshold,
             motion_frac_hi=motion_frac_hi,
+            motion_ratio_hi=motion_ratio_hi,
         ),
         "fs_hz": float(fs),
         "win": int(win),
         "hop": int(hop),
         "window_seconds": float(win / fs),
         "rpm_floor_eff": float(rpm_floor_eff),
+        "baseline_dev_threshold": dev_threshold,
+        "reference": None
+        if reference is None
+        else {
+            "dev_p95": float(reference["dev_p95"]),
+            "motion_floor": float(reference["motion_floor"]),
+            "n_windows": int(reference["n_windows"]),
+        },
         "params": {
             "channel": channel,
             "window_seconds": float(window_seconds),
@@ -571,6 +868,8 @@ def presence_windows(
             "max_gap_fraction": float(max_gap_fraction),
             "smooth_windows": int(smooth_windows),
             "present_threshold": float(present_threshold),
+            "baseline_dev_k": float(baseline_dev_k),
+            "motion_ratio_hi": float(motion_ratio_hi),
         },
         "warnings": warnings,
     }

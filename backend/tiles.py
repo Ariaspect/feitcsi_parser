@@ -1077,40 +1077,26 @@ PRESENCE_METRICS: tuple[str, str] = (
 )
 
 
-def compute_presence(
+def _presence_grid(
     path: Path,
     t0: float,
     t1: float,
     *,
-    channel: str = "complex",
-    window_seconds: float = presence.DEFAULT_WINDOW_SECONDS,
-    hop_seconds: float = presence.DEFAULT_HOP_SECONDS,
-    rate_band_rpm: tuple[float, float] = presence.DEFAULT_RATE_BAND_RPM,
-    bandpass_hz: tuple[float, float] = presence.DEFAULT_BANDPASS_HZ,
-    motion_frac_lo: float = presence.DEFAULT_MOTION_FRAC_LO,
-    motion_frac_hi: float = presence.DEFAULT_MOTION_FRAC_HI,
-    max_gap_fraction: float = DEFAULT_MAX_GAP_FRACTION,
-    smooth_windows: int = presence.DEFAULT_SMOOTH_WINDOWS,
-    present_threshold: float = presence.DEFAULT_PRESENT_THRESHOLD,
-    mimo: tuple[int, int] | None = None,
-    source_mac: str | None = None,
-    interpolate: bool = True,
-) -> dict:
-    """Motion level and static-presence verdicts for a time range.
+    mimo: tuple[int, int] | None,
+    source_mac: str | None,
+    interpolate: bool,
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Decode one time range into the uniform complex ratio the detector wants.
 
-    Returns the ``presence_windows`` result with its window centres moved onto
-    the capture's own clock, plus the metadata a caller needs to draw it.
+    Factored out because the empty-room reference has to travel the same road
+    as the range it is the reference for. A reference decoded any other way --
+    a different filter, a different gap policy, a different sample grid --
+    would differ from the measurement by the decode rather than by the room,
+    and every dB of that difference would read as an occupant.
 
-    Shares ``compute_doppler``'s shape deliberately -- the same index, the same
-    filter mask, the same block cache, the same uniform grid -- so a presence
-    panel and a spectrogram over one window decode the capture once between
-    them, and so the two panels can never disagree about what a dropout is.
-
-    The sample rate comes from the whole filtered capture rather than from the
-    frames in view, for the reason spelled out in ``compute_doppler``: a short
-    slice containing a burst reports a rate the capture never ran at, and
-    every frequency-derived quantity below -- the respiration band, the
-    autocorrelation lags, the reported rate in rpm -- would be scaled by it.
+    Returns the grid, its ``fabricated`` mask, the sample rate, the grid
+    times, the usable frame times, all frame times in the file, and the count
+    of frames that carried no ratio at all.
     """
     index = get_index(path)
     times_all = np.asarray(index.times, dtype=float)
@@ -1156,8 +1142,91 @@ def compute_presence(
     real, fabricated = resample_uniform(times, ratio.real, grid_times, gap_limit)
     imag, _ = resample_uniform(times, ratio.imag, grid_times, gap_limit)
 
-    result = presence.presence_windows(
+    return (
         real + 1j * imag,
+        fabricated,
+        fs,
+        grid_times,
+        times,
+        times_all,
+        int(usable.size - int(usable.sum())),
+    )
+
+
+def compute_presence(
+    path: Path,
+    t0: float,
+    t1: float,
+    *,
+    channel: str = "complex",
+    window_seconds: float = presence.DEFAULT_WINDOW_SECONDS,
+    hop_seconds: float = presence.DEFAULT_HOP_SECONDS,
+    rate_band_rpm: tuple[float, float] = presence.DEFAULT_RATE_BAND_RPM,
+    bandpass_hz: tuple[float, float] = presence.DEFAULT_BANDPASS_HZ,
+    motion_frac_lo: float = presence.DEFAULT_MOTION_FRAC_LO,
+    motion_frac_hi: float = presence.DEFAULT_MOTION_FRAC_HI,
+    max_gap_fraction: float = DEFAULT_MAX_GAP_FRACTION,
+    smooth_windows: int = presence.DEFAULT_SMOOTH_WINDOWS,
+    present_threshold: float = presence.DEFAULT_PRESENT_THRESHOLD,
+    ref_t0: float | None = None,
+    ref_t1: float | None = None,
+    ref_path: Path | None = None,
+    baseline_dev_k: float = presence.DEFAULT_BASELINE_DEV_K,
+    motion_ratio_hi: float = presence.DEFAULT_MOTION_RATIO_HI,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> dict:
+    """Motion level and static-presence verdicts for a time range.
+
+    ``ref_t0``/``ref_t1`` name a stretch of *known-empty* capture, optionally
+    from another file via ``ref_path``. Without them the detector can report
+    motion but never absence -- see ``presence.classify``. The reference is
+    decoded through exactly this same path so that a dropout, a MIMO filter or
+    an interpolation choice cannot mean one thing in the reference and another
+    in the range measured against it.
+
+    Returns the ``presence_windows`` result with its window centres moved onto
+    the capture's own clock, plus the metadata a caller needs to draw it.
+
+    Shares ``compute_doppler``'s shape deliberately -- the same index, the same
+    filter mask, the same block cache, the same uniform grid -- so a presence
+    panel and a spectrogram over one window decode the capture once between
+    them, and so the two panels can never disagree about what a dropout is.
+
+    The sample rate comes from the whole filtered capture rather than from the
+    frames in view, for the reason spelled out in ``compute_doppler``: a short
+    slice containing a burst reports a rate the capture never ran at, and
+    every frequency-derived quantity below -- the respiration band, the
+    autocorrelation lags, the reported rate in rpm -- would be scaled by it.
+    """
+    grid, fabricated, fs, grid_times, times, times_all, n_no_ratio = _presence_grid(
+        path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+    )
+
+    ref_summary = None
+    if ref_t0 is not None or ref_t1 is not None:
+        if ref_t0 is None or ref_t1 is None:
+            raise ValueError("ref_t0 and ref_t1 must be given together")
+        if not ref_t1 > ref_t0:
+            raise ValueError(f"ref_t1 must exceed ref_t0, got {ref_t0} and {ref_t1}")
+        ref_file = path if ref_path is None else ref_path
+        ref_grid, _, ref_fs, _, _, _, _ = _presence_grid(
+            ref_file, ref_t0, ref_t1,
+            mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+        )
+        if ref_grid.shape[1] != grid.shape[1]:
+            raise ValueError(
+                f"the reference range has {ref_grid.shape[1]} subcarriers and this "
+                f"range has {grid.shape[1]} -- profiles cannot be compared bin for bin"
+            )
+        ref_summary = presence.presence_reference(
+            ref_grid, ref_fs,
+            window_seconds=window_seconds, hop_seconds=hop_seconds,
+        )
+
+    result = presence.presence_windows(
+        grid,
         fs,
         fabricated=fabricated,
         channel=channel,
@@ -1170,13 +1239,16 @@ def compute_presence(
         max_gap_fraction=max_gap_fraction,
         smooth_windows=smooth_windows,
         present_threshold=present_threshold,
+        reference=ref_summary,
+        baseline_dev_k=baseline_dev_k,
+        motion_ratio_hi=motion_ratio_hi,
     )
 
     # Window centres arrive relative to the grid; the caller draws them on the
     # capture's clock, shared with every other panel.
     result["time_s"] = grid_times[0] + result["time_s"]
     result["frames_used"] = int(times.size)
-    result["frames_without_ratio"] = int(usable.size - int(usable.sum()))
+    result["frames_without_ratio"] = int(n_no_ratio)
     result["t_min"] = float(times_all[0]) if times_all.size else 0.0
     result["t_max"] = float(times_all[-1]) if times_all.size else 0.0
     return result

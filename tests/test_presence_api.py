@@ -33,6 +33,14 @@ def _full_range(p: Path) -> tuple[float, float]:
     return float(idx.times[0]), float(idx.times[-1])
 
 
+def _presence(p: Path, t0: float, t1: float, **params: float) -> dict:
+    r = TestClient(app).get(
+        "/api/presence", params={"path": str(p), "t0": t0, "t1": t1, **params}
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def test_presence_series_are_aligned_and_on_the_capture_clock() -> None:
     p = _capture_or_skip()
     t0, t1 = _full_range(p)
@@ -201,3 +209,77 @@ def test_motion_level_is_not_a_flat_zero_on_a_real_capture() -> None:
     assert levels.size > 0
     assert levels.max() > 0.0, "a real capture cannot be perfectly static"
     assert levels.std() > 0.0, "and cannot hold one value for its whole length"
+
+
+# --------------------------------------------------------------------------- #
+#  Empty-room reference                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_without_a_reference_no_window_claims_an_empty_room() -> None:
+    """The whole point of the reference: absence stops being free."""
+    capture = _capture_or_skip()
+    body = _presence(capture, 0.0, 20.0)
+
+    assert STATE_EMPTY not in body["state"]
+    assert body["reference"] is None
+    assert body["baseline_dev_threshold"] is None
+    assert all(v is None for v in body["baseline_dev"])
+    assert all(v is None for v in body["motion_ratio"])
+    assert any("reference" in w for w in body["warnings"])
+
+
+def test_a_reference_range_produces_a_threshold_and_a_deviation() -> None:
+    capture = _capture_or_skip()
+    body = _presence(capture, 0.0, 20.0, ref_t0=0.0, ref_t1=20.0)
+
+    ref = body["reference"]
+    assert ref["dev_p95"] > 0.0
+    assert ref["motion_floor"] > 0.0
+    assert ref["n_windows"] > 0
+    assert body["baseline_dev_threshold"] == pytest.approx(3.0 * ref["dev_p95"])
+    assert any(v is not None for v in body["baseline_dev"])
+
+
+def test_a_range_measured_against_itself_is_not_occupied() -> None:
+    """A room cannot be displaced from where it already is."""
+    capture = _capture_or_skip()
+    body = _presence(capture, 0.0, 20.0, ref_t0=0.0, ref_t1=20.0)
+
+    devs = [v for v in body["baseline_dev"] if v is not None]
+    assert max(devs) < body["baseline_dev_threshold"]
+    assert STATE_PRESENT not in body["state"]
+
+
+def test_half_a_reference_range_is_refused() -> None:
+    capture = _capture_or_skip()
+    client = TestClient(app)
+    for params in ({"ref_t0": 0.0}, {"ref_t1": 20.0}):
+        resp = client.get(
+            "/api/presence",
+            params={"path": str(capture), "t0": 0.0, "t1": 20.0, **params},
+        )
+        assert resp.status_code == 400, params
+        assert "together" in resp.json()["detail"]
+
+
+def test_a_backwards_reference_range_is_refused() -> None:
+    capture = _capture_or_skip()
+    resp = TestClient(app).get(
+        "/api/presence",
+        params={
+            "path": str(capture), "t0": 0.0, "t1": 20.0,
+            "ref_t0": 20.0, "ref_t1": 5.0,
+        },
+    )
+    assert resp.status_code == 400
+    assert "must exceed" in resp.json()["detail"]
+
+
+def test_the_breathing_rate_is_only_reported_where_it_is_believed() -> None:
+    capture = _capture_or_skip()
+    body = _presence(capture, 0.0, 20.0)
+
+    for believed, rate in zip(body["breathing"], body["rate_rpm"]):
+        if not believed:
+            assert rate is None
