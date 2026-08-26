@@ -1,11 +1,16 @@
 """Pre-aggregated tile serving for offline capture exploration.
 
 Builds display-resolution grids from arbitrary time ranges of a FeitCSI
-capture. Cost per request is bounded: at most ``TILE_FRAME_BUDGET`` frames are
-decoded, and the output grid has exactly ``width * num_subcarriers`` cells
-regardless of how much of the file the view covers.
+capture. Cost per request is bounded: the output grid never exceeds the
+requested width whatever the view covers, and each chunk of it decodes at most
+``CHUNK_FRAME_BUDGET`` frames.
 
-Two caches keep repeated work cheap:
+Columns are quantised to a fixed lattice rather than derived from the window
+that asked for them -- see "The lattice" below. A tile therefore covers the
+smallest lattice-aligned range containing the request, reports it in
+``meta["t0"]``/``["t1"]``, and leaves the crop to the caller.
+
+Three caches keep repeated work cheap:
 
 * ``FrameIndex`` objects are cached per path (``extend()`` on each request so a
   growing capture stays current without a full rescan).
@@ -15,6 +20,12 @@ Two caches keep repeated work cheap:
   file is what lets a completed block survive the capture growing: its own
   count can never change again, while the tail block's does. Keying on file size
   means a rewritten or truncated file cannot serve stale blocks.
+* Lattice chunks (runs of ``CHUNK_COLUMNS`` reduced columns) are cached in an
+  LRU keyed by ``(path, metric, level, chunk, filters, frames_in_that_chunk)``.
+  Same rule as the block cache, one level up: a chunk is determined by the
+  frames inside it, so the entry stays valid exactly as long as that count
+  does. This is the cache the lattice buys -- a request keyed on an exact
+  window could never hit.
 
 Thread safety: FastAPI serves handlers from a threadpool, so both caches are
 guarded with locks.
@@ -22,6 +33,7 @@ guarded with locks.
 
 from __future__ import annotations
 
+import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -186,6 +198,42 @@ CIRCULAR_METRICS = ("phase", "csi_ratio_phase", "csi_ratio_phase_corrected")
 # budget and the tile becomes exact; that is the intended interaction.
 TILE_FRAME_BUDGET = 8192
 
+# ----------------------------------------------------------------------- #
+#  The lattice                                                            #
+# ----------------------------------------------------------------------- #
+#
+# A tile's columns are quantised to a fixed time grid instead of being derived
+# from the window that asked for them. Column *c* at level *L* always covers
+# ``[c*dt, (c+1)*dt)`` with ``dt = LATTICE_DT0 * 2**L``, measured from the
+# capture's own t=0 — so a column is a property of the capture, not of the
+# request.
+#
+# Before this, ``col_edges = t0 + arange(width+1)/width * span`` made every
+# edge a function of the view. A one-pixel pan re-quantised all 1248 columns
+# and a live poll re-binned the whole grid every 300 ms: the picture crawled
+# even where the data had not changed. On the lattice a pan shifts columns
+# that keep their values, and a live poll appends columns on the right.
+#
+# Powers of two, not a finer ladder: doubling keeps every coarse column an
+# exact union of two finer ones, so levels nest and a coarse chunk could be
+# folded from finer ones later. The cost is that resolution steps by 2x
+# between levels rather than tracking the pixel width continuously.
+LATTICE_DT0 = 1e-3  # finest column width, 1 ms
+LATTICE_MAX_LEVEL = 40  # dt ~ 12 days; a guard, never reached in practice
+
+# Columns per cached chunk. The unit of work and of caching: a request
+# assembles its grid from these, so two overlapping requests share everything
+# but their edges. 256 columns at 4 bytes x 256 subcarriers is 256 KB.
+CHUNK_COLUMNS = 256
+
+# Frames decoded per chunk before stride-sampling kicks in. Per column that is
+# CHUNK_FRAME_BUDGET / CHUNK_COLUMNS = 8, matching the ~6.5 the old whole-tile
+# budget of 8192 over 1248 columns allowed. The stride is anchored to the
+# chunk's own frame range, which is fixed by the lattice, so the sample does
+# not shift when the window moves -- the old budget selected with
+# ``linspace`` over the *request*, so a pan changed which frames were shown.
+CHUNK_FRAME_BUDGET = 2048
+
 # Decode blocks are cached at this granularity (contiguous runs of frames
 # aligned to BLOCK_SIZE boundaries).  A block is decoded in full on first
 # request and reused on subsequent requests touching the same frames.
@@ -193,6 +241,87 @@ BLOCK_SIZE = 4096
 
 # Upper bound on total bytes held in the block cache.
 CACHE_MAX_BYTES = 256 * 1024 * 1024  # 256 MB
+
+# Upper bound on total bytes held in the chunk cache. Smaller than the block
+# cache because a chunk is already reduced: 256 columns against the thousands
+# of frames they were built from.
+CHUNK_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128 MB
+
+# Frames sampled across the whole capture to measure the colour scale, and how
+# far the capture may grow before that sample is taken again. The scale must
+# not depend on the caller's pixel width — two browsers on the same capture
+# have to lock to the same scale — so it cannot be read off the tile, whose
+# level *is* a function of width. Sampling the capture instead makes it a
+# property of the data. See ``_scale_source``.
+STATS_FRAMES = 2048
+STATS_REFRESH_FRAMES = 4096
+
+# Below this many sampled frames inside the requested range, the capture-wide
+# sample says too little about it and the range's own frames are decoded
+# instead. Such a range is small by definition, so that is cheap -- and it
+# still depends only on the range, never on the width.
+STATS_MIN_FRAMES = 16
+
+# Hard cap on the columns one tile may hold, whatever the caller asks for.
+MAX_TILE_COLUMNS = 4096
+
+
+def lattice_dt(level: int) -> float:
+    """Seconds covered by one column at *level*."""
+    return LATTICE_DT0 * (2.0**level)
+
+
+def pick_level(span: float, width: int, min_dt: float) -> int:
+    """Finest level whose columns still fit *width* pixels.
+
+    Depends only on the span and the requested width — never on where the
+    window sits — so panning cannot change the level, and the columns of two
+    overlapping views line up.
+
+    *min_dt* is the capture's own median frame spacing, and the level never
+    goes finer than it. Going finer asks for columns no frame can fill: at
+    full extent a 1101-packet capture asked for 1230 columns would come back
+    with hundreds of empty ones, which is the reason the pre-lattice code
+    capped the width at the frame count. It cannot cap the width any more --
+    that is exactly the view-dependent quantisation the lattice removes -- so
+    it caps the resolution instead, which is the same guarantee expressed on
+    the axis that belongs to the data.
+    """
+    if not (span > 0) or width < 1:
+        return 0
+    level = 0
+    if span > width * LATTICE_DT0:
+        level = int(math.ceil(math.log2(span / (width * LATTICE_DT0))))
+    # Nudge down for float error: log2 of an exact power of two can land a
+    # hair above the integer and cost a whole level of resolution.
+    while level > 0 and math.ceil(span / lattice_dt(level - 1)) <= width:
+        level -= 1
+    while math.ceil(span / lattice_dt(level)) > width:
+        level += 1
+    if min_dt > 0:
+        floor_level = max(0, int(math.ceil(math.log2(min_dt / LATTICE_DT0))))
+        level = max(level, floor_level)
+    return min(level, LATTICE_MAX_LEVEL)
+
+
+def snap_window(t0: float, t1: float, level: int) -> tuple[int, int]:
+    """Column indices `[c0, c1)` at *level* covering `[t0, t1]`.
+
+    Snaps outwards: the tile always contains the requested window, and the
+    caller crops. ``tileSourceRect`` in the frontend already maps a tile whose
+    window is wider than the view onto the view, so nothing else has to know.
+    """
+    dt = lattice_dt(level)
+    c0 = int(math.floor(t0 / dt))
+    c1 = int(math.ceil(t1 / dt))
+    if c1 <= c0:
+        c1 = c0 + 1
+    return c0, c1
+
+
+def chunk_span(level: int) -> float:
+    """Seconds covered by one cached chunk at *level*."""
+    return CHUNK_COLUMNS * lattice_dt(level)
 
 
 # ----------------------------------------------------------------------- #
@@ -258,6 +387,100 @@ class _BlockCache:
 
 
 _block_cache = _BlockCache()
+
+
+# ----------------------------------------------------------------------- #
+#  Chunk cache                                                            #
+# ----------------------------------------------------------------------- #
+
+
+class _Chunk(NamedTuple):
+    """One cached run of ``CHUNK_COLUMNS`` lattice columns.
+
+    ``grid`` is ``(num_subcarriers, CHUNK_COLUMNS)`` with row 0 = lowest
+    subcarrier index — the flip to display orientation happens once, on the
+    assembled tile, so a chunk stays in the same orientation the decoders use.
+    """
+
+    grid: np.ndarray
+    frames_decoded: int
+    total_in_range: int
+    exact: bool
+    # Which of this chunk's columns the gap fill wrote. Kept per column, not
+    # as a count, because a tile reports the fills inside *its* slice -- a
+    # chunk usually overhangs both ends of the window that pulled it in.
+    filled_mask: np.ndarray
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.grid.nbytes + self.filled_mask.nbytes)
+
+
+class _ChunkCache:
+    """LRU cache of computed lattice chunks, bounded by total bytes.
+
+    Shares the shape of ``_BlockCache`` but holds reduced columns rather than
+    decoded frames: a chunk is the unit two overlapping requests have in
+    common, so a pan re-computes only the columns that actually entered the
+    view.
+
+    The key carries the number of frames the chunk holds, so an entry stays
+    valid exactly as long as its own contents do: the chunk at a live
+    capture's growing edge misses as soon as a frame lands in it, while every
+    chunk behind it keeps hitting. See ``_chunk_frame_count``.
+    """
+
+    def __init__(self, max_bytes: int = CHUNK_CACHE_MAX_BYTES) -> None:
+        self._max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple, _Chunk] = OrderedDict()
+        self._bytes = 0
+        # Cumulative hits/misses, for tests and for reasoning about a live
+        # view's steady state. Reset by ``reset_tile_caches()``.
+        self.hits = 0
+        self.misses = 0
+
+    def drop_path(self, path: str) -> None:
+        with self._lock:
+            for key in [k for k in self._entries if k[0] == path]:
+                self._bytes -= self._entries.pop(key).nbytes
+
+    def get(self, key: tuple) -> _Chunk | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self.misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self.hits += 1
+            return entry
+
+    def put(self, key: tuple, chunk: _Chunk) -> None:
+        with self._lock:
+            old = self._entries.get(key)
+            if old is not None:
+                self._bytes -= old.nbytes
+            self._entries[key] = chunk
+            self._bytes += chunk.nbytes
+            self._entries.move_to_end(key)
+            while self._bytes > self._max_bytes and self._entries:
+                _, evicted = self._entries.popitem(last=False)
+                self._bytes -= evicted.nbytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._bytes = 0
+            self.hits = 0
+            self.misses = 0
+
+
+_chunk_cache = _ChunkCache()
+
+# Capture-wide value samples backing the colour scale, keyed per capture,
+# metric and filter. See ``_scale_source``.
+_stats_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+_stats_lock = threading.Lock()
 
 
 # ----------------------------------------------------------------------- #
@@ -370,16 +593,20 @@ def get_index(path: Path) -> FrameIndex | mtk.MTKIndex:
             # so frame ids shift and any cached block for this path is stale.
             if idx.count < before:
                 _block_cache.drop_path(str(path))
+                _chunk_cache.drop_path(str(path))
         return idx
 
 
 def reset_tile_caches() -> None:
-    """Drop all cached FrameIndexes and decoded blocks.  For tests."""
+    """Drop every cached FrameIndex, decoded block, chunk and scale sample."""
     with _index_lock:
         _index_cache.clear()
     with _ref_lock:
         _ref_cache.clear()
+    with _stats_lock:
+        _stats_cache.clear()
     _block_cache.clear()
+    _chunk_cache.clear()
 
 
 # ----------------------------------------------------------------------- #
@@ -837,6 +1064,400 @@ def _decode_for_doppler(
     return np.concatenate(rows, axis=0)
 
 
+# ----------------------------------------------------------------------- #
+#  Lattice chunks                                                         #
+# ----------------------------------------------------------------------- #
+
+
+def _frame_spacing(times: np.ndarray) -> float:
+    """Median interval between consecutive frames, or 0.0 if unknowable.
+
+    A property of the capture rather than of any view, which is what makes it
+    safe as the lattice floor: a level derived from it cannot change when the
+    window moves.
+    """
+    if len(times) < 2:
+        return 0.0
+    diffs = np.diff(times)
+    diffs = diffs[diffs > 0]
+    if len(diffs) == 0:
+        return 0.0
+    return float(np.median(diffs))
+
+
+def _capture_gap_limit(times: np.ndarray, dt: float) -> float:
+    """Longest interval still treated as a sampling gap rather than a dropout.
+
+    Measured over the whole capture, not over the request. The old code took
+    the 95th percentile of the *decoded* frames' spacing, which changed with
+    the range and the sampling stride — so the same column could be filled in
+    one view and left blank in the next. On the lattice this has to be a
+    constant of the capture, or cached chunks would disagree with fresh ones.
+    """
+    if len(times) < 2:
+        return dt
+    diffs = np.diff(times)
+    diffs = diffs[diffs > 0]
+    if len(diffs) == 0:
+        return dt
+    return max(2.0 * float(np.percentile(diffs, 95)), dt)
+
+
+def _reference_tag(reference: Reference | None) -> int | None:
+    """Identity of a ``Reference``, for cache keying.
+
+    A chunk corrected against one orientation must not be served once the
+    orientation has changed. The reference is re-measured as a capture grows,
+    so keying chunks on the file size would discard every corrected chunk on
+    every poll; keying on the reference's own contents keeps them exactly as
+    long as they stay valid.
+    """
+    if reference is None:
+        return None
+    return hash((reference.amp_profile.tobytes(), complex(reference.phase_dir)))
+
+
+def _column_reduce(
+    data: np.ndarray,
+    decoded_times: np.ndarray,
+    edges: np.ndarray,
+    metric: str,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Reduce decoded frames to one value per column.
+
+    Half-open columns throughout: a frame at an edge belongs to the column
+    starting there. *data* may carry frames outside ``edges`` — the chunk
+    decode includes the frames bracketing its range so a gap at the boundary
+    interpolates the same way it would mid-chunk — and those simply fall
+    outside every column.
+
+    Returns ``(grid, empty_mask, num_sc)``.
+    """
+    n_cols = len(edges) - 1
+    num_sc = int(data.shape[1]) if data.ndim == 2 and data.shape[0] else 0
+    grid = np.full((num_sc, n_cols), np.nan, dtype=np.float32)
+    starts = np.searchsorted(decoded_times, edges[:-1], side="left")
+    ends = np.searchsorted(decoded_times, edges[1:], side="left")
+    if num_sc:
+        max_hold = metric in MAX_HOLD_METRICS
+        for x in range(n_cols):
+            s, e = int(starts[x]), int(ends[x])
+            if e <= s:
+                continue
+            if max_hold:
+                grid[:, x] = data[s:e].max(axis=0)
+            else:
+                centre = 0.5 * (edges[x] + edges[x + 1])
+                nearest = s + int(np.argmin(np.abs(decoded_times[s:e] - centre)))
+                grid[:, x] = data[nearest]
+    return grid, ends <= starts, num_sc
+
+
+def _decode_selection(
+    path: Path,
+    index: FrameIndex,
+    frame_ids: np.ndarray,
+    metric: str,
+    reference: Reference | None,
+    *,
+    contiguous: bool,
+    filtered: bool,
+    interpolate: bool,
+) -> np.ndarray:
+    """Decode *frame_ids* into *metric*'s values, through the block cache when
+    the selection allows it.
+
+    A contiguous unfiltered run is what the block cache is keyed for. Anything
+    else — a filtered selection, or a stride-sampled one — is decoded directly
+    and told ``native=False``: its rows are not consecutive frames, so the
+    passes that compare a frame with its neighbour have nothing to compare
+    against.
+    """
+    if len(frame_ids) == 0:
+        return np.empty((0, index.num_subcarriers), dtype=np.float32)
+    if contiguous and not filtered:
+        return _decode_via_blocks(
+            path, index, frame_ids, metric, reference, interpolate=interpolate
+        )
+    amp, phase, ratio_amp, ratio_phase = decode_frames(
+        path, index, frame_ids, interpolate=interpolate
+    )
+    available = {
+        "amplitude": amp,
+        "phase": phase,
+        "csi_ratio_amplitude": ratio_amp,
+        "csi_ratio_phase": ratio_phase,
+    }
+    return _materialise(
+        metric,
+        available,
+        index.times[frame_ids],
+        reference,
+        native=contiguous and reference is not None,
+    )
+
+
+def _compute_chunk(
+    path: Path,
+    index: FrameIndex,
+    filtered_idxs: np.ndarray,
+    filtered_times: np.ndarray,
+    metric: str,
+    level: int,
+    chunk_index: int,
+    *,
+    reference: Reference | None,
+    correcting: bool,
+    filtered: bool,
+    interpolate: bool,
+    gap_limit: float,
+    num_sc: int,
+) -> _Chunk:
+    """Build one ``CHUNK_COLUMNS``-wide run of lattice columns.
+
+    Everything here is a function of ``(level, chunk_index)`` and the capture
+    — never of the window that asked for it. That is what makes a chunk
+    cacheable, and what makes two overlapping requests agree column for
+    column.
+    """
+    dt = lattice_dt(level)
+    col0 = chunk_index * CHUNK_COLUMNS
+    edges = (col0 + np.arange(CHUNK_COLUMNS + 1, dtype=np.float64)) * dt
+
+    lo = int(np.searchsorted(filtered_times, edges[0], side="left"))
+    hi = int(np.searchsorted(filtered_times, edges[-1], side="left"))
+    total_in_range = hi - lo
+
+    if total_in_range > CHUNK_FRAME_BUDGET:
+        # Stride anchored to the chunk's own frame range, which the lattice
+        # fixes. The old budget selected with ``linspace`` over the *request*,
+        # so a pan changed which frames were shown even where the window
+        # still covered the same data.
+        stride = int(math.ceil(total_in_range / CHUNK_FRAME_BUDGET))
+        sel = np.arange(lo, hi, stride, dtype=np.int64)
+        exact = False
+    else:
+        sel = np.arange(lo, hi, dtype=np.int64)
+        exact = True
+
+    # Frames bracketing the chunk, so a gap spanning its edge interpolates
+    # from the same two frames a whole-range fill would have used.
+    lead = 1 if lo > 0 else 0
+    trail = 1 if hi < len(filtered_times) else 0
+    if exact:
+        sel_ctx = np.arange(lo - lead, hi + trail, dtype=np.int64)
+    elif len(sel):
+        sel_ctx = np.unique(
+            np.concatenate(
+                [np.arange(lo - lead, lo, dtype=np.int64), sel,
+                 np.arange(hi, hi + trail, dtype=np.int64)]
+            )
+        )
+    else:
+        sel_ctx = np.arange(lo - lead, hi + trail, dtype=np.int64)
+
+    contiguous = bool(
+        len(sel_ctx) > 0 and sel_ctx[-1] - sel_ctx[0] + 1 == len(sel_ctx)
+    )
+
+    # A correcting metric reads neighbours, so an exact selection is decoded
+    # with a margin and trimmed: its edge frames then see the same neighbours
+    # a whole-capture pass would give them.
+    margin = CONTEXT_FRAMES if (correcting and exact) else 0
+    lo_ctx = max(0, int(sel_ctx[0]) - margin) if len(sel_ctx) else 0
+    hi_ctx = (
+        min(len(filtered_times), int(sel_ctx[-1]) + 1 + margin) if len(sel_ctx) else 0
+    )
+    if margin and contiguous:
+        decode_sel = np.arange(lo_ctx, hi_ctx, dtype=np.int64)
+        keep = slice(int(sel_ctx[0]) - lo_ctx, int(sel_ctx[0]) - lo_ctx + len(sel_ctx))
+    else:
+        decode_sel = sel_ctx
+        keep = slice(None)
+
+    frame_ids = filtered_idxs[decode_sel] if filtered else decode_sel
+    decode_contiguous = bool(
+        len(frame_ids) > 0 and frame_ids[-1] - frame_ids[0] + 1 == len(frame_ids)
+    )
+    data = _decode_selection(
+        path, index, frame_ids, metric, reference,
+        contiguous=decode_contiguous, filtered=filtered, interpolate=interpolate,
+    )
+    data = data[keep]
+    kept_ids = filtered_idxs[sel_ctx] if filtered else sel_ctx
+    decoded_times = index.times[kept_ids] if len(kept_ids) else np.zeros(0)
+
+    grid, empty, sc = _column_reduce(data, decoded_times, edges, metric)
+    if sc == 0:
+        grid = np.full((num_sc, CHUNK_COLUMNS), np.nan, dtype=np.float32)
+
+    # A column a filter emptied is an omission, not a sampling gap: a 2x2
+    # burst dropped by a '2x1 only' filter has to stay a visible stripe.
+    if filtered:
+        all_starts = np.searchsorted(index.times, edges[:-1], side="left")
+        all_ends = np.searchsorted(index.times, edges[1:], side="left")
+        # Frames were there, none of them passed: an omission, not a gap.
+        filter_emptied = (all_ends > all_starts) & empty
+        fillable = empty & ~filter_emptied
+    else:
+        fillable = empty
+
+    if interpolate and len(decoded_times) and fillable.any() and grid.shape[0]:
+        _interpolate_time_gaps(
+            grid,
+            fillable,
+            data,
+            decoded_times,
+            float(edges[0]),
+            float(edges[-1] - edges[0]),
+            CHUNK_COLUMNS,
+            gap_limit,
+            circular=metric in CIRCULAR_METRICS,
+        )
+
+    # A fill is a column that had no frame of its own and came back with
+    # values anyway. Deriving it from the grid rather than trusting the
+    # returned count keeps the mask and the pixels in agreement.
+    filled_mask = fillable & ~np.all(np.isnan(grid), axis=0) if grid.shape[0] else fillable
+
+    return _Chunk(grid, int(len(sel)), total_in_range, exact, filled_mask)
+
+
+def _chunk_frame_count(
+    filtered_times: np.ndarray, level: int, chunk_index: int
+) -> int:
+    """How many frames fall inside this chunk right now.
+
+    Part of the cache key, which is what makes a chunk safe to cache on a
+    growing capture: a chunk is entirely determined by the frames inside it,
+    so an entry stays valid exactly as long as that count does. Frames landing
+    in the chunk at the growing edge change the count and miss; frames landing
+    past it do not, and every settled chunk keeps hitting. This is the rule the
+    block cache already uses -- key on what the unit itself holds, never on the
+    size of the whole file, which changes on every poll.
+    """
+    span = chunk_span(level)
+    lo = int(np.searchsorted(filtered_times, span * chunk_index, side="left"))
+    hi = int(np.searchsorted(filtered_times, span * (chunk_index + 1), side="left"))
+    return hi - lo
+
+
+def _chunk_for(
+    path: Path,
+    index: FrameIndex,
+    filtered_idxs: np.ndarray,
+    filtered_times: np.ndarray,
+    metric: str,
+    level: int,
+    chunk_index: int,
+    *,
+    mimo: tuple[int, int] | None,
+    source_mac: str | None,
+    reference: Reference | None,
+    correcting: bool,
+    filtered: bool,
+    interpolate: bool,
+    gap_limit: float,
+    num_sc: int,
+) -> _Chunk:
+    """Cached ``_compute_chunk``."""
+    key = (
+        str(path), metric, level, chunk_index,
+        mimo, source_mac, interpolate, _reference_tag(reference),
+        _chunk_frame_count(filtered_times, level, chunk_index),
+    )
+    hit = _chunk_cache.get(key)
+    if hit is not None:
+        return hit
+    chunk = _compute_chunk(
+        path, index, filtered_idxs, filtered_times, metric, level, chunk_index,
+        reference=reference, correcting=correcting, filtered=filtered,
+        interpolate=interpolate, gap_limit=gap_limit, num_sc=num_sc,
+    )
+    _chunk_cache.put(key, chunk)
+    return chunk
+
+
+# ----------------------------------------------------------------------- #
+#  Colour scale source                                                    #
+# ----------------------------------------------------------------------- #
+
+
+def _scale_source(
+    path: Path,
+    index: FrameIndex,
+    filtered_idxs: np.ndarray,
+    metric: str,
+    *,
+    mimo: tuple[int, int] | None,
+    source_mac: str | None,
+    reference: Reference | None,
+    filtered: bool,
+    interpolate: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A width-independent sample of the capture's values, as (times, values).
+
+    The colour scale must be a property of the data, not of the browser
+    window: two laptops on the same capture have to lock to the same scale.
+    Reading it off the tile cannot give that any more — the tile's level is a
+    function of the requested width — so the scale is measured from frames
+    drawn evenly across the whole capture instead, and cached.
+
+    Re-sampled only once the capture has grown by ``STATS_REFRESH_FRAMES``, so
+    a live view does not re-measure on every poll.
+    """
+    n = len(filtered_idxs)
+    key = (
+        str(path), metric, mimo, source_mac, interpolate,
+        n // STATS_REFRESH_FRAMES, _reference_tag(reference),
+    )
+    with _stats_lock:
+        hit = _stats_cache.get(key)
+    if hit is not None:
+        return hit
+
+    if n == 0:
+        empty = (np.zeros(0), np.empty((0, index.num_subcarriers), dtype=np.float32))
+        with _stats_lock:
+            _stats_cache[key] = empty
+        return empty
+
+    picks = np.unique(
+        np.linspace(0, n - 1, min(STATS_FRAMES, n)).astype(np.int64)
+    )
+    frame_ids = filtered_idxs[picks] if filtered else picks
+    contiguous = bool(frame_ids[-1] - frame_ids[0] + 1 == len(frame_ids))
+    values = _decode_selection(
+        path, index, frame_ids, metric, reference,
+        contiguous=contiguous, filtered=filtered, interpolate=interpolate,
+    )
+    sample = (index.times[frame_ids], values)
+    with _stats_lock:
+        _stats_cache[key] = sample
+    return sample
+
+
+def _scale_bounds(values: np.ndarray) -> tuple[float, float, float, float]:
+    """``(vmin, vmax, p_low, p_high)`` over the finite values of *values*.
+
+    ``-inf`` from ``db(0)`` is excluded by the finite mask rather than clamped
+    in: clamping would drag ``p_low`` to ``-inf`` and make the robust scale no
+    better than the raw minimum.
+    """
+    if values.size == 0:
+        return 0.0, 0.0, 0.0, 0.0
+    finite_mask = np.isfinite(values)
+    if not finite_mask.any():
+        return 0.0, 0.0, 0.0, 0.0
+    finite_vals = values[finite_mask]
+    return (
+        float(finite_vals.min()),
+        float(finite_vals.max()),
+        float(np.nanpercentile(finite_vals, 1)),
+        float(np.nanpercentile(finite_vals, 99)),
+    )
+
+
 def compute_tile(
     path: Path,
     t0: float,
@@ -848,36 +1469,42 @@ def compute_tile(
     source_mac: str | None = None,
     interpolate: bool = True,
 ) -> tuple[np.ndarray, dict]:
-    """Build a display-resolution grid for the requested time range.
+    """Build a display-resolution grid covering the requested time range.
 
-    Returns ``(grid, metadata)`` where *grid* has shape
-    ``(num_subcarriers, width)``, float32, row-major with row 0 = highest
-    subcarrier index (matching the frontend's ``subcarrierSourceRect``
-    convention).  Empty columns are NaN; ``-inf`` from ``db(0)`` is preserved.
+    Returns ``(grid, metadata)``. *grid* is ``(num_subcarriers, columns)``
+    float32, row-major with row 0 = highest subcarrier index (matching the
+    frontend's ``subcarrierSourceRect`` convention). Empty columns are NaN;
+    ``-inf`` from ``db(0)`` is preserved.
 
-    *metadata* keys: ``frames_decoded``, ``total_in_range``, ``exact``,
-    ``vmin``, ``vmax``, ``p_low``, ``p_high``, ``t_min``, ``t_max``,
-    ``filled_columns``.
+    **The grid is not the window that was asked for.** Columns are quantised
+    to the lattice (see ``pick_level``/``snap_window``), so the tile covers
+    ``[meta["t0"], meta["t1"]]`` — the smallest lattice-aligned range
+    containing ``[t0, t1]`` — at ``meta["dt"]`` seconds per column. The caller
+    crops, which ``tileSourceRect`` in the frontend already does. Everything
+    the crawling picture came from lives in that one change: a pan now shifts
+    columns that keep their values instead of re-aggregating all of them over
+    new boundaries, and a live poll appends columns on the right instead of
+    re-binning the grid every refresh.
+
+    *metadata* keys: ``t0``, ``t1``, ``dt``, ``level``, ``frames_decoded``,
+    ``total_in_range``, ``exact``, ``anchored``, ``vmin``, ``vmax``,
+    ``p_low``, ``p_high``, ``t_min``, ``t_max``, ``filled_columns``.
 
     ``interpolate`` is one flag governing two different axes. Along
     subcarrier, it controls whether structural nulls (pilots, the DC/guard
     band) are filled or left ``NaN`` — see ``batch.decode_frames`` and
     ``mtk.decode_frames``. It reaches every decode this function does,
-    including the orientation ``Reference``, and is part of the block and
-    reference cache keys, so toggling it never serves a block decoded under
-    the other setting. Along time, it controls whether a sampling gap (see
-    "Gap fill" below) is linearly interpolated between its two bracketing
-    frames or left ``NaN`` — off means every gap in the data, in either
-    axis, stays visible as a gap.
+    including the orientation ``Reference``, and is part of the block, chunk
+    and reference cache keys, so toggling it never serves data decoded under
+    the other setting. Along time, it controls whether a sampling gap is
+    linearly interpolated between its two bracketing frames or left ``NaN``.
 
     ``mimo`` and ``source_mac`` restrict which frames are eligible for
     decoding. Filtered-out frames leave NaN holes — they are NOT filled from
     neighbours, so a 2x2 burst excluded by a '2x1 only' filter stays visible
-    as a stripe. A filter narrows which columns the gap fill may touch; it
-    does not switch the fill off, so a column that held no frames at all is
-    still filled as the sampling gap it is. The capture's full extent (``t_min``/``t_max``
-    in metadata) is the unfiltered range so the live view keeps tracking
-    growth; the tile window itself reflects the request.
+    as a stripe. The capture's full extent (``t_min``/``t_max`` in metadata)
+    is the unfiltered range so the live view keeps tracking growth; the tile
+    window itself reflects the request.
     """
     path = Path(path)
     index = get_index(path)
@@ -893,16 +1520,19 @@ def compute_tile(
         filtered_idxs = np.arange(index.count, dtype=np.int64)
         filtered_times = times
 
-    # Clamp width.
-    width = max(1, min(width, 4096))
+    width = max(1, min(width, MAX_TILE_COLUMNS))
 
-    # Guard against empty capture or invalid range.
     if len(filtered_idxs) == 0 or t1 <= t0:
         grid = np.full((max(num_sc, 0), width), np.nan, dtype=np.float32)
         return grid, {
+            "t0": float(t0),
+            "t1": float(t1),
+            "dt": lattice_dt(0),
+            "level": 0,
             "frames_decoded": 0,
             "total_in_range": 0,
             "exact": True,
+            "anchored": True,
             "vmin": 0.0,
             "vmax": 0.0,
             "p_low": 0.0,
@@ -912,40 +1542,27 @@ def compute_tile(
             "filled_columns": 0,
         }
 
-    # Find filtered frames in [t0, t1] -- CLOSED at both ends (see /api/meta).
+    # --- Lattice ------------------------------------------------------- #
+    level = pick_level(t1 - t0, width, _frame_spacing(times))
+    c0, c1 = snap_window(t0, t1, level)
+    while c1 - c0 > MAX_TILE_COLUMNS and level < LATTICE_MAX_LEVEL:
+        level += 1
+        c0, c1 = snap_window(t0, t1, level)
+    dt = lattice_dt(level)
+
+    # Frames the caller asked about, CLOSED at both ends (see /api/meta).
+    # Reported as-is: it describes the request, not the snapped tile.
     lo = int(np.searchsorted(filtered_times, t0, side="left"))
     hi = int(np.searchsorted(filtered_times, t1, side="right"))
     total_in_range = hi - lo
 
-    width = max(1, min(width, total_in_range))
-
-    if total_in_range > TILE_FRAME_BUDGET:
-        sampled = np.linspace(
-            0, total_in_range - 1, TILE_FRAME_BUDGET, dtype=np.int64
-        )
-        sel_in_filtered = np.arange(lo, hi)[sampled]
-        exact = False
-    else:
-        sel_in_filtered = np.arange(lo, hi)
-        exact = True
-
-    frame_ids = filtered_idxs[sel_in_filtered] if filtered else sel_in_filtered.astype(np.int64)
-    n_decoded = len(frame_ids)
-
-    file_size = path.stat().st_size
-
     # Metrics that undo the ratio corruption need the capture's own
     # orientation, or their answer is a property of this view rather than of
     # the data — pan or zoom and whole panels invert. See backend.ratio.
-    #
-    # A reference exists only for a single selected sender, and the ratio is
-    # corrected only where there is one: `reference is not None` is the single
-    # switch, so a view can never be half-corrected or claim a correction it
-    # did not get. On `source_mac=all` the ratio is passed through untouched.
     needs_reference = _needs_reference(metric)
     reference = (
         get_reference(
-            path, index, file_size, mimo=mimo, source_mac=source_mac,
+            path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
             interpolate=interpolate,
         )
         if needs_reference
@@ -953,153 +1570,76 @@ def compute_tile(
     )
     correcting = reference is not None
 
-    if n_decoded == 0:
-        data = np.empty((0, num_sc), dtype=np.float32)
-    elif exact and not filtered:
-        data = _decode_via_blocks(
-            path, index, frame_ids, metric, reference,
-            interpolate=interpolate,
+    gap_limit = _capture_gap_limit(filtered_times, dt)
+
+    # --- Assemble from chunks ------------------------------------------ #
+    k0 = int(math.floor(c0 / CHUNK_COLUMNS))
+    k1 = int(math.floor((c1 - 1) / CHUNK_COLUMNS))
+    chunks = [
+        _chunk_for(
+            path, index, filtered_idxs, filtered_times, metric, level, k,
+            mimo=mimo, source_mac=source_mac, reference=reference,
+            correcting=correcting, filtered=bool(filtered),
+            interpolate=interpolate, gap_limit=gap_limit, num_sc=num_sc,
         )
-    else:
-        # A stride-sampled selection is not a frame sequence: its rows are
-        # seconds apart, so the passes that compare a frame to its neighbour
-        # have nothing to compare against and are skipped (native=False).
-        # An exact selection is contiguous, so it gets a context margin
-        # instead — decoded, corrected, then trimmed off — which gives its
-        # edge frames the same neighbours a full-capture pass would.
-        lead = 0
-        ctx_sel = sel_in_filtered
-        if correcting and exact:
-            lo_ctx = max(0, int(sel_in_filtered[0]) - CONTEXT_FRAMES)
-            hi_ctx = min(len(filtered_idxs), int(sel_in_filtered[-1]) + 1 + CONTEXT_FRAMES)
-            ctx_sel = np.arange(lo_ctx, hi_ctx)
-            lead = int(sel_in_filtered[0]) - lo_ctx
-        ctx_ids = filtered_idxs[ctx_sel] if filtered else ctx_sel.astype(np.int64)
-
-        amp, phase, ratio_amp, ratio_phase = decode_frames(
-            path, index, ctx_ids, interpolate=interpolate
-        )
-        available = {
-            "amplitude": amp,
-            "phase": phase,
-            "csi_ratio_amplitude": ratio_amp,
-            "csi_ratio_phase": ratio_phase,
-        }
-        data = _materialise(
-            metric, available, times[ctx_ids], reference, native=exact and correcting
-        )
-        if lead or len(ctx_ids) != n_decoded:
-            data = data[lead : lead + n_decoded]
-
-    decoded_times = times[frame_ids] if n_decoded > 0 else np.zeros(0)
-    span = t1 - t0
-    col_edges = t0 + np.arange(width + 1, dtype=np.float64) / width * span
-    col_starts = np.searchsorted(decoded_times, col_edges[:-1], side="left")
-    col_ends = np.searchsorted(decoded_times, col_edges[1:], side="left")
-    if width > 0:
-        col_ends[-1] = n_decoded
-
-    grid = np.full((num_sc, width), np.nan, dtype=np.float32)
-
-    if n_decoded > 0:
-        for x in range(width):
-            s = int(col_starts[x])
-            e = int(col_ends[x])
-            if e <= s:
-                continue
-            if metric in MAX_HOLD_METRICS:
-                grid[:, x] = data[s:e].max(axis=0)
-            else:
-                centre = t0 + (x + 0.5) / width * span
-                nearest = s + int(np.argmin(np.abs(decoded_times[s:e] - centre)))
-                grid[:, x] = data[nearest]
-
-    # Gap fill: only sampling gaps (sub-gap-limit intervals) get filled, by
-    # linear interpolation in time between the two decoded frames bracketing
-    # the gap — not a nearest-frame copy, which would hold each value flat
-    # until the next real sample and understate how fast the channel moves
-    # between them. Skipped entirely when *interpolate* is off — the whole
-    # point of turning it off is to see gaps as gaps, not smoothed over by a
-    # guess.
-    #
-    # A filter narrows *which* columns are eligible, and does not switch the
-    # fill off. Frames a filter excluded must stay NaN: a 2x2 burst dropped by
-    # a '2x1 only' filter is an intentional omission and has to remain a
-    # visible stripe, not get painted over from its neighbours. But a column
-    # holding no frames at all is a sampling gap whether or not a filter is
-    # set, and there is no reason a sender selection should stop it being
-    # filled. The two are told apart by asking the unfiltered frame times
-    # whether anything was ever there — without that distinction the only safe
-    # move was to disable the fill wholesale, which is what made the
-    # interpolate toggle inert as soon as any filter was chosen.
-    empty = col_ends <= col_starts
-    if filtered:
-        all_starts = np.searchsorted(times, col_edges[:-1], side="left")
-        all_ends = np.searchsorted(times, col_edges[1:], side="left")
-        all_ends[-1] = int(np.searchsorted(times, col_edges[-1], side="right"))
-        kept_starts = np.searchsorted(filtered_times, col_edges[:-1], side="left")
-        kept_ends = np.searchsorted(filtered_times, col_edges[1:], side="left")
-        kept_ends[-1] = int(np.searchsorted(filtered_times, col_edges[-1], side="right"))
-        # Frames were there, none of them passed: an omission, not a gap.
-        filter_emptied = (all_ends > all_starts) & (kept_ends <= kept_starts)
-        fillable = empty & ~filter_emptied
-    else:
-        fillable = empty
-    if n_decoded >= 2:
-        gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
-    else:
-        gap_limit = 0.0
-    gap_limit = max(gap_limit, span / width)
-    if interpolate and n_decoded > 0 and fillable.any():
-        filled_columns = _interpolate_time_gaps(
-            grid, fillable, data, decoded_times, t0, span, width, gap_limit,
-            circular=metric in CIRCULAR_METRICS,
-        )
-    else:
-        filled_columns = 0
+        for k in range(k0, k1 + 1)
+    ]
+    assembled = (
+        chunks[0].grid if len(chunks) == 1
+        else np.concatenate([c.grid for c in chunks], axis=1)
+    )
+    offset = c0 - k0 * CHUNK_COLUMNS
+    grid = assembled[:, offset : offset + (c1 - c0)]
 
     # Flip subcarrier axis so row 0 = highest subcarrier index, matching the
     # frontend's image convention (subcarrierSourceRect in render.ts).
     grid = np.ascontiguousarray(grid[::-1, :])
 
-    # Finite value range (excludes NaN and -inf) and robust percentile bounds.
-    # The raw min/max is dominated by outliers — on the real capture, 98.5% of
-    # amplitude values fall in [40, 60] while extrema span [7.7, 84.7]. A
-    # min/max scale compresses the visible structure into one narrow slice of
-    # the colormap. The 1st/99th percentile bounds are the robust scale the
-    # frontend locks to. -inf from db(0) is excluded by the finite mask, not
-    # clamped into the percentile — clamping would drag p_low to -inf.
-    #
-    # Measured on *data*, not on *grid*: grid is the wrong population. Each of
-    # its columns reduces the ~len(data)/width frames that fall in it, and for
-    # a MAX_HOLD_METRICS metric that reduction is a maximum — an order
-    # statistic whose distribution depends on how many frames share a column,
-    # i.e. on the caller's pixel width. Bounds taken from it move with the
-    # browser window: on a 2285-frame capture, p_low reads 39.4 at width 900
-    # against 38.0 at 2560 (true 37.8), and vmin 17.2 against 0.0, while vmax
-    # stays pinned because max-of-max is the one statistic the reduction
-    # cannot bias. Two laptops would lock to different color scales for the
-    # same capture. *data* holds the frames themselves, whose selection is a
-    # function of TILE_FRAME_BUDGET alone, so these bounds are width-invariant.
-    # Gap-filled columns would not have added extrema either way — they are
-    # convex blends of data rows.
-    finite_mask = np.isfinite(data)
-    if finite_mask.any():
-        finite_vals = data[finite_mask]
-        vmin = float(finite_vals.min())
-        vmax = float(finite_vals.max())
-        p_low = float(np.nanpercentile(finite_vals, 1))
-        p_high = float(np.nanpercentile(finite_vals, 99))
+    # --- Colour scale -------------------------------------------------- #
+    # Measured on frames sampled across the capture, never on the grid. A
+    # grid column reduces the frames that fall in it — a maximum, for
+    # amplitude — and that reduction's distribution depends on how many frames
+    # share a column, i.e. on the level, i.e. on the caller's pixel width.
+    # Bounds read off the grid would make the colour scale a function of the
+    # browser window, and two laptops would lock to different scales for the
+    # same capture.
+    stat_times, stat_values = _scale_source(
+        path, index, filtered_idxs, metric,
+        mimo=mimo, source_mac=source_mac, reference=reference,
+        filtered=bool(filtered), interpolate=interpolate,
+    )
+    in_range = (
+        (stat_times >= t0) & (stat_times <= t1) if len(stat_times) else np.zeros(0, bool)
+    )
+    if int(in_range.sum()) >= STATS_MIN_FRAMES or total_in_range == 0:
+        vmin, vmax, p_low, p_high = _scale_bounds(stat_values[in_range])
     else:
-        vmin = 0.0
-        vmax = 0.0
-        p_low = 0.0
-        p_high = 0.0
+        # Too narrow a window for the capture-wide sample to describe. The
+        # range is small by definition here, so decoding it outright is cheap,
+        # and the answer still depends only on the range — not on the width.
+        picks = np.unique(
+            np.linspace(lo, hi - 1, min(STATS_FRAMES, max(total_in_range, 1)))
+            .astype(np.int64)
+        )
+        frame_ids = filtered_idxs[picks] if filtered else picks
+        contiguous = bool(len(frame_ids) and frame_ids[-1] - frame_ids[0] + 1 == len(frame_ids))
+        vmin, vmax, p_low, p_high = _scale_bounds(
+            _decode_selection(
+                path, index, frame_ids, metric, reference,
+                contiguous=contiguous, filtered=bool(filtered),
+                interpolate=interpolate,
+            )
+        )
 
     return grid, {
-        "frames_decoded": n_decoded,
+        # The window this tile actually covers, which is the snapped one.
+        "t0": float(c0 * dt),
+        "t1": float(c1 * dt),
+        "dt": float(dt),
+        "level": int(level),
+        "frames_decoded": int(sum(c.frames_decoded for c in chunks)),
         "total_in_range": total_in_range,
-        "exact": exact,
+        "exact": all(c.exact for c in chunks),
         # Whether this tile's ratio was corrected. False on a metric that
         # needs an orientation reference and could not get one — no sender
         # selected, most often — in which case the ratio is shown exactly as
@@ -1111,5 +1651,11 @@ def compute_tile(
         "p_high": p_high,
         "t_min": float(times[0]),
         "t_max": float(times[-1]),
-        "filled_columns": filled_columns,
+        # Fills inside the tile's own slice, not inside the chunks it drew
+        # from: a chunk overhangs the window at both ends.
+        "filled_columns": int(
+            np.concatenate([c.filled_mask for c in chunks])[
+                offset : offset + (c1 - c0)
+            ].sum()
+        ),
     }

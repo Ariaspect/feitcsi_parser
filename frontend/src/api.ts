@@ -110,8 +110,18 @@ export interface Tile {
   grid: Float32Array; // length = height * width, row-major, row 0 = highest subcarrier
   width: number;
   height: number;
+  /** The window THIS tile covers. Columns are quantised to a fixed lattice,
+   *  so the backend snaps the requested window outwards and reports what it
+   *  actually served -- always containing the request, never equal to it by
+   *  luck. Draw against these, not against what was asked for: assuming the
+   *  request came back verbatim shifts the image by up to one column and
+   *  brings back the crawling the lattice removed. */
   t0: number;
-  t1: number; // the window THIS tile covers (echo the request)
+  t1: number;
+  /** Seconds per column, and the lattice level it came from. A pan or a live
+   *  poll at the same level keeps every column it already had. */
+  dt: number;
+  level: number;
   captureTMin: number;
   captureTMax: number; // the whole capture's extent, NOT this tile's window
   framesDecoded: number;
@@ -185,8 +195,12 @@ export async function fetchTile(
     grid,
     width: parseInt(h.get("X-Tile-Width") ?? "0", 10),
     height: parseInt(h.get("X-Tile-Height") ?? "0", 10),
-    t0,
-    t1,
+    // Fall back to the requested window for a backend older than the
+    // lattice, which served exactly what it was asked for.
+    t0: parseFloat(h.get("X-Tile-T0") ?? String(t0)),
+    t1: parseFloat(h.get("X-Tile-T1") ?? String(t1)),
+    dt: parseFloat(h.get("X-Tile-DT") ?? "0"),
+    level: parseInt(h.get("X-Tile-Level") ?? "0", 10),
     captureTMin: parseFloat(h.get("X-Capture-TMin") ?? "0"),
     captureTMax: parseFloat(h.get("X-Capture-TMax") ?? "0"),
     framesDecoded: parseInt(h.get("X-Tile-Frames") ?? "0", 10),
@@ -252,6 +266,11 @@ export async function fetchDoppler(
     // from the request would draw every column half a window too early.
     t0: parseFloat(h.get("X-Doppler-ColT0") ?? "0"),
     t1: parseFloat(h.get("X-Doppler-ColT1") ?? "0"),
+    // Doppler columns are STFT windows, laid out by the hop the backend
+    // chose, not by the tile lattice — so there is no level to report and dt
+    // is read off the columns themselves.
+    dt: 0,
+    level: 0,
     captureTMin: parseFloat(h.get("X-Capture-TMin") ?? "0"),
     captureTMax: parseFloat(h.get("X-Capture-TMax") ?? "0"),
     framesDecoded: parseInt(h.get("X-Doppler-Frames") ?? "0", 10),

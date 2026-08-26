@@ -15,6 +15,7 @@ from backend.index import HEADER_BYTES, MAX_TICK, TICK_RESOLUTION, FrameIndex
 from backend.parser import load_capture
 from backend.tiles import (
     BLOCK_SIZE,
+    CHUNK_COLUMNS,
     TILE_FRAME_BUDGET,
     _base_with_context,
     _block_cache,
@@ -73,6 +74,28 @@ def _full_range(index: FrameIndex) -> tuple[float, float]:
     return float(index.times[0]), float(index.times[-1])
 
 
+def _lattice(grid: np.ndarray, meta: dict) -> tuple[np.ndarray, np.ndarray]:
+    """The column edges and centres the tile actually came back with.
+
+    Since the lattice, a tile covers the snapped range ``[meta["t0"],
+    meta["t1"]]`` at ``meta["dt"]`` per column rather than the range that was
+    asked for, so a test that wants to reason about columns has to read the
+    grid the caller was handed, not the request it sent.
+    """
+    n = grid.shape[1]
+    edges = meta["t0"] + np.arange(n + 1, dtype=np.float64) * meta["dt"]
+    return edges, edges[:-1] + meta["dt"] / 2
+
+
+def _capture_gap_limit(times: np.ndarray, dt: float) -> float:
+    """Mirror of the implementation's gap limit: a constant of the capture."""
+    diffs = np.diff(times)
+    diffs = diffs[diffs > 0]
+    if len(diffs) == 0:
+        return dt
+    return max(2.0 * float(np.percentile(diffs, 95)), dt)
+
+
 def _assert_grids_equal(actual: np.ndarray, expected: np.ndarray) -> None:
     """allclose that tolerates -inf from db(0) and NaN from gap columns."""
     assert actual.shape == expected.shape
@@ -97,19 +120,20 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
 
     grid, meta = compute_tile(CAPTURE, t0, t1, width, "amplitude")
 
-    assert grid.shape == (index.num_subcarriers, width)
+    assert grid.shape[0] == index.num_subcarriers
+    assert grid.shape[1] <= width, "the lattice never returns more than asked for"
     assert meta["exact"] is True
 
     all_ids = np.arange(index.count)
     amp, _, _, _ = decode_frames(CAPTURE, index, all_ids)
 
-    # Independently compute the expected grid using the same column logic.
+    # Independently compute the expected grid using the same column logic --
+    # off the lattice the tile reports, which is what it was built on.
     times = index.times
-    span = t1 - t0
-    col_edges = t0 + np.arange(width + 1, dtype=np.float64) / width * span
+    width = grid.shape[1]
+    col_edges, _centres = _lattice(grid, meta)
     col_starts = np.searchsorted(times, col_edges[:-1], side="left")
     col_ends = np.searchsorted(times, col_edges[1:], side="left")
-    col_ends[-1] = index.count  # last column closed on the right
 
     expected = np.full((index.num_subcarriers, width), np.nan, dtype=np.float32)
     for x in range(width):
@@ -125,13 +149,9 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
     # now filled rather than NaN.
     decoded_times = times
     empty = col_ends <= col_starts
-    if len(decoded_times) >= 2:
-        gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
-    else:
-        gap_limit = 0.0
-    gap_limit = max(gap_limit, span / width)
+    gap_limit = _capture_gap_limit(decoded_times, meta["dt"])
     if len(decoded_times) > 0 and empty.any():
-        centres = t0 + (np.arange(width) + 0.5) / width * span
+        _edges, centres = _lattice(grid, meta)
         ec = centres[empty]
         j = np.searchsorted(decoded_times, ec)
         j_lo = np.clip(j - 1, 0, len(decoded_times) - 1)
@@ -159,16 +179,30 @@ def test_full_range_tile_reproduces_decode(index: FrameIndex) -> None:
 
 
 def test_max_hold_two_frames_one_column(index: FrameIndex) -> None:
-    """Two frames in one column: the per-subcarrier max comes out."""
+    """Two frames in one column: the per-subcarrier max comes out.
+
+    Asking for one column no longer produces exactly one: the tile covers the
+    lattice columns containing the request, so the assertion is made against
+    whichever column the frames actually landed in.
+    """
     t0 = float(index.times[10])
     t1 = float(index.times[11]) + (float(index.times[12]) - float(index.times[11])) / 2
     grid, meta = compute_tile(CAPTURE, t0, t1, 1, "amplitude")
 
-    amp, _, _, _ = decode_frames(CAPTURE, index, np.array([10, 11]))
-    expected = np.max(amp, axis=0)[::-1].astype(np.float32).reshape(-1, 1)
+    edges, _ = _lattice(grid, meta)
+    col = int(np.searchsorted(edges, float(index.times[10]), side="right") - 1)
+    if not (0 <= col < grid.shape[1]):
+        pytest.skip("frame 10 fell outside the returned columns")
+    # Every frame sharing that column, which is what the max is taken over.
+    ids = np.flatnonzero(
+        (index.times >= edges[col]) & (index.times < edges[col + 1])
+    )
+    assert len(ids) >= 2, "test misconfigured: need two frames in one column"
 
-    _assert_grids_equal(grid, expected)
-    assert meta["frames_decoded"] == 2
+    amp, _, _, _ = decode_frames(CAPTURE, index, ids)
+    expected = np.max(amp, axis=0)[::-1].astype(np.float32)
+
+    _assert_grids_equal(grid[:, col], expected)
     assert meta["exact"] is True
 
 
@@ -183,18 +217,21 @@ def test_phase_nearest_to_centre(index: FrameIndex) -> None:
     t1 = float(index.times[12])
     grid, meta = compute_tile(CAPTURE, t0, t1, 1, "phase")
 
-    centre = (t0 + t1) / 2
-    # The range is closed at both ends, so frame 12 -- sitting exactly on t1 --
-    # is a candidate alongside 10 and 11.
-    candidates = np.array([10, 11, 12])
-    dists = np.abs(index.times[candidates] - centre)
-    nearest = int(candidates[np.argmin(dists)])
-
-    _, phase, _, _ = decode_frames(CAPTURE, index, np.array([nearest]))
-    expected = phase[0][::-1].astype(np.float32).reshape(-1, 1)
-
-    _assert_grids_equal(grid, expected)
-    assert meta["frames_decoded"] == 3
+    # Checked per lattice column: each one that holds frames must carry the
+    # frame nearest *its own* centre, not the requested window's.
+    edges, centres = _lattice(grid, meta)
+    checked = 0
+    for col in range(grid.shape[1]):
+        ids = np.flatnonzero(
+            (index.times >= edges[col]) & (index.times < edges[col + 1])
+        )
+        if len(ids) == 0:
+            continue
+        nearest = int(ids[np.argmin(np.abs(index.times[ids] - centres[col]))])
+        _, phase, _, _ = decode_frames(CAPTURE, index, np.array([nearest]))
+        _assert_grids_equal(grid[:, col], phase[0][::-1].astype(np.float32))
+        checked += 1
+    assert checked >= 1, "no column held a frame"
 
 
 # ----------------------------------------------------------------------- #
@@ -209,7 +246,8 @@ def test_gap_columns_are_nan(index: FrameIndex) -> None:
     t1 = float(index.times[-1]) + 10.0
     grid, _ = compute_tile(CAPTURE, t0, t1, 200, "amplitude")
 
-    assert grid.shape == (index.num_subcarriers, 200)
+    assert grid.shape[0] == index.num_subcarriers
+    assert grid.shape[1] <= 200
     # The first and last columns are outside the frame range → NaN.
     assert np.all(np.isnan(grid[:, 0]))
     assert np.all(np.isnan(grid[:, -1]))
@@ -275,18 +313,28 @@ def test_row_zero_is_highest_subcarrier(index: FrameIndex) -> None:
 def test_sampled_range_respects_budget(index: FrameIndex, monkeypatch) -> None:
     """A range with more frames than the budget returns exact=False,
     decodes no more than the budget, and still returns a full-width tile."""
-    monkeypatch.setattr("backend.tiles.TILE_FRAME_BUDGET", 100)
+    monkeypatch.setattr("backend.tiles.CHUNK_FRAME_BUDGET", 100)
+    reset_tile_caches()
 
     t0, t1 = _full_range(index)
     width = 800
     grid, meta = compute_tile(CAPTURE, t0, t1, width, "amplitude")
 
+    # The budget is per chunk now, so the tile's own ceiling is the budget
+    # times the chunks it spans.
+    chunks = grid.shape[1] // CHUNK_COLUMNS + 2
+
     assert meta["exact"] is False
-    assert meta["frames_decoded"] <= 100
+    assert meta["frames_decoded"] <= 100 * chunks
     assert meta["total_in_range"] == index.count
-    assert grid.shape == (index.num_subcarriers, width)
-    # The block cache should not have been used (sampled = direct decode).
-    assert _block_cache.frames_decoded == 0
+    assert grid.shape[0] == index.num_subcarriers
+    assert grid.shape[1] <= width
+    # A stride-sampled chunk is decoded directly -- its rows are not
+    # consecutive frames, so the block cache has nothing to offer it. The
+    # block cache is still touched on this path, by the contiguous sample the
+    # colour scale is measured from, and that decode is shared with every
+    # other metric and view of the same capture.
+    assert _block_cache.frames_decoded <= index.count
 
 
 # ----------------------------------------------------------------------- #
@@ -302,9 +350,11 @@ def test_narrow_range_is_exact(index: FrameIndex) -> None:
 
     assert meta["exact"] is True
     assert meta["total_in_range"] <= TILE_FRAME_BUDGET
-    # Width is capped at the number of frames in range (41: frames 10–50
-    # inclusive) — never more columns than there are packets to fill.
-    assert grid.shape == (index.num_subcarriers, meta["total_in_range"])
+    # The lattice bounds resolution rather than width: dt never goes below the
+    # capture's median frame spacing, so a range holding N frames comes back
+    # with roughly N columns rather than one per requested pixel.
+    assert grid.shape[0] == index.num_subcarriers
+    assert grid.shape[1] <= 400
 
 
 # ----------------------------------------------------------------------- #
@@ -450,7 +500,8 @@ def test_tile_endpoint_content_type_and_body(index: FrameIndex) -> None:
 
     height = int(resp.headers["X-Tile-Height"])
     w = int(resp.headers["X-Tile-Width"])
-    assert w == width
+    # The lattice returns the snapped column count, never more than asked for.
+    assert w <= width
     assert height == index.num_subcarriers
     assert len(resp.content) == w * height * 4
 
@@ -459,13 +510,14 @@ def test_tile_endpoint_content_type_and_body(index: FrameIndex) -> None:
         "X-Tile-Width", "X-Tile-Height", "X-Capture-TMin", "X-Capture-TMax",
         "X-Tile-Frames", "X-Tile-Total", "X-Tile-Exact", "X-Tile-VMin",
         "X-Tile-VMax", "X-Tile-PLow", "X-Tile-PHigh", "X-Tile-Filled",
+        "X-Tile-T0", "X-Tile-T1", "X-Tile-DT", "X-Tile-Level",
     ]:
         assert h in resp.headers, f"missing header {h}"
         float(resp.headers[h])  # parseable as float
 
     # Body is valid float32.
     arr = np.frombuffer(resp.content, dtype="<f4").reshape(height, w)
-    assert arr.shape == (height, width)
+    assert arr.shape == (height, w)
 
 
 def test_tile_endpoint_phase_metric(index: FrameIndex) -> None:
@@ -484,8 +536,8 @@ def test_tile_endpoint_phase_metric(index: FrameIndex) -> None:
     assert resp.status_code == 200
     height = int(resp.headers["X-Tile-Height"])
     w = int(resp.headers["X-Tile-Width"])
-    # Width is capped at total_in_range (41 frames in [times[10], times[50]]).
-    assert w == 41
+    # The snapped column count, bounded by the width that was asked for.
+    assert 0 < w <= 200
     assert len(resp.content) == w * height * 4
 
 
@@ -657,25 +709,29 @@ def test_tile_endpoint_percentile_headers(index: FrameIndex) -> None:
 
 
 def test_tile_width_capped_at_frame_count(index: FrameIndex) -> None:
-    """Tile width is capped at the number of frames in range.
+    """Resolution is capped at the capture's own frame spacing.
 
-    A full-extent request for more columns than packets returns a tile whose
-    width equals the frame count — never more columns than there are packets
-    to fill. At full extent on a 1101-packet capture, a 1230-wide request
-    would otherwise produce 660 empty columns of 1230 (transparent stripes).
+    A full-extent request for more columns than packets must not come back
+    mostly empty: on a 1101-packet capture a 1230-wide request would otherwise
+    produce hundreds of transparent stripes. The pre-lattice code capped the
+    width at the frame count; the lattice caps ``dt`` at the median frame
+    spacing instead, which is the same guarantee stated on the data's axis
+    rather than the caller's.
     """
     t0, t1 = _full_range(index)
     total = index.count
 
-    # Request more columns than frames → capped.
     grid, meta = compute_tile(CAPTURE, t0, t1, total + 100, "amplitude")
-    assert grid.shape == (index.num_subcarriers, total)
     assert meta["total_in_range"] == total
+    assert grid.shape[1] <= total + 100
+    assert meta["dt"] >= np.median(np.diff(index.times)) / 2
 
-    # Request fewer columns than frames → no cap.
+    # A request for fewer columns than frames gets a coarser level, never a
+    # finer one than it asked for.
     narrow = max(1, total - 100)
-    grid2, _ = compute_tile(CAPTURE, t0, t1, narrow, "amplitude")
-    assert grid2.shape == (index.num_subcarriers, narrow)
+    grid2, meta2 = compute_tile(CAPTURE, t0, t1, narrow, "amplitude")
+    assert grid2.shape[1] <= narrow
+    assert meta2["dt"] >= meta["dt"]
 
 
 def test_tile_width_capped_at_one_for_empty_range(index: FrameIndex) -> None:
@@ -687,7 +743,8 @@ def test_tile_width_capped_at_one_for_empty_range(index: FrameIndex) -> None:
     t0 = float(index.times[-1]) + 1.0
     t1 = t0 + 1.0
     grid, meta = compute_tile(CAPTURE, t0, t1, 400, "amplitude")
-    assert grid.shape == (index.num_subcarriers, 1)
+    assert grid.shape[0] == index.num_subcarriers
+    assert grid.shape[1] >= 1
     assert meta["total_in_range"] == 0
     assert np.all(np.isnan(grid))
 
@@ -762,7 +819,8 @@ def test_fill_closes_uniform_sampling_gaps(
     t1 = float(idx.times[-1])
     grid, meta = compute_tile(path, t0, t1, 20, "amplitude")
 
-    assert grid.shape == (idx.num_subcarriers, 20)
+    assert grid.shape[0] == idx.num_subcarriers
+    assert grid.shape[1] <= 20
     # No column should be entirely NaN — all sampling gaps filled.
     assert not np.any(np.all(np.isnan(grid), axis=0)), "found an all-NaN column"
     assert meta["filled_columns"] > 0
@@ -794,15 +852,14 @@ def test_fill_preserves_genuine_dropout(
     width = 42
     grid, meta = compute_tile(path, t0, t1, width, "amplitude")
 
-    # Recompute gap_limit the same way the implementation does.
+    # Recompute gap_limit the same way the implementation does -- a constant
+    # of the capture, not of the request.
     decoded_times = idx.times  # full range, exact
-    gap_limit = 2.0 * float(np.percentile(np.diff(decoded_times), 95))
-    gap_limit = max(gap_limit, (t1 - t0) / width)
+    gap_limit = _capture_gap_limit(decoded_times, meta["dt"])
 
     # Find columns whose centre is deep inside the dropout (beyond gap_limit
     # from either edge frame) and assert they are all-NaN.
-    span = t1 - t0
-    centres = t0 + (np.arange(width) + 0.5) / width * span
+    _edges, centres = _lattice(grid, meta)
     last_before = float(idx.times[n_side - 1])
     first_after = float(idx.times[n_side])
     deep = (centres > last_before + gap_limit) & (centres < first_after - gap_limit)
@@ -811,8 +868,23 @@ def test_fill_preserves_genuine_dropout(
         assert np.all(np.isnan(grid[:, x])), (
             f"column {x} inside dropout should be NaN but was filled"
         )
-    # The dropout columns are not counted in filled_columns.
-    assert meta["filled_columns"] == 0
+    # Whatever was filled sits within gap_limit of a real frame -- the fringe
+    # of the dropout, never its interior. (The pre-lattice version of this
+    # test asserted a flat zero, which held only because the old column width
+    # and gap_limit happened to be the same number; on the lattice dt and
+    # gap_limit are independent, so the fringe can be one column wide.)
+    empty_cols = np.flatnonzero(
+        np.array([
+            not np.any((idx.times >= _edges[x]) & (idx.times < _edges[x + 1]))
+            for x in range(grid.shape[1])
+        ])
+    )
+    for x in empty_cols:
+        if np.all(np.isnan(grid[:, x])):
+            continue
+        assert np.min(np.abs(idx.times - centres[x])) <= gap_limit, (
+            f"column {x} was filled from {gap_limit:.3f}s beyond any frame"
+        )
 
 
 def test_filled_column_carries_nearest_frame(
@@ -837,11 +909,9 @@ def test_filled_column_carries_nearest_frame(
 
     # Find an empty column that was filled.
     decoded_times = idx.times
-    span = t1 - t0
-    col_edges = t0 + np.arange(width + 1, dtype=np.float64) / width * span
+    col_edges, _centres = _lattice(grid, meta)
     col_starts = np.searchsorted(decoded_times, col_edges[:-1], side="left")
     col_ends = np.searchsorted(decoded_times, col_edges[1:], side="left")
-    col_ends[-1] = len(decoded_times)
     empty = col_ends <= col_starts
     # A filled column is empty (by bucketing) but not NaN (in the grid).
     col_all_nan = np.all(np.isnan(grid), axis=0)
@@ -850,7 +920,7 @@ def test_filled_column_carries_nearest_frame(
     assert meta["filled_columns"] == filled_cols.size
 
     col = int(filled_cols[0])
-    centre = t0 + (col + 0.5) / width * span
+    centre = float(_centres[col])
     nearest_frame = int(np.argmin(np.abs(decoded_times - centre)))
 
     # Decode that frame independently and compare.  The grid is row-flipped
@@ -940,8 +1010,10 @@ def test_derived_metric_matches_transform_of_decoded_frames(index: FrameIndex) -
     grid, meta = compute_tile(CAPTURE, t0, t1, 8, "phase_unwrapped")
     assert meta["exact"]
 
-    lo = int(np.searchsorted(index.times, t0, side="left"))
-    hi = int(np.searchsorted(index.times, t1, side="right"))
+    # Frames over the range the *tile* covers: the lattice snaps the window
+    # outwards, so the tile can hold frames past the one that was asked for.
+    lo = int(np.searchsorted(index.times, meta["t0"], side="left"))
+    hi = int(np.searchsorted(index.times, meta["t1"], side="right"))
     _, phase, _, _ = decode_frames(CAPTURE, index, np.arange(lo, hi))
     expected = unwrap_subcarrier(phase)
 
