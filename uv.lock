@@ -185,6 +185,7 @@ dependencies = [
     { name = "csikit" },
     { name = "fastapi" },
     { name = "numpy" },
+    { name = "scipy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -199,6 +200,7 @@ requires-dist = [
     { name = "csikit", specifier = ">=2.5" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "scipy", specifier = ">=1.11" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
