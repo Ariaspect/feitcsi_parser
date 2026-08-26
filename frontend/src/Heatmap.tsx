@@ -6,6 +6,7 @@ import { VIRIDIS, buildLut } from "./colormap";
 import { renderTileToImageData, subcarrierSourceRect, tileSourceRect } from "./render";
 import { fetchTile, type Tile, type Metric } from "./api";
 import { type TimeLink } from "./timelink";
+import { TileScheduler, type RequestReason } from "./tilefetch";
 import {
   advanceView,
   clampScWindow,
@@ -133,11 +134,6 @@ interface PropsMirror {
   dark?: boolean;
 }
 
-interface TileEntry {
-  tile: Tile;
-  seq: number;
-}
-
 /** Fetch key — if none of these changed, the current tile is still valid. */
 interface FetchKey {
   path: string;
@@ -199,12 +195,12 @@ export function Heatmap({
   const sourceRef = useRef({});
 
   // --- Tile fetch state ---
-  const tileRef = useRef<TileEntry | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const seqRef = useRef(0);
-  const debounceTimerRef = useRef<number | null>(null);
-  const lastFetchKeyRef = useRef<FetchKey | null>(null);
-  const requestTileRef = useRef<(() => void) | null>(null);
+  const tileRef = useRef<Tile | null>(null);
+  // Debounce, dedup, abort policy and sequencing all live in the scheduler;
+  // see tilefetch.ts for why a poll-driven refetch must not abort in-flight
+  // work while a user-driven one must.
+  const schedulerRef = useRef<TileScheduler<FetchKey, Tile> | null>(null);
+  const requestTileRef = useRef<((reason: RequestReason) => void) | null>(null);
   // Color scale for metrics without a-priori bounds (amplitude, and the
   // unwrapped phase views), locked to the first tile's percentile bounds
   // (1st/99th) for a given capture. The raw min/max is dominated by outliers
@@ -282,7 +278,7 @@ export function Heatmap({
       ampScaleRef.current = null;
       tileRef.current = null;
       imageDataRef.current = null;
-      lastFetchKeyRef.current = null;
+      schedulerRef.current?.reset();
     }
 
     const prevCapture = captureRef.current;
@@ -301,7 +297,7 @@ export function Heatmap({
       ampScaleRef.current = null;
       tileRef.current = null;
       imageDataRef.current = null;
-      lastFetchKeyRef.current = null;
+      schedulerRef.current?.reset();
     } else if (viewRef.current) {
       // Same capture: slide if live, freeze if not. advanceView returns the
       // same reference when frozen, so a frozen view is bit-identical across
@@ -322,7 +318,10 @@ export function Heatmap({
 
     drawRef.current?.();
     syncZoomRef.current?.();
-    requestTileRef.current?.();
+    // Poll-driven: this effect runs on every render, and on a live capture
+    // that means every /api/meta poll. Aborting in-flight work here is what
+    // starved the panels.
+    requestTileRef.current?.("poll");
   });
 
   // -------------------------------------------------------------------------
@@ -424,7 +423,7 @@ export function Heatmap({
         return;
       }
 
-      const tile = tileEntry.tile;
+      const tile = tileEntry;
 
       // --- Color scale ---
       // A metric with an a-priori range (phase) uses it and never moves.
@@ -595,8 +594,8 @@ export function Heatmap({
       // frames come from different senders, so it is skipped rather than
       // applied at ~1/20th the effect and reported as done.
       const live = followLiveRef.current;
-      const sampled = tileEntry.tile.exact === false;
-      const uncorrected = tileEntry.tile.anchored === false;
+      const sampled = tileEntry.exact === false;
+      const uncorrected = tileEntry.anchored === false;
       ctx.font = "11px sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "top";
@@ -686,7 +685,7 @@ export function Heatmap({
         followLiveRef.current = false;
         hoverRef.current = null;
         draw();
-        requestTileRef.current?.();
+        requestTileRef.current?.("user");
         // Broadcast the time window to linked plots. Subcarrier zoom stays
         // per-plot and is not part of the message.
         const link = props.timeLink;
@@ -737,111 +736,89 @@ export function Heatmap({
     };
     syncZoomRef.current = syncZoomToView;
 
-    // --- Tile fetch: trailing-debounced, one AbortController per request,
-    // monotonically sequenced so stale responses are dropped. ---
-    const doFetchTile = async () => {
-      const props = propsRef.current;
-      const view = viewRef.current;
-      const geo = geometryRef.current;
-      if (!props || !view || !geo) return;
-      if (props.numSubcarriers === 0 || !(view.tMax > view.tMin)) return;
-      // A folded panel has no width to draw into. Its ResizeObserver still
-      // fires as it folds and unfolds, and a request made at that moment
-      // would decode the window's frames in full to fill a one-column tile
-      // nobody can see. Unfolding fires the observer again and fetches at the
-      // real width, so nothing is lost by declining here.
-      if (geo.plot.w < 1) return;
-
-      const t0 = view.tMin;
-      const t1 = view.tMax;
-      // Requested width = the plot's pixel width, so the server never returns
-      // more columns than there are pixels to display them.
-      const width = Math.max(1, Math.round(geo.plot.w));
-
-      // Skip if nothing changed since the last fetch — a subcarrier-only
-      // change (shift+wheel, shift+drag) reaches here via Effect 1 but has
-      // the same time window, so it correctly does not refetch.
-      const lastKey = lastFetchKeyRef.current;
-      if (
-        lastKey &&
-        lastKey.path === props.path &&
-        lastKey.metric === props.metric &&
-        lastKey.t0 === t0 &&
-        lastKey.t1 === t1 &&
-        lastKey.width === width &&
-        lastKey.mimo === props.mimo &&
-        lastKey.sourceMac === props.sourceMac &&
-        lastKey.interpolate === props.interpolate
-      ) {
-        return;
-      }
-      lastFetchKeyRef.current = {
-        path: props.path,
-        metric: props.metric,
-        t0,
-        t1,
-        width,
-        mimo: props.mimo,
-        sourceMac: props.sourceMac,
-        interpolate: props.interpolate,
-      };
-
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const seq = ++seqRef.current;
-
-      try {
-        const tile = props.source
-          ? await props.source(t0, t1, width, controller.signal)
-          : await fetchTile(
-              props.path,
-              t0,
-              t1,
-              width,
-              props.metric,
-              controller.signal,
-              props.mimo,
-              props.sourceMac,
-              props.interpolate,
-            );
-        // Drop stale responses — a newer request may have been issued while
-        // this one was in flight. Aborting alone is not sufficient: the fetch
-        // can still resolve between abort() and the abort taking effect.
-        if (seq < seqRef.current) return;
-        if (controller.signal.aborted) return;
-
+    // --- Tile fetch: debounce, dedup, abort policy and sequencing all live
+    // in TileScheduler. plan() snapshots the window at request time (not at
+    // schedule time), so a request deferred behind an in-flight one still
+    // fetches the newest window rather than the one that queued it. ---
+    const scheduler = new TileScheduler<FetchKey, Tile>({
+      plan: () => {
+        const props = propsRef.current;
+        const view = viewRef.current;
+        const geo = geometryRef.current;
+        if (!props || !view || !geo) return null;
+        if (props.numSubcarriers === 0 || !(view.tMax > view.tMin)) return null;
+        // A folded panel has no width to draw into. Its ResizeObserver still
+        // fires as it folds and unfolds, and a request made at that moment
+        // would decode the window's frames in full to fill a one-column tile
+        // nobody can see. Unfolding fires the observer again and fetches at the
+        // real width, so nothing is lost by declining here.
+        if (geo.plot.w < 1) return null;
+        return {
+          path: props.path,
+          metric: props.metric,
+          t0: view.tMin,
+          t1: view.tMax,
+          // Requested width = the plot's pixel width, so the server never
+          // returns more columns than there are pixels to display them.
+          width: Math.max(1, Math.round(geo.plot.w)),
+          mimo: props.mimo,
+          sourceMac: props.sourceMac,
+          interpolate: props.interpolate,
+        };
+      },
+      // A subcarrier-only change (shift+wheel, shift+drag) reaches the
+      // scheduler via Effect 1 but has the same time window, so it correctly
+      // does not refetch.
+      sameKey: (a, b) =>
+        a.path === b.path &&
+        a.metric === b.metric &&
+        a.t0 === b.t0 &&
+        a.t1 === b.t1 &&
+        a.width === b.width &&
+        a.mimo === b.mimo &&
+        a.sourceMac === b.sourceMac &&
+        a.interpolate === b.interpolate,
+      run: (key, signal) => {
+        const props = propsRef.current;
+        if (props?.source) {
+          return props.source(key.t0, key.t1, key.width, signal);
+        }
+        return fetchTile(
+          key.path,
+          key.t0,
+          key.t1,
+          key.width,
+          key.metric as Metric,
+          signal,
+          key.mimo,
+          key.sourceMac,
+          key.interpolate,
+        );
+      },
+      deliver: (_key, tile) => {
+        const props = propsRef.current;
         // Lock amplitude scale to the first tile with a meaningful range.
         // Prefer percentile bounds (robust to outliers); fall back to extrema
         // if the percentile band is degenerate (pHigh === pLow); leave unset
-        // if both are degenerate — draw() then uses the current tile's vmin/vmax.
-        if (autoScales(props) && ampScaleRef.current === null) {
+        // if both are degenerate — draw() then uses the current tile's
+        // vmin/vmax.
+        if (props && autoScales(props) && ampScaleRef.current === null) {
           if (tile.pHigh > tile.pLow) {
             ampScaleRef.current = { lo: tile.pLow, hi: tile.pHigh };
           } else if (tile.vmax > tile.vmin) {
             ampScaleRef.current = { lo: tile.vmin, hi: tile.vmax };
           }
         }
-
-        tileRef.current = { tile, seq };
+        tileRef.current = tile;
         draw();
-      } catch (e) {
-        // AbortError is normal control flow during zoom/pan — the user moved
-        // on before the previous request finished. Swallow it silently.
-        if (e instanceof Error && e.name === "AbortError") return;
+      },
+      onError: (e) => {
         console.error("tile fetch failed:", e);
-      }
-    };
-
-    const scheduleTileFetch = () => {
-      if (debounceTimerRef.current !== null) {
-        clearTimeout(debounceTimerRef.current);
-      }
-      debounceTimerRef.current = window.setTimeout(() => {
-        debounceTimerRef.current = null;
-        void doFetchTile();
-      }, 100);
-    };
+      },
+      debounceMs: 100,
+    });
+    schedulerRef.current = scheduler;
+    const scheduleTileFetch = (reason: RequestReason) => scheduler.request(reason);
     requestTileRef.current = scheduleTileFetch;
 
     // --- Double-click: reset to full extent and re-enable follow-live. ---
@@ -859,7 +836,7 @@ export function Heatmap({
       hoverRef.current = null;
       syncZoomToView();
       draw();
-      scheduleTileFetch();
+      scheduleTileFetch("user");
       const link = props.timeLink;
       if (link) {
         link.publish(
@@ -937,7 +914,7 @@ export function Heatmap({
       const geo = geometryRef.current;
       const tileEntry = tileRef.current;
       if (!props || !geo || !viewRef.current || !tileEntry) return;
-      const tile = tileEntry.tile;
+      const tile = tileEntry;
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -998,7 +975,10 @@ export function Heatmap({
     const ro = new ResizeObserver(() => {
       draw();
       syncZoomToView();
-      scheduleTileFetch();
+      // The plot width changed, so the tile in flight has the wrong column
+      // count for the canvas it would land on: abort it like any other
+      // user-driven change.
+      scheduleTileFetch("user");
     });
     ro.observe(container);
 
@@ -1021,14 +1001,15 @@ export function Heatmap({
         hoverRef.current = null;
         syncZoomToView();
         draw();
-        scheduleTileFetch();
+        // Someone gestured on a linked plot: same standing as a gesture here.
+        scheduleTileFetch("user");
       });
     }
 
     // Initial render.
     draw();
     syncZoomToView();
-    scheduleTileFetch();
+    scheduleTileFetch("user");
 
     return () => {
       ro.disconnect();
@@ -1041,10 +1022,9 @@ export function Heatmap({
       window.removeEventListener("mouseup", onShiftUp);
       canvas.removeEventListener("mousemove", onMove);
       canvas.removeEventListener("mouseleave", onLeave);
-      if (debounceTimerRef.current !== null) {
-        clearTimeout(debounceTimerRef.current);
-      }
-      abortRef.current?.abort();
+      scheduler.dispose();
+      schedulerRef.current = null;
+      requestTileRef.current = null;
     };
     // Mount once: listeners and d3-zoom are registered exactly once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
