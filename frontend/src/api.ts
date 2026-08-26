@@ -301,9 +301,11 @@ export type PresenceChannel = "complex" | "phase" | "magnitude";
 
 /** One verdict per analysis window.
  *
- *  `unknown` exists so that missing data can never be reported as an empty
- *  room: a window assembled mostly from samples interpolated across a capture
- *  dropout comes out flat, and flat scores exactly like absence. */
+ *  `unknown` exists so that absence is never claimed for free. A window
+ *  assembled mostly from samples interpolated across a capture dropout comes
+ *  out flat, and flat scores exactly like an empty room — and so does every
+ *  window when no empty-room reference was given at all, because `empty`
+ *  means "matched a room known to be empty" and there is nothing to match. */
 export type PresenceState = "unknown" | "moving" | "present" | "empty";
 
 export interface PresenceParams {
@@ -319,6 +321,18 @@ export interface PresenceParams {
   max_gap_fraction: number;
   smooth_windows: number;
   present_threshold: number;
+  baseline_dev_k: number;
+  motion_ratio_hi: number;
+}
+
+/** What the empty-room reference range measured, or `null` when none was
+ *  given. `devP95` is how far that room's own windows strayed from its
+ *  profile — the unit `baselineDev` is judged in — and `motionFloor` is its
+ *  fractional-motion noise floor, which is never zero. */
+export interface PresenceReference {
+  devP95: number;
+  motionFloor: number;
+  nWindows: number;
 }
 
 /** Series are aligned with `timeS` and hold `null` where a window has no
@@ -331,6 +345,18 @@ export interface Presence {
   tonality: (number | null)[];
   motionGate: (number | null)[];
   motionLevel: (number | null)[];
+  /** Fractional motion as a multiple of the reference room's own floor.
+   *  Dimensionless, so one threshold works across radios; `null` throughout
+   *  when no reference was given. */
+  motionRatio: (number | null)[];
+  /** How far this window's channel sits from the empty-room profile, in dB.
+   *  The only evidence that can see a motionless occupant: every other series
+   *  here is mean-removed, and a body parked in a room is a mean. */
+  baselineDev: (number | null)[];
+  /** Whether the breathing score cleared `present_threshold` here. Evidence
+   *  only — it does not decide occupancy, and `rateRpm` is `null` where it is
+   *  false. */
+  breathing: boolean[];
   rateRpm: (number | null)[];
   unknown: boolean[];
   /** The capture's own median frame rate, not a function of any width. */
@@ -343,6 +369,9 @@ export interface Presence {
   /** The slowest rate this window length can actually resolve. Above the
    *  requested floor means slower breathing is out of reach here. */
   rpmFloorEff: number;
+  /** `baselineDev` above this is an occupant. `null` without a reference. */
+  baselineDevThreshold: number | null;
+  reference: PresenceReference | null;
   framesUsed: number;
   framesWithoutRatio: number;
   captureTMin: number;
@@ -360,6 +389,14 @@ export interface PresenceOptions {
   presentThreshold?: number;
   motionFracLo?: number;
   motionFracHi?: number;
+  /** A stretch of capture known to be empty. Both ends or neither. Without
+   *  it the detector reports motion but never absence. */
+  refT0?: number | null;
+  refT1?: number | null;
+  /** Capture holding the reference range; defaults to the analysed one. */
+  refPath?: string | null;
+  baselineDevK?: number;
+  motionRatioHi?: number;
   mimo?: string | null;
   sourceMac?: string | null;
   interpolate?: boolean;
@@ -374,13 +411,18 @@ export async function fetchPresence(
 ): Promise<Presence> {
   const {
     channel = "complex",
-    windowSeconds = 12,
+    windowSeconds = 30,
     hopSeconds = 1,
     rpmLo = 9,
     rpmHi = 30,
     presentThreshold = 0.25,
     motionFracLo = 0.1,
     motionFracHi = 0.25,
+    refT0,
+    refT1,
+    refPath,
+    baselineDevK = 3,
+    motionRatioHi = 2,
     mimo,
     sourceMac,
     interpolate,
@@ -392,6 +434,9 @@ export async function fetchPresence(
     `&window_seconds=${windowSeconds}&hop_seconds=${hopSeconds}` +
     `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&present_threshold=${presentThreshold}` +
     `&motion_frac_lo=${motionFracLo}&motion_frac_hi=${motionFracHi}` +
+    `&baseline_dev_k=${baselineDevK}&motion_ratio_hi=${motionRatioHi}` +
+    (refT0 != null && refT1 != null ? `&ref_t0=${refT0}&ref_t1=${refT1}` : "") +
+    (refPath ? `&ref_path=${encodeURIComponent(refPath)}` : "") +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
 
@@ -409,6 +454,9 @@ export async function fetchPresence(
     tonality: body.tonality,
     motionGate: body.motion_gate,
     motionLevel: body.motion_level,
+    motionRatio: body.motion_ratio,
+    baselineDev: body.baseline_dev,
+    breathing: body.breathing,
     rateRpm: body.rate_rpm,
     unknown: body.unknown,
     fsHz: body.fs_hz,
@@ -416,6 +464,14 @@ export async function fetchPresence(
     hop: body.hop,
     windowSeconds: body.window_seconds,
     rpmFloorEff: body.rpm_floor_eff,
+    baselineDevThreshold: body.baseline_dev_threshold ?? null,
+    reference: body.reference
+      ? {
+          devP95: body.reference.dev_p95,
+          motionFloor: body.reference.motion_floor,
+          nWindows: body.reference.n_windows,
+        }
+      : null,
     framesUsed: body.frames_used,
     framesWithoutRatio: body.frames_without_ratio,
     captureTMin: body.t_min,
