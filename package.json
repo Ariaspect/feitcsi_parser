@@ -7,7 +7,7 @@
     "dev:backend": "uv run uvicorn backend.app:app --reload --port 8000",
     "dev:frontend": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run build",
-    "serve": "uv run uvicorn backend.app:app --port 8000"
+    "serve": "uv run uvicorn backend.app:app --host ${HOST:-127.0.0.1} --port ${PORT:-8000}"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

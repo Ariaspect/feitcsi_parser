@@ -111,6 +111,10 @@ export function App() {
   // Row count and Nyquist are properties of the capture's own frame rate, so
   // they are not known until the first response comes back.
   const [dopplerGeom, setDopplerGeom] = useState<{ rows: number; fMax: number } | null>(null);
+  // Which capture identity the geometry above describes, and whether a probe
+  // for it is already in flight. See the effect that fills it in.
+  const dopplerGeomKeyRef = useRef<string | null>(null);
+  const dopplerGeomInFlightRef = useRef(false);
   // Swap correction on the CSI ratio panels. Some frames arrive with the rx
   // streams exchanged (ratio reciprocal) or the ratio negated (phase +pi);
   // correction puts them back. On by default because a capture read without
@@ -173,28 +177,42 @@ export function App() {
   // panel: Heatmap needs a row count up front, and both fall out of the
   // capture's median frame rate rather than anything the client picks. The
   // panel's own fetch then hits the backend block cache this warmed.
+  //
+  // The probe belongs to the capture's identity, not to the poll. Keying it on
+  // the live extent instead re-ran it every refresh and its cleanup aborted the
+  // request in flight; a full-extent Doppler decode takes longer than a poll
+  // period, so the geometry never arrived and the Doppler tab stayed empty for
+  // as long as the capture was live. Retry while it is unknown, one probe at a
+  // time, and stop once it is learned -- neither the row count nor the Nyquist
+  // ceiling moves as the capture grows.
   useEffect(() => {
-    if (!meta || meta.total_frames <= 0) {
+    const key = `${path}|${winSeconds}|${mimo}|${sourceMac}`;
+    if (dopplerGeomKeyRef.current !== key) {
+      dopplerGeomKeyRef.current = key;
       setDopplerGeom(null);
-      return;
     }
-    let cancelled = false;
-    const controller = new AbortController();
+    if (!meta || meta.total_frames <= 0) return;
+    if (dopplerGeom !== null) return;
+    // Never abort a probe in flight: it is the expensive request, and the next
+    // poll is 300ms away.
+    if (dopplerGeomInFlightRef.current) return;
+    dopplerGeomInFlightRef.current = true;
     fetchDoppler(path, meta.t_min, meta.t_max, "amplitude", winSeconds,
-                 controller.signal, mimo, sourceMac)
+                 undefined, mimo, sourceMac)
       .then((t) => {
-        if (!cancelled) setDopplerGeom({ rows: t.height, fMax: t.fMax });
+        if (dopplerGeomKeyRef.current === key) {
+          setDopplerGeom({ rows: t.height, fMax: t.fMax });
+        }
       })
       .catch(() => {
         // A range too short for the window is an ordinary state here, not an
         // error worth taking over the page: the panel shows its own message.
-        if (!cancelled) setDopplerGeom(null);
+        // Leaving the geometry unknown means the next poll retries.
+      })
+      .finally(() => {
+        dopplerGeomInFlightRef.current = false;
       });
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [path, meta?.t_min, meta?.t_max, meta?.total_frames, winSeconds, mimo, sourceMac]);
+  }, [path, winSeconds, mimo, sourceMac, meta, dopplerGeom]);
 
   const dopplerSource = useCallback(
     (dopplerMetric: DopplerMetric) =>

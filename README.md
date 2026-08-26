@@ -65,14 +65,115 @@ Frontend on `:5173` (proxies `/api` → `:8000`):
 npm run dev:frontend
 ```
 
-### Production (single port)
+### On a remote server (backend and frontend, one port)
+
+The way to run this on the collection host. uvicorn serves `/api` **and** the
+built frontend from the same origin, so there is nothing to proxy, no CORS, and
+no backend port for the client to know about.
+
+```bash
+# once, on the server
+uv sync                      # backend deps
+npm install                  # root: concurrently
+npm --prefix frontend install
+npm run build                # frontend/dist
+
+# run
+HOST=0.0.0.0 npm run serve   # :8000; PORT=9000 to move it
+```
+
+Open `http://<host>:8000` — e.g. http://lg:8000. Every feature works over this
+one port: capture listing, live polling, tiles, Doppler.
+
+Four things decide whether it stays working:
+
+- **Build before you start, rebuild after frontend changes.** The static mount
+  is made at import time only if `frontend/dist` exists, so a server started
+  before the first build serves the API and nothing else. `npm run build` then
+  restart.
+- **One worker.** The frame index, the decoded-block cache (256 MB cap) and the
+  capture streams are per-process state. A second uvicorn worker does not share
+  any of it: it re-decodes every capture into its own copy, so memory multiplies
+  and the cache the panels depend on stops hitting. Leave `--workers` alone.
+- **Point it at the captures.** `captures/` in the repo is always readable —
+  a symlink into a data mount is the simplest option. To name the directory
+  instead, set `FEITCSI_CAPTURE_ROOTS` to an `os.pathsep`-separated list of
+  extra roots (`FEITCSI_CAPTURE_ROOTS=/data/csi:/mnt/lab`). Requests for paths
+  outside every root are refused. `scripts/csi_live_ship.sh` writes growing
+  captures here, and a live view works on them as it does locally.
+- **Open the port.** The server binds `0.0.0.0`; the firewall still has to
+  allow it, and nothing in the app authenticates — put it on a trusted network,
+  or behind something that does.
+
+Under systemd:
+
+```ini
+# /etc/systemd/system/feitcsi.service
+[Unit]
+Description=FeitCSI heatmap
+After=network-online.target
+
+[Service]
+User=csi
+WorkingDirectory=/srv/feitcsi_parser
+Environment=HOST=0.0.0.0 PORT=8000
+Environment=FEITCSI_CAPTURE_ROOTS=/data/csi
+ExecStart=/usr/bin/npm run serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Behind nginx or Caddy, pass the client address through
+(`uvicorn --proxy-headers --forwarded-allow-ips=127.0.0.1`) and let the proxy
+terminate TLS. Tiles are ordinary single responses — a few hundred kB of
+float32 — so no streaming or buffering settings are involved.
+
+Tile latency is CPU, not network: a full-extent tile is ~0.4 s on a laptop core
+and the eight panels ask at once, so a slower box just refreshes more slowly.
+Live polls no longer cancel requests that are still in flight, so a slow server
+falls behind gracefully instead of showing nothing.
+
+### From another machine (dev server)
+
+For editing on the box rather than deploying, the Vite dev server also binds
+`0.0.0.0`:
+
+```bash
+# on the collection host
+npm run dev:all
+```
+
+Open `http://<host>:5173` — e.g. http://lg:5173. The page fetches only relative
+`/api` URLs and Vite forwards that prefix to uvicorn, so the browser sees one
+origin here too. uvicorn stays on loopback; nothing but Vite needs to be
+reachable.
+
+Two environment variables adjust it:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `API_TARGET` | `http://localhost:8000` | Where `/api` is forwarded. Point it elsewhere to drive a backend on another box. |
+| `VITE_ALLOWED_HOSTS` | unset — any host | Comma-separated hostnames allowed to reach the dev server. A leading dot matches subdomains (`lg,.example.com`). |
+
+Vite rejects requests whose `Host` header it does not recognise, which would
+otherwise block every LAN name the machine answers to; unset, the check is off,
+which is what a lab network wants. Set `VITE_ALLOWED_HOSTS` on anything less
+trusted. `vite preview` (`:4173`) carries the same proxy and binding, so a
+production build can be checked over the network the same way.
+
+### Production (single port, local)
 
 ```bash
 npm run build         # builds frontend into frontend/dist
 npm run serve         # uvicorn serves API + static frontend at :8000
 ```
 
-Open http://localhost:8000
+Open http://localhost:8000. Binds loopback by default; see
+[On a remote server](#on-a-remote-server-backend-and-frontend-one-port) to
+expose it.
 
 ## Usage
 
