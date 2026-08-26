@@ -629,7 +629,28 @@ def list_captures() -> list[dict]:
     return files
 
 
+class _HashedStatic(StaticFiles):
+    """Static files with cache headers that match how Vite names them.
+
+    Everything under ``assets/`` is content-hashed, so a changed file is a
+    changed URL and the old one can be cached forever. ``index.html`` is the
+    one file whose URL never changes while its contents do -- it is what names
+    the current bundle hash. Served without a Cache-Control, browsers apply
+    heuristic caching to it and keep loading a stale bundle after a deploy,
+    which shows up as a feature simply missing from the UI. Revalidate it.
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        resp = super().file_response(*args, **kwargs)
+        path = args[0] if args else kwargs.get("full_path", "")
+        if "/assets/" in str(path).replace("\\", "/"):
+            resp.headers["cache-control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["cache-control"] = "no-cache"
+        return resp
+
+
 # Serve built frontend (production). In dev, Vite runs separately on :5173.
 _dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _dist.is_dir():
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
+    app.mount("/", _HashedStatic(directory=str(_dist), html=True), name="frontend")
