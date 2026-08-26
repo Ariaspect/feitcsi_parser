@@ -222,8 +222,9 @@ def test_filtered_tile_fills_gaps_but_not_filter_holes() -> None:
 
     times = np.asarray(idx.times)
     kept = times[np.array([m == mac for m in idx.source_macs])]
-    edges = t0 + np.arange(width + 1) / width * (t1 - t0)
-    # Last column closed on the right, matching compute_tile's col_ends[-1].
+    # Columns are lattice columns, so the edges come from the tile rather than
+    # from the window that was requested.
+    edges = meta["t0"] + np.arange(grid.shape[1] + 1) * meta["dt"]
     any_frame = np.histogram(times, edges)[0] > 0
     any_kept = np.histogram(kept, edges)[0] > 0
     finite = np.isfinite(grid).any(axis=0)
@@ -267,13 +268,14 @@ def test_tile_unfiltered_fills_gaps_on_sparse_capture(mixed_file: Path) -> None:
     t0 = float(idx.times[0])
     t1 = float(idx.times[-1])
 
-    # 6 frames in 5 columns: at least one column is a sampling gap.
+    # 6 frames over a handful of lattice columns: at least one column is a
+    # sampling gap.
     grid, meta = compute_tile(mixed_file, t0, t1, 5, "amplitude")
     assert meta["frames_decoded"] == 6
-    # Either no gaps (every column got a frame) or some gaps filled: in both
-    # cases, finite columns should equal width when unfiltered.
+    # Unfiltered, every column either holds a frame or borrows from its
+    # neighbours -- none is left blank.
     finite_cols = int(np.isfinite(grid).any(axis=0).sum())
-    assert finite_cols == 5
+    assert finite_cols == grid.shape[1]
 
 
 def test_tile_mac_filter(mixed_file: Path) -> None:

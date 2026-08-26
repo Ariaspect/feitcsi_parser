@@ -241,18 +241,20 @@ Query params:
 - `mimo`, `source_mac` — optional filters, `'all'` or a specific value
 - `interpolate` — default `true`; see [Interpolation](#interpolation) below
 
-Returns a bare `(num_subcarriers, width)` little-endian float32 array,
+Returns a bare `(num_subcarriers, columns)` little-endian float32 array,
 row-major, row 0 = highest subcarrier. The body stays a buffer the client wraps
 in a `Float32Array`; metadata rides in headers:
 
 | Header | Meaning |
 |---|---|
-| `X-Tile-Width` / `X-Tile-Height` | Grid shape. Width may be **less** than requested — it is capped at the frame count. |
+| `X-Tile-Width` / `X-Tile-Height` | Grid shape. Width is the **snapped** column count and is never more than requested. |
+| `X-Tile-T0` / `X-Tile-T1` | The window this tile actually covers — see [the lattice](#the-lattice). Always contains `[t0, t1]`, rarely equals it. **Draw against these, not against the request.** |
+| `X-Tile-DT` / `X-Tile-Level` | Seconds per column, and the lattice level that gave it. |
 | `X-Capture-TMin` / `X-Capture-TMax` | The whole file's extent, not this tile's window, so a live view can track growth without a second round trip. |
-| `X-Tile-Frames` | Frames decoded (≤ 8192; the range is stride-sampled beyond that). |
-| `X-Tile-Total` | Frames in range before sampling. |
-| `X-Tile-Exact` | `1` if no stride sampling was needed. |
-| `X-Tile-VMin` / `X-Tile-VMax` | Finite extrema. |
+| `X-Tile-Frames` | Frames decoded. |
+| `X-Tile-Total` | Frames in `[t0, t1]` before sampling. |
+| `X-Tile-Exact` | `1` if no chunk needed stride sampling. |
+| `X-Tile-VMin` / `X-Tile-VMax` | Finite extrema, measured on frames sampled across the capture. |
 | `X-Tile-PLow` / `X-Tile-PHigh` | 1st/99th percentiles — the robust scale the amplitude plot locks to. |
 | `X-Tile-Filled` | Columns filled from a neighbouring frame across a sampling gap. |
 
@@ -262,6 +264,35 @@ interpolated between its two bracketing frames when within 2x the
 95th-percentile inter-frame interval; beyond that, or with `interpolate=false`,
 it stays NaN, so a real capture dropout stays visible instead of being painted
 over. See [Interpolation](#interpolation).
+
+#### The lattice
+
+A tile's columns are quantised to a fixed grid: column *c* at level *L* covers
+`[c·dt, (c+1)·dt)` with `dt = 1 ms · 2^L`, measured from the capture's own
+`t=0`. The server picks the finest level whose columns still fit the requested
+`width` — never finer than the capture's median frame spacing — snaps the
+window outwards to column boundaries, and reports what it served in
+`X-Tile-T0/T1/DT`. The client crops.
+
+The columns are therefore a property of the capture, not of the window that
+asked for them. That is the whole point:
+
+- **Panning** shifts columns that keep their values, instead of re-aggregating
+  every column over new boundaries. Before the lattice a one-pixel pan changed
+  the picture rather than moving it.
+- **Live follow** appends columns on the right instead of re-binning the whole
+  grid on every poll — the crawl that made a growing capture unreadable.
+- **Stride sampling** is anchored to each chunk's own frame range, so a pan no
+  longer changes *which* frames a sampled column was built from.
+- **Caching works.** Tiles are assembled from 256-column chunks keyed on
+  `(capture, metric, level, chunk, filters, frames-in-chunk)`. A request keyed
+  on an exact window could never hit; these hit constantly. On a
+  64,559-frame capture: full extent 0.394 s cold and 0.008 s warm, a live poll
+  0.007 s against 0.375 s before, a pan 0.013 s against 0.036 s.
+
+The cost is that `dt` steps by 2x between levels rather than tracking the pixel
+width continuously, and the window drawn is up to one column wider than the one
+requested.
 
 ### `GET /api/snapshot`
 

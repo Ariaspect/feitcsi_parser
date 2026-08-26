@@ -167,6 +167,49 @@ describe("fetchTile", () => {
     expect(url).toContain("metric=phase");
   });
 
+  // Columns are quantised to a lattice, so the backend snaps the window
+  // outwards and reports what it served. Drawing against the requested window
+  // instead shifts the image by up to one column, which is the crawling the
+  // lattice exists to remove.
+  it("takes the tile's window from the headers, not from the request", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockResponse({
+          body: float32Buf([1.0, 2.0]),
+          headers: {
+            "X-Tile-Width": "2",
+            "X-Tile-Height": "1",
+            "X-Tile-T0": "1.024",
+            "X-Tile-T1": "3.072",
+            "X-Tile-DT": "1.024",
+            "X-Tile-Level": "10",
+          },
+        }),
+      ),
+    );
+    const tile = await fetchTile("p", 1.5, 2.5, 2, "amplitude");
+    expect(tile.t0).toBe(1.024);
+    expect(tile.t1).toBe(3.072);
+    expect(tile.dt).toBe(1.024);
+    expect(tile.level).toBe(10);
+  });
+
+  it("falls back to the requested window when the backend reports none", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockResponse({
+          body: float32Buf([1.0]),
+          headers: { "X-Tile-Width": "1", "X-Tile-Height": "1" },
+        }),
+      ),
+    );
+    const tile = await fetchTile("p", 4, 9, 1, "amplitude");
+    expect(tile.t0).toBe(4);
+    expect(tile.t1).toBe(9);
+  });
+
   it("passes the signal through to fetch", async () => {
     vi.stubGlobal(
       "fetch",

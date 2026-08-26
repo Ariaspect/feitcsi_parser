@@ -45,6 +45,10 @@ app.add_middleware(
     expose_headers=[
         "X-Tile-Width",
         "X-Tile-Height",
+        "X-Tile-T0",
+        "X-Tile-T1",
+        "X-Tile-DT",
+        "X-Tile-Level",
         "X-Capture-TMin",
         "X-Capture-TMax",
         "X-Tile-Frames",
@@ -332,6 +336,16 @@ def tile(
         headers={
             "X-Tile-Width": str(grid.shape[1]),
             "X-Tile-Height": str(grid.shape[0]),
+            # The window this tile actually covers. Columns are quantised to
+            # the lattice, so the tile spans the smallest aligned range
+            # containing the request and the client crops -- which is what
+            # stops a pan or a live poll re-quantising the whole picture. A
+            # client that ignores these and assumes it got the window it asked
+            # for will draw the tile shifted by up to one column.
+            "X-Tile-T0": str(meta["t0"]),
+            "X-Tile-T1": str(meta["t1"]),
+            "X-Tile-DT": str(meta["dt"]),
+            "X-Tile-Level": str(meta["level"]),
             "X-Capture-TMin": str(meta["t_min"]),
             "X-Capture-TMax": str(meta["t_max"]),
             "X-Tile-Frames": str(meta["frames_decoded"]),
