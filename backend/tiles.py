@@ -42,7 +42,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import mtk
+from . import mtk, presence
 from .batch import decode_frames as _decode_feitcsi
 from .cir import csi_to_cir_centred
 from .index import FrameIndex
@@ -1062,6 +1062,124 @@ def _decode_for_doppler(
     if not rows:
         return np.empty((0, index.num_subcarriers), dtype=np.float32)
     return np.concatenate(rows, axis=0)
+
+
+# The two planes the presence detector needs, and the reason both are the
+# *corrected* ones. The swap correction is not a cosmetic tidy-up here: rx0
+# and rx1 trade places on some frames, and uncorrected, 1.2% of frame-to-frame
+# steps in the ratio phase exceed pi outright. A pi step is a broadband
+# impulse with plenty of energy inside 0.1-0.6 Hz, so on the uncorrected ratio
+# the detector would find respiration in an empty room -- manufactured
+# entirely by the decode. See backend.ratio.
+PRESENCE_METRICS: tuple[str, str] = (
+    "csi_ratio_amplitude_corrected",
+    "csi_ratio_phase_corrected",
+)
+
+
+def compute_presence(
+    path: Path,
+    t0: float,
+    t1: float,
+    *,
+    channel: str = "complex",
+    window_seconds: float = presence.DEFAULT_WINDOW_SECONDS,
+    hop_seconds: float = presence.DEFAULT_HOP_SECONDS,
+    rate_band_rpm: tuple[float, float] = presence.DEFAULT_RATE_BAND_RPM,
+    bandpass_hz: tuple[float, float] = presence.DEFAULT_BANDPASS_HZ,
+    motion_frac_lo: float = presence.DEFAULT_MOTION_FRAC_LO,
+    motion_frac_hi: float = presence.DEFAULT_MOTION_FRAC_HI,
+    max_gap_fraction: float = DEFAULT_MAX_GAP_FRACTION,
+    smooth_windows: int = presence.DEFAULT_SMOOTH_WINDOWS,
+    present_threshold: float = presence.DEFAULT_PRESENT_THRESHOLD,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> dict:
+    """Motion level and static-presence verdicts for a time range.
+
+    Returns the ``presence_windows`` result with its window centres moved onto
+    the capture's own clock, plus the metadata a caller needs to draw it.
+
+    Shares ``compute_doppler``'s shape deliberately -- the same index, the same
+    filter mask, the same block cache, the same uniform grid -- so a presence
+    panel and a spectrogram over one window decode the capture once between
+    them, and so the two panels can never disagree about what a dropout is.
+
+    The sample rate comes from the whole filtered capture rather than from the
+    frames in view, for the reason spelled out in ``compute_doppler``: a short
+    slice containing a burst reports a rate the capture never ran at, and
+    every frequency-derived quantity below -- the respiration band, the
+    autocorrelation lags, the reported rate in rpm -- would be scaled by it.
+    """
+    index = get_index(path)
+    times_all = np.asarray(index.times, dtype=float)
+    mask = index.filter_mask(mimo=mimo, source_mac=source_mac)
+
+    frame_ids = np.flatnonzero(mask & (times_all >= t0) & (times_all <= t1))
+    if frame_ids.size < 2:
+        raise ValueError("fewer than 2 frames in range")
+
+    reference = get_reference(
+        path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
+        interpolate=interpolate,
+    )
+    amplitude_db = _decode_for_doppler(
+        path, index, frame_ids, PRESENCE_METRICS[0], reference, interpolate
+    )
+    phase_rad = _decode_for_doppler(
+        path, index, frame_ids, PRESENCE_METRICS[1], reference, interpolate
+    )
+    ratio = presence.complex_ratio(amplitude_db, phase_rad)
+
+    # Frames carrying no ratio at all -- a single-rx frame has nothing to
+    # divide by -- are dropped from the series rather than interpolated
+    # through. Dropping them lets the hole they leave be measured as a gap
+    # like any other, so a long run of them blanks its windows instead of
+    # being silently bridged into a flat stretch.
+    usable = np.isfinite(ratio).any(axis=1)
+    times = times_all[frame_ids][: ratio.shape[0]][usable]
+    ratio = ratio[usable]
+    if times.size < 2:
+        raise ValueError("no frames in range carry a two-antenna CSI ratio")
+
+    filtered_times = times_all[mask]
+    _, fs = uniform_grid(filtered_times if filtered_times.size >= 2 else times)
+    step = 1.0 / fs
+    n_grid = int(np.floor((times[-1] - times[0]) / step)) + 1
+    grid_times = times[0] + np.arange(n_grid, dtype=float) * step
+
+    # Resampled as two real planes rather than as a phase: interpolating a
+    # wrapped phase across the +/-pi seam averages the two ends of the circle
+    # and lands halfway round it. The angle is taken afterwards, downstream.
+    gap_limit = gap_limit_for(times)
+    real, fabricated = resample_uniform(times, ratio.real, grid_times, gap_limit)
+    imag, _ = resample_uniform(times, ratio.imag, grid_times, gap_limit)
+
+    result = presence.presence_windows(
+        real + 1j * imag,
+        fs,
+        fabricated=fabricated,
+        channel=channel,
+        window_seconds=window_seconds,
+        hop_seconds=hop_seconds,
+        rate_band_rpm=rate_band_rpm,
+        bandpass_hz=bandpass_hz,
+        motion_frac_lo=motion_frac_lo,
+        motion_frac_hi=motion_frac_hi,
+        max_gap_fraction=max_gap_fraction,
+        smooth_windows=smooth_windows,
+        present_threshold=present_threshold,
+    )
+
+    # Window centres arrive relative to the grid; the caller draws them on the
+    # capture's clock, shared with every other panel.
+    result["time_s"] = grid_times[0] + result["time_s"]
+    result["frames_used"] = int(times.size)
+    result["frames_without_ratio"] = int(usable.size - int(usable.sum()))
+    result["t_min"] = float(times_all[0]) if times_all.size else 0.0
+    result["t_max"] = float(times_all[-1]) if times_all.size else 0.0
+    return result
 
 
 # ----------------------------------------------------------------------- #

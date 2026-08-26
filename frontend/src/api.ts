@@ -290,3 +290,137 @@ export async function fetchDoppler(
     winSeconds: parseFloat(h.get("X-Doppler-WinSeconds") ?? "0"),
   };
 }
+
+/** The per-subcarrier signal the presence detector runs on. `complex` is the
+ *  default and the one to trust: amplitude and phase have complementary
+ *  Fresnel blind spots, so a chest invisible in one shows in the other, and
+ *  keeping the ratio complex avoids having to choose. The real channels are
+ *  diagnostic — which one carries the signal says where the subject is
+ *  sitting relative to the antennas. */
+export type PresenceChannel = "complex" | "phase" | "magnitude";
+
+/** One verdict per analysis window.
+ *
+ *  `unknown` exists so that missing data can never be reported as an empty
+ *  room: a window assembled mostly from samples interpolated across a capture
+ *  dropout comes out flat, and flat scores exactly like absence. */
+export type PresenceState = "unknown" | "moving" | "present" | "empty";
+
+export interface PresenceParams {
+  channel: PresenceChannel;
+  window_seconds: number;
+  hop_seconds: number;
+  rate_band_rpm: [number, number];
+  bandpass_hz: [number, number];
+  motion_frac_lo: number;
+  motion_frac_hi: number;
+  tonality_flat_lo: number;
+  tonality_flat_hi: number;
+  max_gap_fraction: number;
+  smooth_windows: number;
+  present_threshold: number;
+}
+
+/** Series are aligned with `timeS` and hold `null` where a window has no
+ *  answer — a break in the line, never a zero. */
+export interface Presence {
+  timeS: number[];
+  state: PresenceState[];
+  score: (number | null)[];
+  periodicity: (number | null)[];
+  tonality: (number | null)[];
+  motionGate: (number | null)[];
+  motionLevel: (number | null)[];
+  rateRpm: (number | null)[];
+  unknown: boolean[];
+  /** The capture's own median frame rate, not a function of any width. */
+  fsHz: number;
+  win: number;
+  hop: number;
+  /** What the window actually was, which is not what was asked for once a
+   *  zoom is narrower than the requested window and it gets clamped. */
+  windowSeconds: number;
+  /** The slowest rate this window length can actually resolve. Above the
+   *  requested floor means slower breathing is out of reach here. */
+  rpmFloorEff: number;
+  framesUsed: number;
+  framesWithoutRatio: number;
+  captureTMin: number;
+  captureTMax: number;
+  params: PresenceParams;
+  warnings: string[];
+}
+
+export interface PresenceOptions {
+  channel?: PresenceChannel;
+  windowSeconds?: number;
+  hopSeconds?: number;
+  rpmLo?: number;
+  rpmHi?: number;
+  presentThreshold?: number;
+  motionFracLo?: number;
+  motionFracHi?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchPresence(
+  path: string,
+  t0: number,
+  t1: number,
+  options: PresenceOptions = {},
+  signal?: AbortSignal,
+): Promise<Presence> {
+  const {
+    channel = "complex",
+    windowSeconds = 12,
+    hopSeconds = 1,
+    rpmLo = 9,
+    rpmHi = 30,
+    presentThreshold = 0.25,
+    motionFracLo = 0.1,
+    motionFracHi = 0.25,
+    mimo,
+    sourceMac,
+    interpolate,
+  } = options;
+
+  const url =
+    `/api/presence?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}&channel=${channel}` +
+    `&window_seconds=${windowSeconds}&hop_seconds=${hopSeconds}` +
+    `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&present_threshold=${presentThreshold}` +
+    `&motion_frac_lo=${motionFracLo}&motion_frac_hi=${motionFracHi}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  const body = await res.json();
+  return {
+    timeS: body.time_s,
+    state: body.state,
+    score: body.score,
+    periodicity: body.periodicity,
+    tonality: body.tonality,
+    motionGate: body.motion_gate,
+    motionLevel: body.motion_level,
+    rateRpm: body.rate_rpm,
+    unknown: body.unknown,
+    fsHz: body.fs_hz,
+    win: body.win,
+    hop: body.hop,
+    windowSeconds: body.window_seconds,
+    rpmFloorEff: body.rpm_floor_eff,
+    framesUsed: body.frames_used,
+    framesWithoutRatio: body.frames_without_ratio,
+    captureTMin: body.t_min,
+    captureTMax: body.t_max,
+    params: body.params,
+    warnings: body.warnings ?? [],
+  };
+}

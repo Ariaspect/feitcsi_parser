@@ -361,6 +361,54 @@ happens to be all burst would otherwise report 1144 Hz against its true
 Returns `400` for an unknown metric, or a range too short to hold even a
 minimum 8-sample window.
 
+### `GET /api/presence`
+
+Motion level and static-presence verdicts over a time range, as **JSON** — not
+the binary framing `/api/tile` and `/api/doppler` use. The payload is a handful
+of scalar series a few hundred entries long rather than a grid, so binary would
+save nothing worth the loss of being able to read a response.
+
+Query params:
+- `path`, `t0`, `t1` — as `/api/tile`
+- `channel` — `complex` (default), `phase`, or `magnitude`
+- `window_seconds` — analysis window (default 12). **Clamped** to what the range holds, like `/api/doppler`
+- `hop_seconds` — step between windows (default 1)
+- `rpm_lo` / `rpm_hi` — respiration band searched (default 9–30 rpm)
+- `bandpass_lo` / `bandpass_hi` — Hz (default 0.1–0.6)
+- `motion_frac_lo` / `motion_frac_hi` — fractional channel change bounding the motion gate (default 0.10 / 0.25)
+- `max_gap_fraction` — report a window `unknown` once more than this fraction of it is interpolated across dropouts (default 0.5)
+- `smooth_windows`, `present_threshold` — score smoothing and the verdict threshold (default 3, 0.25)
+- `mimo`, `source_mac`, `interpolate` — as `/api/tile`
+
+Every series is aligned with `time_s`, on the capture's own clock, so it drops
+straight onto the axis the heatmaps share. Non-finite entries serialise as
+`null`, never as a bare `NaN` — that is not JSON, and `JSON.parse` rejecting it
+would take the whole panel down for one blanked window.
+
+| Field | Meaning |
+|---|---|
+| `state` | The verdict per window: `present`, `moving`, `empty`, `unknown`. |
+| `score` | `periodicity × tonality × motion_gate`, smoothed. `null` where unknown. |
+| `periodicity` | Autocorrelation peak height inside the respiration lag band. |
+| `tonality` | In-band spectral flatness, inverted: 1 is a pure tone, 0 is broadband. |
+| `motion_gate` | The motion term, ramped between `motion_frac_lo` and `motion_frac_hi`. |
+| `motion_level` | Median fractional channel change, `\|Δr\|/\|r\|` — dimensionless. |
+| `rate_rpm` | Breathing rate from the peak lag. Only meaningful where `state` is `present`. |
+| `unknown` | Window assembled mostly from samples interpolated across a dropout. |
+| `fs_hz`, `win`, `hop`, `window_seconds` | Geometry actually used, not what was asked. |
+| `rpm_floor_eff` | Slowest rate this window length can really resolve. |
+| `warnings` | Human-readable notes: unreachable rate floor, interpolated fraction. |
+
+Built on the **swap-corrected** ratio (`csi_ratio_amplitude_corrected` +
+`csi_ratio_phase_corrected`), which is not optional here: uncorrected, 1.2% of
+frame-to-frame steps in the ratio phase exceed π, and a π step is a broadband
+impulse with energy inside 0.1–0.6 Hz. On the raw ratio the detector finds
+respiration in an empty room, manufactured entirely by the decode.
+
+Returns `400` for an unknown channel, a rate band above the capture's Nyquist,
+a window too short to resolve the requested band, or a range holding fewer than
+two frames.
+
 ### `GET /api/captures`
 
 Lists capture files under `captures/`, newest first. Takes no parameters.
@@ -450,6 +498,96 @@ Subcarriers that are non-finite for the whole capture (DC/guard band, dropped
 pilots — 11 of 256 on an MTK file) are excluded from the average rather than
 poisoning it. Each window is zero-padded before the FFT, which interpolates the
 frequency axis for a smoother panel without claiming extra resolution.
+
+## Motion and presence
+
+Three states are worth telling apart in a room: nobody there, somebody there
+and still, somebody there and moving. They do not separate on one axis. Gross
+motion is loud and broadband — a walking person swamps every subcarrier —
+while a *still* person is nearly silent, betrayed only by chest motion of a few
+millimetres at 0.2–0.5 Hz. So loud-versus-quiet cannot tell an empty room from
+a sleeping one; the quiet case is decided on **periodicity**, not on energy.
+
+The **Motion & presence** tab shows the verdict strip on the shared time axis
+and, underneath it, every quantity the verdict was built from: motion level,
+then score with `periodicity` / `tonality` / `motion gate` drawn separately,
+then breathing rate. The strip is the answer; the traces are why.
+
+`score = periodicity × tonality × motion gate`, and each term is a veto:
+
+- **periodicity** — the autocorrelation peak inside the respiration lag band,
+  averaged across subcarriers weighted by each one's own in-band SNR. A real
+  chest moves them coherently so the weighted sum reinforces; independent noise
+  does not survive the average. Real breathing peaks near 0.5, not near 1.0,
+  which is why the default threshold is 0.25.
+- **tonality** — in-band spectral flatness, inverted. This exists because the
+  obvious gate does not work: 1/f drift keeps in-band power high in an empty
+  room, so an in-band-versus-out-of-band power ratio scores absence nearly as
+  high as presence.
+- **motion gate** — median fractional channel change over the window. Walking
+  is also periodic and would otherwise read as an enormous chest. Median rather
+  than mean, so one posture shift does not close the gate for a whole window.
+
+### Absence is a claim
+
+A window built mostly from samples interpolated across a capture dropout is
+reported **`unknown`** and drawn hatched, never `empty`. Bridging a hole
+produces a perfectly flat stretch, and flat means no motion *and* no
+periodicity — which scores exactly like an empty room. On a presence panel that
+is the one lie that matters, so it is the first thing the classifier tests,
+ahead of every other verdict.
+
+For the same reason the panel says *"Analysing this range…"* while the first
+request is in flight rather than *"nothing here"*, and the breathing rate is
+drawn only where a still occupant was actually claimed. A rate is the lag of
+the largest autocorrelation peak in the band, and that exists in every window
+whether or not anything was breathing; plotting it unconditionally shows a
+confident breathing rate for an empty room.
+
+### Filter to one transmitter
+
+Frames from different transmitters are different channels. Interleaving two of
+them makes consecutive samples alternate between unrelated propagation paths,
+and the detector reads that decorrelation as movement. Measured on
+`capture.dat`, the motion level runs 0.37–0.47 per transmitter and 0.53 mixed.
+Pick a source MAC before trusting anything on this tab.
+
+### The thresholds do not transfer from BFI
+
+The defaults are ported from a beamforming-feedback pipeline that was tuned
+against labelled captures on different hardware, and **they have not been
+calibrated here.** Measured over ~55 minutes of each of the two contrasting
+MediaTek captures on hand, one transmitter, `complex` channel:
+
+| | `20260821_170002.bin` (evening) | `20260822_070002.bin` (early morning) |
+|---|---|---|
+| motion level, p10 / median / p90 | 0.064 / 0.081 / 0.130 | 0.029 / 0.031 / 0.033 |
+| in-band spectral power | 8.3e4 – 1.8e5 | ~415 |
+| verdict at the default 0.25 | `empty` × 577 | `empty` × 584 |
+| verdict at 0.045 | `motion` × 577 | `empty` × 584 |
+
+The two are separated by a factor of ~2.6 in motion level and 200–400× in
+in-band power — the evening capture's trace has visible structure, the morning
+one is pinned dead flat at its noise floor. But BFI's gross-motion threshold of
+0.25 sits far above *both*, so the shipped default calls the occupied room
+empty. Move **Motion above** to roughly 0.045 and the separation is total, with
+no window misfiled in either direction.
+
+Two caveats before treating that as a calibration. The evening/morning
+occupancy is inferred from the captures themselves, not labelled — the same
+inference `doppler.py` records from its own independent measurement of a
+0.08–0.28 Hz line at 2.4–4.2× contrast in the evening capture and a flat
+1.05–1.23× in the morning one. And 0.045 discriminates *presence*, which is not
+the job `motion_frac_hi` was designed for — it is the walking gate, and setting
+it that low means a genuinely still occupant can never clear it. Labelled
+captures — empty, walk in, sit still, walk out — are what would settle both.
+
+No respiration tone was found in either capture. The evening capture's in-band
+energy is dominated by slow drift at 2–4 rpm, well below the 9–30 rpm band, so
+`periodicity` stays near 0.06 throughout. That is consistent with an occupant
+who was present and moving rather than sitting still, and it means the
+breathing half of this pipeline is **unvalidated on real captures** — it is
+verified only against synthetic signals in `tests/test_presence.py`.
 
 ## Capture paths
 
