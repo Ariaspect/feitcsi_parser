@@ -84,6 +84,14 @@ function FoldedPanel({
   );
 }
 
+/** What a Doppler panel needs to label its frequency axis: how many rows the
+ *  server sent, and what the bottom and top rows mean in hertz. */
+interface DopplerGeom {
+  rows: number;
+  fMin: number;
+  fMax: number;
+}
+
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
   const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS);
@@ -111,7 +119,14 @@ export function App() {
   const [winSeconds, setWinSeconds] = useState<number>(10);
   // Row count and Nyquist are properties of the capture's own frame rate, so
   // they are not known until the first response comes back.
-  const [dopplerGeom, setDopplerGeom] = useState<{ rows: number; fMax: number } | null>(null);
+  // Geometry per Doppler panel, because the two no longer share it. A real
+  // metric's spectrum is conjugate-symmetric and served one-sided; the complex
+  // ratio is served two-sided, so it has about twice the rows and an axis that
+  // starts below zero. One `rows` for both would stretch one of them.
+  const [dopplerGeom, setDopplerGeom] = useState<{
+    complex: DopplerGeom;
+    phase: DopplerGeom;
+  } | null>(null);
   // Which capture identity the geometry above describes, and whether a probe
   // for it is already in flight. See the effect that fills it in.
   const dopplerGeomKeyRef = useRef<string | null>(null);
@@ -198,11 +213,16 @@ export function App() {
     // poll is 300ms away.
     if (dopplerGeomInFlightRef.current) return;
     dopplerGeomInFlightRef.current = true;
-    fetchDoppler(path, meta.t_min, meta.t_max, "amplitude", winSeconds,
-                 undefined, mimo, sourceMac)
-      .then((t) => {
+    const probe = (m: DopplerMetric) =>
+      fetchDoppler(path, meta.t_min, meta.t_max, m, winSeconds,
+                   undefined, mimo, sourceMac);
+    Promise.all([probe("csi_ratio_complex"), probe("csi_ratio_phase_time_unwrapped")])
+      .then(([cx, ph]) => {
         if (dopplerGeomKeyRef.current === key) {
-          setDopplerGeom({ rows: t.height, fMax: t.fMax });
+          setDopplerGeom({
+            complex: { rows: cx.height, fMin: cx.fMin, fMax: cx.fMax },
+            phase: { rows: ph.height, fMin: ph.fMin, fMax: ph.fMax },
+          });
         }
       })
       .catch(() => {
@@ -578,15 +598,16 @@ export function App() {
               hint="accumulated phase, per segment — not an angle"
             >
               <p className="pb-4 text-xs text-muted-foreground">
-                Unwrapped along <i>time</i> on the corrected ratio: continuous
-                phase accumulated as the channel moves. Restarts after a capture
-                gap and anchors each segment at its own start, so the value is
-                phase change since that segment began — segments are not
-                comparable with one another. Shares the phase palette above for
-                comparison, though accumulated phase is not an angle. Always
-                swap-corrected regardless of the toggle: uncorrected, 1.2% of
-                frame-to-frame steps exceed π, and each one the unwrapper
-                misreads offsets everything after it by 2π for good.
+                Unwrapped along <i>time</i> on the raw ratio: continuous phase
+                accumulated as the channel moves. Restarts after a capture gap
+                and anchors each segment at its own start, so the value is phase
+                change since that segment began — segments are not comparable
+                with one another. Shares the phase palette above for comparison,
+                though accumulated phase is not an angle. Unwrapping is the risk
+                this view takes: a step it misreads offsets that subcarrier by
+                2π for the rest of the capture. On MediaTek the swaps that used
+                to cause those are absent, and what is left — 0.027% of
+                subcarrier-transitions past 0.9π — is fast motion, not decode.
               </p>
               <Heatmap
                 path={path}
@@ -662,7 +683,8 @@ export function App() {
                   {dopplerGeom && (
                     <span className="text-[11px] text-muted-foreground">
                       resolution {(1 / winSeconds).toFixed(3)} Hz · ceiling{" "}
-                      {dopplerGeom.fMax.toFixed(2)} Hz
+                      {dopplerGeom.complex.fMax.toFixed(2)} Hz ·{" "}
+                      {Math.abs((dopplerGeom.complex.fMax * 0.05754) / 2).toFixed(2)} m/s
                     </span>
                   )}
                 </div>
@@ -671,16 +693,16 @@ export function App() {
                   <>
                     <Heatmap
                       path={path}
-                      metric="amplitude"
+                      metric="csi_ratio_complex"
                       filename={meta.filename}
-                      numSubcarriers={dopplerGeom.rows}
+                      numSubcarriers={dopplerGeom.complex.rows}
                       captureTMin={meta.t_min}
                       captureTMax={meta.t_max}
-                      title="Doppler — amplitude"
+                      title="Doppler — complex ratio (signed)"
                       colorLabel="Magnitude"
                       axisLabel="Doppler (Hz)"
-                      yDomain={[0, dopplerGeom.fMax]}
-                      source={dopplerSource("amplitude")}
+                      yDomain={[dopplerGeom.complex.fMin, dopplerGeom.complex.fMax]}
+                      source={dopplerSource("csi_ratio_complex")}
                       height={320}
                       timeLink={timeLink}
                       mimo={mimo}
@@ -693,13 +715,13 @@ export function App() {
                       path={path}
                       metric="csi_ratio_phase_time_unwrapped"
                       filename={meta.filename}
-                      numSubcarriers={dopplerGeom.rows}
+                      numSubcarriers={dopplerGeom.phase.rows}
                       captureTMin={meta.t_min}
                       captureTMax={meta.t_max}
                       title="Doppler — time-unwrapped ratio phase"
                       colorLabel="Magnitude"
                       axisLabel="Doppler (Hz)"
-                      yDomain={[0, dopplerGeom.fMax]}
+                      yDomain={[dopplerGeom.phase.fMin, dopplerGeom.phase.fMax]}
                       source={dopplerSource("csi_ratio_phase_time_unwrapped")}
                       height={320}
                       timeLink={timeLink}
@@ -710,15 +732,27 @@ export function App() {
                     />
 
                     <p className="text-[11px] text-muted-foreground leading-relaxed">
-                      Doppler here is <b>unsigned</b> — amplitude and unwrapped phase are
-                      real signals, so approaching and receding motion are
-                      indistinguishable. The axis stops at this capture&apos;s own Nyquist
-                      ({dopplerGeom.fMax.toFixed(2)} Hz); faster motion aliases, and at
-                      5 GHz a 1 m/s movement sits near 33 Hz. What is in reach is
-                      respiration and slow motion — <b>shift + wheel</b> zooms the
-                      frequency axis, and that band is the bottom few percent of it.
-                      Blank columns are windows more than half interpolated across a
-                      capture dropout; short hiccups are bridged rather than blanked.
+                      The top panel is the <b>complex ratio</b>, so its Doppler is{" "}
+                      <b>signed</b>: zero sits at the middle of the axis, and the two
+                      halves are the two directions of radial motion. Sign survives
+                      here only because this is a ratio — both chains share an
+                      oscillator, so the carrier frequency offset divides out and what
+                      is left is geometry. It also never unwraps anything, which is
+                      what the lower panel cannot avoid: a step it misreads offsets
+                      that subcarrier by 2π for the rest of the capture and draws a
+                      full-height bar.
+                    </p>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      The axis stops at this capture&apos;s own Nyquist (±
+                      {dopplerGeom.complex.fMax.toFixed(2)} Hz, which is only ±
+                      {Math.abs((dopplerGeom.complex.fMax * 0.05754) / 2).toFixed(2)} m/s
+                      at 5.21 GHz). A walk is several times that and aliases in as
+                      broadband smear rather than as a velocity, so read this for
+                      respiration and slow motion, not for gait. Respiration is a{" "}
+                      <b>symmetric pair</b> of sidebands about zero, not one peak —{" "}
+                      <b>shift + wheel</b> zooms the frequency axis onto it. Blank
+                      columns are windows more than half interpolated across a capture
+                      dropout; short hiccups are bridged rather than blanked.
                     </p>
                   </>
                 ) : (

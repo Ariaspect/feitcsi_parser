@@ -1264,13 +1264,25 @@ def test_tile_endpoint_accepts_the_interpolate_param(index: FrameIndex) -> None:
 
 
 def test_needs_reference_follows_the_derivation_chain():
-    """The time-unwrapped ratio corrects nothing itself, but is built on one."""
+    """Only the metrics that actually correct something ask for a reference."""
     assert _needs_reference("csi_ratio_phase_corrected")
     assert _needs_reference("csi_ratio_amplitude_corrected")
-    assert _needs_reference("csi_ratio_phase_time_unwrapped")
     assert not _needs_reference("csi_ratio_phase_unwrapped")
     assert not _needs_reference("phase_detrended")
     assert not _needs_reference("amplitude")
+
+
+def test_the_time_unwrapped_ratio_is_built_on_the_raw_phase():
+    """It draws without a selected transmitter, because it corrects nothing.
+
+    MediaTek does not swap the rx streams, so the correction this metric used
+    to sit on bought nothing and cost a reference decode -- and a metric that
+    needs a reference cannot draw on an unfiltered capture at all.
+    """
+    from backend.tiles import DERIVED_METRICS
+
+    assert DERIVED_METRICS["csi_ratio_phase_time_unwrapped"].bases == ("csi_ratio_phase",)
+    assert not _needs_reference("csi_ratio_phase_time_unwrapped")
 
 
 def test_reference_is_built_once_per_capture_and_filter():

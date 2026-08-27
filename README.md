@@ -184,6 +184,7 @@ expose it.
    index only and never decodes payloads. Pixels come from `/api/tile`, which
    is fetched only when the view actually changes.
 4. The **Channel** tab renders six heatmaps, and the **Doppler** tab two more
+   — a signed spectrogram of the complex ratio, and the time-unwrapped ratio phase
    (see [Doppler](#doppler)). The channel panels are: amplitude (dBm), phase (rad), CSI ratio
    amplitude and phase, then the swap-corrected CSI ratio pair, then the
    time-unwrapped ratio phase, then the raw channel's impulse response
@@ -195,7 +196,7 @@ Controls:
 - **.dat file** — path to a capture, growing or finished.
 - **Refresh (ms)** — polling interval.
 - **Run realtime** — toggle polling.
-- **Source MAC** — required for the corrected and time-unwrapped views, which
+- **Source MAC** — required for the corrected views, which
   judge frames against their neighbours. Defaults to a single transmitter.
 
 The four base plots are never modified by any derived view.
@@ -327,12 +328,13 @@ Returns JSON:
 
 Subcarrier-averaged Doppler spectrogram. Same binary contract as `/api/tile` —
 bare little-endian float32 body, metadata in headers — so the same canvas
-renderer draws it. The body is `(win // 2 + 1, n_windows)`, row-major,
-**row 0 = highest Doppler frequency**.
+renderer draws it. The body is row-major, **row 0 = highest Doppler
+frequency** — `(win // 2 + 1, n_windows)` for a real metric, and `(win,
+n_windows)` for the complex one, which is served two-sided.
 
 Query params:
 - `path`, `t0`, `t1` — as `/api/tile`
-- `metric` — `amplitude` or `csi_ratio_phase_time_unwrapped`
+- `metric` — `csi_ratio_complex` (default), `amplitude`, or `csi_ratio_phase_time_unwrapped`
 - `win_seconds` — STFT window length in seconds (default 10, max 600). **Clamped** to what the range holds if longer, so zooming in never blanks the panel; `X-Doppler-WinSeconds` reports what was used
 - `overlap` — window overlap fraction (default 0.5)
 - `max_gap_fraction` — blank a column once more than this fraction of its window is interpolated across dropouts (default 0.5)
@@ -342,6 +344,7 @@ Query params:
 |---|---|
 | `X-Doppler-Width` / `X-Doppler-Height` | Grid shape: windows × frequency bins. |
 | `X-Doppler-Fs` | The capture's **own median frame rate** over the frames in range. |
+| `X-Doppler-FMin` | Bottom of the axis: `0` for a real metric, about `-Fs/2` for `csi_ratio_complex`. |
 | `X-Doppler-FMax` | Nyquist, `Fs/2`. This file's real ceiling. |
 | `X-Doppler-Win` / `X-Doppler-Hop` | Window and hop, in samples. `Win` is always even. |
 | `X-Doppler-WinSeconds` | The window actually used, in seconds — may be less than requested. |
@@ -447,18 +450,39 @@ Returns `{"status": "ok"}`.
 
 ## Doppler
 
-Two panels, in their own tab: an STFT of the amplitude time series, and one of
+Two panels, in their own tab: an STFT of the **complex CSI ratio**, and one of
 the time-unwrapped ratio phase. Both are subcarrier-averaged — each subcarrier
-is transformed and the magnitude spectrograms are averaged, which lifts SNR
-without asking you to pick a tone.
+is transformed and the spectrograms are averaged, which lifts SNR without
+asking you to pick a tone.
 
 Raw wrapped phase is deliberately **not** offered. Its 2π jumps are broadband
 steps that dominate an FFT and read as motion that is not there.
 
-**Doppler here is unsigned.** Amplitude and unwrapped phase are real signals,
-so their spectra are conjugate-symmetric and the sign of the shift is not
-recoverable: approaching and receding motion are indistinguishable. Signed
-Doppler would need the complex CSI. The axis is one-sided, `0 … fs/2`.
+**The complex panel is signed; the real ones are not.** A real series has a
+conjugate-symmetric spectrum, so approaching and receding motion land on the
+same row and the axis is one-sided, `0 … fs/2`. The complex ratio keeps both
+halves: the axis runs `-fs/2 … +fs/2` with zero in the middle, and the sign is
+real geometry rather than an artefact — both chains share an oscillator, so
+the carrier frequency offset divides out of a ratio. It also never unwraps
+anything, which the phase panel cannot avoid: measured on
+`lg/20260825_185637.bin`, 0.027% of subcarrier-transitions step past 0.9π, and
+each one the unwrapper misreads offsets that subcarrier by 2π for the rest of
+the capture — the full-height bars at 29 s, 92 s and 390 s are those events.
+
+`amplitude` remains available on the endpoint as a diagnostic and is no longer
+a panel. It is the **raw** channel, so it carries the receiver's AGC: on that
+capture `rssi_1` walks four levels in 3 dB steps, and its per-frame common
+mode moves 2.34 dB at p99 against the ratio's 1.09. An AGC step is a
+frame-wide impulse — broadband, every subcarrier at once, which is what the
+vertical striping on that panel always was. Occupied-against-empty contrast in
+0.1–0.6 Hz: **6.10 dB** on the raw channel against **15.18 dB** on the ratio
+amplitude. The ratio divides the gain out; the raw channel cannot.
+
+Respiration reaches this panel as a **symmetric pair** of sidebands about
+zero, not as a single shifted peak: a chest oscillates in place rather than
+traversing the wave, and the Bessel expansion of that puts matched pairs at
+±f_b, ±2f_b. Measured over the occupied stretch of that capture, mean power in
+0.1–0.6 Hz is within 2% of its mirror below zero.
 
 ### What it can see
 
@@ -477,8 +501,9 @@ line at 2.4–4.2× contrast; `20260822_070002.bin` (07:00 the next morning) is
 flat at 1.05–1.23×. Occupied versus empty is legible. A flat panel is a real
 reading, not a broken one.
 
-Because the interesting band is the bottom few percent of the axis,
-**shift + wheel** to zoom the frequency axis is how you actually read these.
+Because the interesting band is a few percent of the axis — the bottom few on
+the one-sided panel, the middle few on the signed one — **shift + wheel** to
+zoom the frequency axis is how you actually read these.
 
 ### Windows and gaps
 
@@ -690,7 +715,7 @@ and a phase sequence with holes cannot be unwrapped.
 | `phase_unwrapped` | unwrap along subcarriers | Removes the 2π sawtooth *within* a frame. Does nothing across frames. |
 | `phase_detrended` | unwrap + per-frame least-squares line removal | Removes the random per-packet offset (CFO/PLL) and the sampling-time-offset slope. This is what makes raw phase comparable across packets. |
 | `csi_ratio_phase_unwrapped` | unwrap along subcarriers | Same sawtooth removal for rx1/rx0. |
-| `csi_ratio_phase_time_unwrapped` | unwrap along **time**, on the corrected ratio | Removes the sawtooth as the channel moves, so each subcarrier's trace is continuous accumulated phase. This is the motion view. |
+| `csi_ratio_phase_time_unwrapped` | unwrap along **time**, on the raw ratio | Removes the sawtooth as the channel moves, so each subcarrier's trace is continuous accumulated phase. This is the motion view. |
 
 The subcarrier-axis metrics remain available over the API but are no longer
 plotted; the UI shows the time-unwrapped ratio instead.

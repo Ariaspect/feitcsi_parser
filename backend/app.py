@@ -65,6 +65,7 @@ app.add_middleware(
         "X-Doppler-Width",
         "X-Doppler-Height",
         "X-Doppler-Fs",
+        "X-Doppler-FMin",
         "X-Doppler-FMax",
         "X-Doppler-Win",
         "X-Doppler-Hop",
@@ -370,7 +371,7 @@ def doppler(
     path: str = Query(..., description="Path to capture file"),
     t0: float = Query(..., description="Start of requested time window (seconds)"),
     t1: float = Query(..., description="End of requested time window (seconds)"),
-    metric: str = Query("amplitude", description=f"One of: {', '.join(DOPPLER_METRICS)}"),
+    metric: str = Query("csi_ratio_complex", description=f"One of: {', '.join(DOPPLER_METRICS)}"),
     win_seconds: float = Query(10.0, gt=0, le=600, description="STFT window length in seconds; clamped to the range if longer"),
     overlap: float = Query(0.5, ge=0.0, lt=1.0, description="Window overlap fraction"),
     max_gap_fraction: float = Query(0.5, gt=0.0, le=1.0, description="Blank a column once more than this fraction of its window is interpolated across dropouts"),
@@ -384,10 +385,16 @@ def doppler(
     highest Doppler frequency -- the same row order ``/api/tile`` uses, so the
     same client-side renderer draws it.
 
-    The frequency axis runs 0 to ``X-Doppler-FMax`` and is **one-sided**:
-    amplitude and unwrapped phase are real signals, so their spectra are
-    conjugate-symmetric and the sign of the Doppler shift is not recoverable.
-    Approaching and receding motion are indistinguishable here.
+    The frequency axis runs ``X-Doppler-FMin`` to ``X-Doppler-FMax``, and
+    whether it is one-sided depends on the metric. ``amplitude`` and
+    ``csi_ratio_phase_time_unwrapped`` are real signals: their spectra are
+    conjugate-symmetric, ``FMin`` is 0, and the sign of the Doppler shift is
+    not recoverable -- approaching and receding motion land on the same row.
+    ``csi_ratio_complex`` is the complex ratio itself, so the axis is
+    two-sided, runs about -Nyquist to +Nyquist, and the sign is real: positive
+    is one direction of radial motion and negative the other. Both chains
+    share an oscillator, so the carrier frequency offset that would otherwise
+    bias the whole axis divides out of a ratio, and what is left is geometry.
 
     ``X-Doppler-Fs`` is the capture's own median frame rate over the frames in
     range, so ``FMax`` is this file's true Nyquist rather than a function of
@@ -428,6 +435,7 @@ def doppler(
             "X-Doppler-Width": str(spec.shape[1]),
             "X-Doppler-Height": str(spec.shape[0]),
             "X-Doppler-Fs": str(meta["fs"]),
+            "X-Doppler-FMin": str(meta["f_min"]),
             "X-Doppler-FMax": str(meta["f_max"]),
             "X-Doppler-Win": str(meta["win"]),
             "X-Doppler-Hop": str(meta["hop"]),
