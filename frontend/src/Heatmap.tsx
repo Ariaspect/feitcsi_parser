@@ -537,7 +537,12 @@ export function Heatmap({
         const value = lo + (hi - lo) * frac;
         const span = Math.abs((hi - lo) * ((view.scMax - view.scMin) / rowsFull));
         const decimals = span >= 100 ? 0 : span >= 10 ? 1 : span >= 1 ? 2 : 3;
-        return value.toFixed(decimals);
+        const text = value.toFixed(decimals);
+        // A signed axis puts a tick near zero that lands a hair below it, and
+        // toFixed keeps the sign it rounds away: "-0.00". On a panel whose
+        // whole point is which side of zero you are on, a signed zero reads as
+        // a bug in the sign.
+        return text === `-${(0).toFixed(decimals)}` ? text.slice(1) : text;
       };
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
@@ -584,13 +589,6 @@ export function Heatmap({
       ctx.fillText(props.colorLabel, 0, 0);
       ctx.restore();
 
-      // --- Title ---
-      ctx.fillStyle = c.text;
-      ctx.font = "bold 13px sans-serif";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      ctx.fillText(props.title, plot.x, 6);
-
       // --- Follow-live / frozen + stride-sampled indicator ---
       // exact === false means the tile was stride-sampled because the range
       // exceeded the decode budget. A sampled max-hold can miss transients;
@@ -615,6 +613,27 @@ export function Heatmap({
       ctx.fillStyle =
         uncorrected || sampled ? "#d80" : live ? "#2a7" : "#d33";
       ctx.fillText(indicator, cssW - PADDING.right, 8);
+      const indicatorWidth = ctx.measureText(indicator).width;
+
+      // --- Title ---
+      // Drawn second, into whatever the indicator left. The indicator is the
+      // one that must stay whole: it says the panel is stale, sampled or
+      // uncorrected, and a title overlapping it hides exactly the warning a
+      // narrow window most needs to show. Measured, not assumed -- the
+      // indicator grows by two clauses and the title is set per panel.
+      ctx.fillStyle = c.text;
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      const titleRoom = cssW - PADDING.right - indicatorWidth - 12 - plot.x;
+      let title = props.title;
+      if (ctx.measureText(title).width > titleRoom) {
+        while (title.length > 1 && ctx.measureText(`${title}…`).width > titleRoom) {
+          title = title.slice(0, -1);
+        }
+        title = `${title.trimEnd()}…`;
+      }
+      ctx.fillText(title, plot.x, 6);
 
       // --- Hover crosshair + tooltip ---
       const hover = hoverRef.current;
