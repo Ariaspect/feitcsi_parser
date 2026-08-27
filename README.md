@@ -399,11 +399,18 @@ would take the whole panel down for one blanked window.
 | `rpm_floor_eff` | Slowest rate this window length can really resolve. |
 | `warnings` | Human-readable notes: unreachable rate floor, interpolated fraction. |
 
-Built on the **swap-corrected** ratio (`csi_ratio_amplitude_corrected` +
-`csi_ratio_phase_corrected`), which is not optional here: uncorrected, 1.2% of
-frame-to-frame steps in the ratio phase exceed π, and a π step is a broadband
-impulse with energy inside 0.1–0.6 Hz. On the raw ratio the detector finds
-respiration in an empty room, manufactured entirely by the decode.
+Built on the **raw** ratio (`csi_ratio_amplitude` + `csi_ratio_phase`): the
+detector reads what the NIC delivered, with no orientation inferred before it
+sees the signal. Know what that costs. Uncorrected, 1.2% of frame-to-frame
+steps in the ratio phase exceed π, and a π step is a broadband impulse with
+energy inside 0.1–0.6 Hz — the respiration band — so both `motion_level` and
+`periodicity` can carry energy the decode manufactured rather than the room.
+On a capture where swaps are frequent, rule that out before trusting a
+verdict: the ratio panels' corrected views (see
+[Swapped rx streams](#swapped-rx-streams)) show how much of the signal is
+swap. Both planes move together — a swap negates the phase *and* the dB
+amplitude, so correcting one and not the other would describe a ratio the
+radio never saw.
 
 Returns `400` for an unknown channel, a rate band above the capture's Nyquist,
 a window too short to resolve the requested band, or a range holding fewer than

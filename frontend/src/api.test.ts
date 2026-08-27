@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchDoppler, fetchMeta, fetchTile, truncateCaptureName } from "./api";
+import { fetchDoppler, fetchMeta, fetchPresence, fetchTile, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -357,5 +357,105 @@ describe("truncateCaptureName", () => {
     const out = truncateCaptureName("2026-08/a_very_long_capture_name.dat", 14);
     expect(out).toHaveLength(14);
     expect(out.endsWith(".dat")).toBe(true);
+  });
+});
+
+
+describe("fetchPresence", () => {
+  const body = {
+    time_s: [1, 2],
+    state: ["present", "empty"],
+    score: [0.1, null],
+    periodicity: [0.2, 0.3],
+    tonality: [0.4, 0.5],
+    motion_gate: [1, 1],
+    motion_level: [0.09, 0.07],
+    motion_ratio: [1.3, 1.0],
+    baseline_dev: [2.9, 0.4],
+    breathing: [true, false],
+    rate_rpm: [14, null],
+    unknown: [false, false],
+    fs_hz: 17.9,
+    win: 536,
+    hop: 18,
+    window_seconds: 30,
+    rpm_floor_eff: 4,
+    baseline_dev_threshold: 1.53,
+    reference: { dev_p95: 0.51, motion_floor: 0.069, n_windows: 167 },
+    frames_used: 11100,
+    frames_without_ratio: 0,
+    t_min: 0,
+    t_max: 600,
+    params: {},
+    warnings: [],
+  };
+
+  function stub() {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ json: body }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("sends the reference range only when both ends are given", async () => {
+    const fetchMock = stub();
+    await fetchPresence("c.dat", 0, 600, { refT0: 400, refT1: 600 });
+    expect(fetchMock.mock.calls[0][0]).toContain("ref_t0=400");
+    expect(fetchMock.mock.calls[0][0]).toContain("ref_t1=600");
+
+    // Half a range is not a range. Sending it alone earns a 400 from the
+    // server, and the panel would show an error instead of a verdict.
+    const half = stub();
+    await fetchPresence("c.dat", 0, 600, { refT0: 400 });
+    expect(half.mock.calls[0][0]).not.toContain("ref_t0");
+    expect(half.mock.calls[0][0]).not.toContain("ref_t1");
+  });
+
+  it("omits the reference entirely when none is set", async () => {
+    const fetchMock = stub();
+    await fetchPresence("c.dat", 0, 600);
+    expect(fetchMock.mock.calls[0][0]).not.toContain("ref_t");
+  });
+
+  it("percent-encodes a reference capture path", async () => {
+    const fetchMock = stub();
+    await fetchPresence("c.dat", 0, 600, {
+      refT0: 0,
+      refT1: 10,
+      refPath: "a b/night one.bin",
+    });
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      `ref_path=${encodeURIComponent("a b/night one.bin")}`,
+    );
+  });
+
+  it("maps the reference summary and threshold onto the result", async () => {
+    stub();
+    const result = await fetchPresence("c.dat", 0, 600, { refT0: 400, refT1: 600 });
+
+    expect(result.baselineDevThreshold).toBe(1.53);
+    expect(result.reference).toEqual({
+      devP95: 0.51,
+      motionFloor: 0.069,
+      nWindows: 167,
+    });
+    expect(result.baselineDev).toEqual([2.9, 0.4]);
+    expect(result.motionRatio).toEqual([1.3, 1.0]);
+    expect(result.breathing).toEqual([true, false]);
+  });
+
+  it("reports a missing reference as null rather than as zero", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockResponse({
+          json: { ...body, baseline_dev_threshold: null, reference: null },
+        }),
+      ),
+    );
+    const result = await fetchPresence("c.dat", 0, 600);
+
+    // Zero would mean "every window is occupied"; null means "no verdict".
+    expect(result.baselineDevThreshold).toBeNull();
+    expect(result.reference).toBeNull();
   });
 });

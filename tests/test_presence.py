@@ -10,12 +10,16 @@ from backend.presence import (
     STATE_MOVING,
     STATE_PRESENT,
     STATE_UNKNOWN,
+    amplitude_profile,
     autocorr_columns,
     bandpass,
+    baseline_deviation,
     channel_from_ratio,
     classify,
     complex_ratio,
     fractional_motion,
+    in_band_weight,
+    presence_reference,
     presence_windows,
 )
 
@@ -241,7 +245,7 @@ def test_breathing_is_detected_and_its_rate_recovered() -> None:
 
     rate = np.nanmedian(result["rate_rpm"])
     assert rate == pytest.approx(BREATH_HZ * 60.0, abs=1.0)
-    assert result["state"].count(STATE_PRESENT) > 0.8 * len(result["state"])
+    assert result["breathing"].mean() > 0.8
 
 
 def test_an_empty_room_does_not_score_as_breathing() -> None:
@@ -251,10 +255,12 @@ def test_an_empty_room_does_not_score_as_breathing() -> None:
     makes it narrowband, so its autocorrelation oscillates and periodicity
     alone looks respectable. Tonality is what separates them.
     """
-    result = presence_windows(_synthetic_ratio(None, noise=0.01), FS)
+    ratio = _synthetic_ratio(None, noise=0.01)
+    result = presence_windows(ratio, FS, reference=presence_reference(ratio, FS))
 
     scored = result["score"][np.isfinite(result["score"])]
     assert scored.max() < 0.25, f"empty room scored {scored.max():.3f}"
+    assert not result["breathing"].any()
     assert set(result["state"]) == {STATE_EMPTY}
 
 
@@ -368,19 +374,198 @@ def test_a_window_longer_than_the_range_is_clamped_not_refused() -> None:
 
 def test_verdict_precedence_is_unknown_then_moving_then_present() -> None:
     """Order is the whole content of classify(), so it is pinned here."""
-    score = np.array([0.9, 0.9, 0.9, 0.0])
-    motion = np.array([0.0, 0.9, 0.0, 0.0])
-    unknown = np.array([True, False, False, False])
+    motion = np.array([0.0, 0.9, 0.0, 0.0, 0.0])
+    unknown = np.array([True, False, False, False, False])
+    dev = np.array([9.0, 9.0, 9.0, 0.0, 9.0])
+    ratio = np.array([0.0, 0.0, 0.0, 0.0, 9.0])
 
-    assert classify(score, motion, unknown) == [
-        STATE_UNKNOWN,     # blanked, despite a high score
-        STATE_MOVING,      # moving beats a high score
+    assert classify(
+        motion,
+        unknown,
+        baseline_dev=dev,
+        motion_ratio=ratio,
+        baseline_dev_threshold=1.0,
+    ) == [
+        STATE_UNKNOWN,     # blanked, despite a displaced channel
+        STATE_MOVING,      # absolute motion beats a displaced channel
         STATE_PRESENT,
         STATE_EMPTY,       # what is left when nothing else claimed it
+        STATE_MOVING,      # motion against the room's own floor also decides
+    ]
+
+
+def test_absence_is_not_claimed_without_a_reference_to_claim_it_against() -> None:
+    assert classify(np.zeros(2), np.zeros(2, dtype=bool)) == [
+        STATE_UNKNOWN,
+        STATE_UNKNOWN,
     ]
 
 
 def test_a_nan_motion_level_is_unknown_not_empty() -> None:
-    assert classify(
-        np.array([np.nan]), np.array([np.nan]), np.array([False])
-    ) == [STATE_UNKNOWN]
+    assert classify(np.array([np.nan]), np.array([False])) == [STATE_UNKNOWN]
+
+
+# --------------------------------------------------------------------------- #
+#  Empty-room reference                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_reference_summarises_the_room_it_was_measured_in() -> None:
+    """The reference is three numbers, and each one has a job downstream.
+
+    ``profile`` is what a window is compared against, ``dev_p95`` is how much
+    the empty room wanders on its own -- the unit the presence threshold is
+    expressed in -- and ``motion_floor`` is the fractional-motion noise floor
+    of this radio in this room, which is not zero.
+    """
+    ref = presence_reference(_synthetic_ratio(None, noise=0.01), FS)
+
+    assert ref["profile"].shape == (8,)
+    assert np.isfinite(ref["profile"]).all()
+    assert ref["dev_p95"] > 0.0, "an empty room is never perfectly still"
+    assert ref["motion_floor"] > 0.0, "fractional motion has a noise floor"
+    assert ref["n_windows"] > 0
+
+
+def test_baseline_deviation_ignores_subcarriers_missing_from_either_side() -> None:
+    """A reference and a window need not agree about which bins are alive."""
+    profile = np.array([1.0, 2.0, np.nan, 4.0])
+    ref = np.array([1.0, 5.0, 7.0, np.nan])
+
+    # Only bins 0 and 1 are finite in both: |1-1| and |2-5| -> mean 1.5.
+    assert baseline_deviation(profile, ref) == pytest.approx(1.5)
+
+
+def test_baseline_deviation_is_zero_against_the_room_it_came_from() -> None:
+    ratio = _synthetic_ratio(None, noise=0.002)
+    ref = presence_reference(ratio, FS)
+
+    assert baseline_deviation(amplitude_profile(ratio), ref["profile"]) < ref["dev_p95"]
+
+
+def test_a_displaced_channel_reads_as_present_without_any_periodicity() -> None:
+    """The case the detector was blind to: a body parked in the room.
+
+    A still occupant does not modulate the channel, it *offsets* it. The
+    breathing branch cannot see that by construction -- every channel is
+    mean-removed before the autocorrelation -- so the offset has to be
+    measured against a known-empty reference instead.
+    """
+    empty = _synthetic_ratio(None, noise=0.002, seed=1)
+    ref = presence_reference(empty, FS)
+
+    # A body: a fixed multipath displacement, no modulation of any kind.
+    occupied = empty * np.exp(1j * 0.8) * 1.6
+
+    result = presence_windows(occupied, FS, reference=ref)
+
+    assert np.nanmedian(result["baseline_dev"]) > ref["dev_p95"] * 3.0
+    assert set(result["state"]) == {STATE_PRESENT}
+    assert np.nanmax(result["score"]) < 0.25, "no periodicity was involved"
+
+
+def test_the_room_the_reference_came_from_reads_as_empty() -> None:
+    ratio = _synthetic_ratio(None, noise=0.01)
+    ref = presence_reference(ratio, FS)
+
+    assert set(presence_windows(ratio, FS, reference=ref)["state"]) == {STATE_EMPTY}
+
+
+def test_without_a_reference_absence_is_never_claimed() -> None:
+    """``empty`` means "matched a known-empty room", so it needs one.
+
+    Reporting ``empty`` with nothing to compare against is the failure this
+    whole path exists to stop: it is the most confident possible claim, made
+    from no evidence at all.
+    """
+    result = presence_windows(_synthetic_ratio(None, noise=0.01), FS)
+
+    assert STATE_EMPTY not in result["state"]
+    assert set(result["state"]) == {STATE_UNKNOWN}
+    assert np.isnan(result["baseline_dev"]).all()
+    assert np.isnan(result["motion_ratio"]).all()
+    assert any("reference" in w for w in result["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+#  Motion against the room's own floor                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_motion_is_reported_as_a_multiple_of_the_rooms_own_floor() -> None:
+    """Absolute fractional motion cannot transfer between radios.
+
+    Measured on captures/lg_csi_captures/20260825/20260825_185637.bin the
+    empty-room floor is 0.069 and a walk-through reaches 0.185 -- below the
+    0.25 absolute threshold, so gross motion never registered at all. The
+    ratio against the room's own floor is 2.7x there, and dimensionless.
+    """
+    quiet = _synthetic_ratio(None, noise=0.002)
+    ref = presence_reference(quiet, FS)
+
+    rng = np.random.default_rng(3)
+    n = quiet.shape[0]
+    loud = quiet + 0.02 * (
+        rng.standard_normal((n, 8)) + 1j * rng.standard_normal((n, 8))
+    )
+
+    result = presence_windows(loud, FS, reference=ref)
+
+    assert np.nanmedian(result["motion_ratio"]) > 2.0
+    assert np.nanmedian(result["motion_level"]) < 0.25, "absolute test misses it"
+    assert set(result["state"]) == {STATE_MOVING}
+
+
+# --------------------------------------------------------------------------- #
+#  Breathing demoted to evidence                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_breathing_reports_a_rate_but_does_not_decide_occupancy() -> None:
+    """A chest is evidence, not a verdict.
+
+    Measured on the same capture, periodicity ran *higher* in the empty room
+    (0.102) than with an occupant sitting still (0.076), so a branch that
+    votes on its own votes wrong. It still reports the rate it found.
+    """
+    ratio = _synthetic_ratio(BREATH_HZ)
+    ref = presence_reference(ratio, FS)
+
+    result = presence_windows(ratio, FS, reference=ref)
+
+    assert np.nanmedian(result["rate_rpm"]) == pytest.approx(BREATH_HZ * 60.0, abs=1.0)
+    assert result["breathing"].any(), "the chest is still reported"
+    # Same channel the reference came from, so nothing is displaced.
+    assert STATE_PRESENT not in result["state"]
+
+
+def test_a_rate_is_blanked_where_it_is_not_believed() -> None:
+    result = presence_windows(_synthetic_ratio(None, noise=0.01), FS)
+
+    assert not result["breathing"].any()
+    assert np.isnan(result["rate_rpm"]).all()
+
+
+def test_in_band_weighting_prefers_a_tone_over_a_drifting_subcarrier() -> None:
+    """The weight has to measure a chest, not a slow wander.
+
+    Weighting in-band power against everything above the band makes any
+    subcarrier with 1/f drift look like the best evidence in the room, because
+    drift is enormous inside 0.15-0.5 Hz and absent above it. The empty room
+    outscored the occupied one on that weighting. A two-sided shoulder just
+    outside the band is what a tone actually beats.
+    """
+    n = int(DURATION_S * FS)
+    t = np.arange(n) / FS
+    rng = np.random.default_rng(11)
+
+    tone = 0.02 * np.sin(2 * np.pi * BREATH_HZ * t)
+    drift = 0.4 * np.cumsum(rng.standard_normal(n)) / np.sqrt(n)
+    noise = 0.002 * rng.standard_normal((n, 2))
+
+    sig = np.column_stack([tone, drift]) + noise
+    weight = in_band_weight(sig, FS, (0.15, 0.5))
+
+    assert weight[0] > weight[1], (
+        f"tone weighted {weight[0]:.3f} vs drift {weight[1]:.3f}"
+    )

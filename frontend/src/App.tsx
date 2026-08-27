@@ -118,13 +118,13 @@ export function App() {
   const dopplerGeomInFlightRef = useRef(false);
   // Swap correction on the CSI ratio panels. Some frames arrive with the rx
   // streams exchanged (ratio reciprocal) or the ratio negated (phase +pi);
-  // correction puts them back. On by default because a capture read without
-  // it shows those frames as vertical discontinuities that are an artefact of
-  // the NIC, not the channel. Off is the escape hatch for judging what the
-  // correction is doing. Detection compares each frame against its
-  // neighbours, so it needs one transmitter's own sequence -- on `all` the
-  // backend declines to act and the panels say so themselves.
-  const [swapCorrected, setSwapCorrected] = useState<boolean>(true);
+  // correction puts them back. Off by default so what the panels show is what
+  // the NIC delivered: the affected frames read as vertical discontinuities,
+  // but nothing has been inferred on the viewer's behalf. Turn it on to hide
+  // that artefact once you know it is one. Detection compares each frame
+  // against its neighbours, so it needs one transmitter's own sequence -- on
+  // `all` the backend declines to act and the panels say so themselves.
+  const [swapCorrected, setSwapCorrected] = useState<boolean>(false);
   const [dark, setDark] = useState<boolean>(() => {
     const stored = localStorage.getItem(DARK_KEY);
     return stored === null ? true : stored === "true";

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -168,7 +169,11 @@ export function Presence({
   dark,
 }: PresenceProps) {
   const [channel, setChannel] = useState<PresenceChannel>("complex");
-  const [windowSeconds, setWindowSeconds] = useState(12);
+  const [windowSeconds, setWindowSeconds] = useState(30);
+  // The empty-room reference. Named by the operator rather than derived,
+  // because a reference taken from recent history absorbs an occupant who
+  // sits still and then reports the room as empty precisely while it is not.
+  const [reference, setReference] = useState<[number, number] | null>(null);
   const [threshold, setThreshold] = useState(0.25);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
   const [data, setData] = useState<PresenceData | null>(null);
@@ -217,6 +222,8 @@ export function Presence({
         windowSeconds,
         presentThreshold: threshold,
         motionFracHi,
+        refT0: reference?.[0] ?? null,
+        refT1: reference?.[1] ?? null,
         mimo,
         sourceMac,
         interpolate,
@@ -237,7 +244,7 @@ export function Presence({
       });
     return () => controller.abort();
   }, [
-    path, range, channel, windowSeconds, threshold, motionFracHi,
+    path, range, channel, windowSeconds, threshold, motionFracHi, reference,
     mimo, sourceMac, interpolate,
   ]);
 
@@ -257,6 +264,14 @@ export function Presence({
     };
     for (const s of data?.state ?? []) counts[s] += 1;
     return counts;
+  }, [data]);
+
+  const devCeiling = useMemo(() => {
+    const finite = (data?.baselineDev ?? []).filter(
+      (v): v is number => v !== null && Number.isFinite(v),
+    );
+    const threshold = data?.baselineDevThreshold ?? 0;
+    return Math.max(threshold * 1.6, ...finite.map((v) => v * 1.2), 0.5);
   }, [data]);
 
   const motionCeiling = useMemo(() => {
@@ -345,6 +360,37 @@ export function Presence({
               if (Number.isFinite(v) && v >= 0.01 && v <= 2) setMotionFracHi(v);
             }}
           />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">
+            Empty reference
+          </Label>
+          {reference ? (
+            <>
+              <span className="text-[11px] tabular-nums">
+                {reference[0].toFixed(1)}–{reference[1].toFixed(1)} s
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => setReference(null)}
+              >
+                Clear
+              </Button>
+            </>
+          ) : (
+            <span className="text-[11px] text-muted-foreground">none</span>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => setReference([range[0], range[1]])}
+          >
+            Use this view
+          </Button>
         </div>
 
         {data && (
@@ -436,6 +482,47 @@ export function Presence({
             </div>
           </div>
 
+          {data.baselineDevThreshold === null ? (
+            <div className="rounded-md border border-dashed px-3 py-2 text-[11px] text-muted-foreground leading-relaxed">
+              <b>No empty-room reference.</b> Absence is a claim, and there is
+              nothing here to measure it against — so every window that is not
+              moving reads <b>no data</b> rather than “empty”, and a motionless
+              occupant cannot be seen at all. Park the view on a stretch you
+              know was empty and press <b>Use this view</b>.
+            </div>
+          ) : (
+            <Chart
+              width={width}
+              times={data.timeS}
+              domain={domain}
+              yDomain={[0, devCeiling]}
+              yLabel="channel offset (dB)"
+              dark={dark}
+              height={150}
+              series={[
+                { values: data.baselineDev, color: "#7b5ea7", width: 1.8, label: "offset from empty" },
+              ]}
+              guides={[
+                {
+                  value: data.baselineDevThreshold,
+                  color: "#d62728",
+                  label: "occupied",
+                },
+              ]}
+            />
+          )}
+
+          {data.reference && (
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Reference: {data.reference.nWindows} windows, wandering{" "}
+              {data.reference.devP95.toFixed(2)} dB on their own (p95) — so
+              “occupied” is {data.params.baseline_dev_k}× that, or{" "}
+              {(data.baselineDevThreshold ?? 0).toFixed(2)} dB. Motion floor{" "}
+              {data.reference.motionFloor.toFixed(3)}, and gross motion is{" "}
+              {data.params.motion_ratio_hi}× it.
+            </p>
+          )}
+
           <Chart
             width={width}
             times={data.timeS}
@@ -471,12 +558,12 @@ export function Presence({
             <span style={{ color: "#9aa5b1" }}>periodicity</span>
             <span style={{ color: "#c7a02f" }}>tonality</span>
             <span style={{ color: "#2f9c6f" }}>motion gate</span>
-            <span>= score is their product</span>
+            <span>= score is their product · evidence only, does not decide</span>
           </div>
 
-          {tally.present === 0 && (
+          {!data.breathing.some(Boolean) && (
             <p className="text-[11px] text-muted-foreground">
-              No window in this range was called a still occupant, so the rate
+              No window in this range carried a believable chest, so the rate
               axis below is empty by construction — not a chart that failed to
               draw.
             </p>
@@ -498,7 +585,7 @@ export function Presence({
                 // anything was breathing -- plotting it unconditionally shows
                 // a confident breathing rate for an empty room.
                 values: data.rateRpm.map((v, i) =>
-                  data.state[i] === "present" ? v : null,
+                  data.breathing[i] ? v : null,
                 ),
                 color: "#2f6fed",
                 width: 1.6,
@@ -516,15 +603,23 @@ export function Presence({
           )}
 
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            Built on the <b>swap-corrected</b> CSI ratio: uncorrected, 1.2% of
-            frame-to-frame steps exceed π, and a π step is a broadband impulse
-            with energy inside the respiration band — it would read as
-            breathing in an empty room. A still occupant is decided on{" "}
-            <b>periodicity</b>, not on energy: score = periodicity × tonality ×
-            motion gate, and each term is a veto. Hatched stretches are windows
-            more than half interpolated across a capture dropout; they report{" "}
-            <b>no data</b> rather than “empty”, because a bridged hole is flat
-            and flat scores exactly like an absent occupant.{" "}
+            Built on the <b>raw</b> CSI ratio, with no swap correction: what
+            the panel reads is what the NIC delivered. That is not free — 1.2%
+            of frame-to-frame steps exceed π uncorrected, and a π step is a
+            broadband impulse with energy inside the respiration band, so it
+            can read as motion or as breathing in an empty room. Check the
+            ratio panels' corrected views before trusting a verdict on a
+            capture full of swaps. A still occupant is decided on the{" "}
+            <b>channel offset</b> from a known-empty reference, because a
+            motionless body does not modulate the channel, it displaces it —
+            and every other series here is mean-removed, so the displacement is
+            the one thing they cannot see. The breathing score is reported
+            alongside as evidence and does not vote: measured on a walk-in /
+            sit-still / walk-out capture, periodicity ran <i>higher</i> in the
+            empty room (0.102) than with an occupant (0.076). Hatched stretches
+            are windows more than half interpolated across a capture dropout;
+            they report <b>no data</b> rather than “empty”, because a bridged
+            hole is flat and flat scores exactly like an absent occupant.{" "}
             {sourceMac === "all" && (
               <>
                 <b>Pick a single source MAC.</b> Two transmitters interleaved
