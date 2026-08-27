@@ -28,12 +28,17 @@ that votes on it alone votes wrong. It reports a rate; it does not decide.
 
 Three things differ here, and each one matters:
 
-* **The channel is built from the *corrected* ratio.** Raw CSI arrives with
-  rx0 and rx1 swapped on some frames, which BFI never had to deal with: a
-  V-matrix column cannot be confused with its neighbour. Uncorrected, 1.2% of
-  frame-to-frame steps in the ratio phase exceed pi outright (see
-  ``backend.ratio``), and a pi jump is a broadband impulse landing directly in
-  the band respiration lives in. Feed this module the corrected metrics.
+* **The channel is whatever ratio the caller hands over, and that choice is
+  load-bearing.** Raw CSI arrives with rx0 and rx1 swapped on some frames,
+  which BFI never had to deal with: a V-matrix column cannot be confused with
+  its neighbour. Uncorrected, 1.2% of frame-to-frame steps in the ratio phase
+  exceed pi outright (see ``backend.ratio``), and a pi jump is a broadband
+  impulse landing directly in the band respiration lives in. The API feeds
+  this module the *raw* metrics (``tiles.PRESENCE_METRICS``) so that nothing
+  is inferred before the detector sees it -- which means the swap impulses are
+  in the signal, reading as motion energy and as periodicity neither of which
+  came from the room. On a capture with frequent swaps, that is the first
+  thing to rule out before trusting a verdict.
 
 * **Gaps are not bridged blindly.** ``bfi_core`` interpolates across every
   dropout unconditionally, which turns a 23-second hole into a perfectly flat

@@ -603,10 +603,13 @@ export function Presence({
           )}
 
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            Built on the <b>swap-corrected</b> CSI ratio: uncorrected, 1.2% of
-            frame-to-frame steps exceed π, and a π step is a broadband impulse
-            with energy inside the respiration band — it would read as
-            breathing in an empty room. A still occupant is decided on the{" "}
+            Built on the <b>raw</b> CSI ratio, with no swap correction: what
+            the panel reads is what the NIC delivered. That is not free — 1.2%
+            of frame-to-frame steps exceed π uncorrected, and a π step is a
+            broadband impulse with energy inside the respiration band, so it
+            can read as motion or as breathing in an empty room. Check the
+            ratio panels' corrected views before trusting a verdict on a
+            capture full of swaps. A still occupant is decided on the{" "}
             <b>channel offset</b> from a known-empty reference, because a
             motionless body does not modulate the channel, it displaces it —
             and every other series here is mean-removed, so the displacement is

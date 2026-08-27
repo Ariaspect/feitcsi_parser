@@ -102,15 +102,18 @@ def test_an_unknown_window_carries_no_score_or_rate() -> None:
             assert state != STATE_UNKNOWN
 
 
-def test_presence_reads_the_swap_corrected_ratio() -> None:
-    """Not cosmetic: uncorrected, 1.2% of frame steps exceed pi outright.
+def test_presence_reads_the_raw_ratio() -> None:
+    """The detector sees what the NIC delivered, with no swap correction.
 
-    A pi step is a broadband impulse with energy inside 0.1-0.6 Hz, so on the
-    raw ratio the detector would find respiration in an empty room.
+    Pinned because the choice is load-bearing rather than incidental, and it
+    is not free: uncorrected, 1.2% of frame steps exceed pi outright, and a pi
+    step is a broadband impulse with energy inside 0.1-0.6 Hz. Both planes
+    move together -- a swap negates the phase and the dB amplitude, so a mixed
+    pair would describe a ratio the radio never saw.
     """
     assert PRESENCE_METRICS == (
-        "csi_ratio_amplitude_corrected",
-        "csi_ratio_phase_corrected",
+        "csi_ratio_amplitude",
+        "csi_ratio_phase",
     )
 
 

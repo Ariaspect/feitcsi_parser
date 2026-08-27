@@ -1065,15 +1065,24 @@ def _decode_for_doppler(
 
 
 # The two planes the presence detector needs, and the reason both are the
-# *corrected* ones. The swap correction is not a cosmetic tidy-up here: rx0
-# and rx1 trade places on some frames, and uncorrected, 1.2% of frame-to-frame
-# steps in the ratio phase exceed pi outright. A pi step is a broadband
-# impulse with plenty of energy inside 0.1-0.6 Hz, so on the uncorrected ratio
-# the detector would find respiration in an empty room -- manufactured
-# entirely by the decode. See backend.ratio.
+# *raw* ones: the detector reads the ratio as the NIC delivered it, with no
+# orientation inferred on its behalf. What that costs is known and not small.
+# rx0 and rx1 trade places on some frames, and uncorrected, 1.2% of
+# frame-to-frame steps in the ratio phase exceed pi outright. A pi step is a
+# broadband impulse with plenty of energy inside 0.1-0.6 Hz -- the band
+# respiration lives in -- so periodicity read off this grid can be
+# manufactured by the decode rather than by a chest. Motion level inherits the
+# same impulses as spurious energy. Treat a verdict from a capture with
+# frequent swaps as unproven, and compare against the corrected metrics in the
+# ratio panels before believing it. See backend.ratio.
+#
+# The pair moves together on purpose. A swap negates the phase *and* the dB
+# amplitude, so correcting one plane and not the other would pair a flipped
+# amplitude with an unflipped phase and produce a complex ratio the radio
+# never saw -- worse than either choice made consistently.
 PRESENCE_METRICS: tuple[str, str] = (
-    "csi_ratio_amplitude_corrected",
-    "csi_ratio_phase_corrected",
+    "csi_ratio_amplitude",
+    "csi_ratio_phase",
 )
 
 
@@ -1106,9 +1115,16 @@ def _presence_grid(
     if frame_ids.size < 2:
         raise ValueError("fewer than 2 frames in range")
 
-    reference = get_reference(
-        path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
-        interpolate=interpolate,
+    # Only decoded when a PRESENCE_METRIC actually asks for one. On the raw
+    # ratio nothing does, and building it would cost a REFERENCE_SAMPLE decode
+    # per capture and filter to feed a correction that never runs.
+    reference = (
+        get_reference(
+            path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
+            interpolate=interpolate,
+        )
+        if any(_needs_reference(m) for m in PRESENCE_METRICS)
+        else None
     )
     amplitude_db = _decode_for_doppler(
         path, index, frame_ids, PRESENCE_METRICS[0], reference, interpolate
