@@ -22,12 +22,19 @@ H=${WEBCAM_H:-480}
 # costs ~0.15s and is the difference between a usable label and a dark frame.
 SKIP=${WEBCAM_SKIP:-4}
 
+# A grab costs ~0.6s. This bounds it so a camera that stops answering cannot
+# block the loop: a UVC device dropping off the bus leaves its /dev node behind
+# and v4l2-ctl then waits on it forever. -k sends KILL if TERM is ignored,
+# which a driver-blocked process usually does.
+GRAB_TIMEOUT=${WEBCAM_GRAB_TIMEOUT:-5}
+
 mkdir -p "$OUTDIR"
 
 start=$(date +%s.%N)
 i=0
 n=0
 fail=0
+hung=0
 
 while :; do
     now=$(date +%s.%N)
@@ -42,13 +49,19 @@ while :; do
     # from opposite sides of a second boundary.
     stamp=$(date +%Y%m%d_%H%M%S_%N)
     ts=${stamp:0:19}
-    if v4l2-ctl -d "$DEV" \
+    if timeout -k 2 "$GRAB_TIMEOUT" v4l2-ctl -d "$DEV" \
             --set-fmt-video=width="$W",height="$H",pixelformat=MJPG \
             --stream-mmap --stream-skip="$SKIP" --stream-count=1 \
             --stream-to="$OUTDIR/$ts.jpg" >/dev/null 2>&1; then
         n=$(( n + 1 ))
     else
+        rc=$?
         fail=$(( fail + 1 ))
+        # 124 is timeout's own code, 137 a KILL it had to escalate to. Both mean
+        # the device stopped answering rather than refused the grab, which is
+        # worth separating in the log: one says the camera is gone, the other
+        # says the frame was simply no good.
+        [ "$rc" -ge 124 ] && hung=$(( hung + 1 ))
         rm -f "$OUTDIR/$ts.jpg"
     fi
 
@@ -61,4 +74,8 @@ while :; do
     [ "$(echo "$delay > 0" | bc)" = "1" ] && sleep "$delay"
 done
 
-echo "$n frames, $fail failures"
+if [ "$hung" -gt 0 ]; then
+    echo "$n frames, $fail failures ($hung timed out -- camera stopped answering)"
+else
+    echo "$n frames, $fail failures"
+fi
