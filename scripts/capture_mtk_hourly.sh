@@ -5,6 +5,7 @@
 # Two cron modes, each pairing a capture length with the schedule it belongs to:
 #
 #   0 * * * *    /home/cyphy/feitcsi_parser/scripts/capture_mtk_hourly.sh --mode hourly
+#   0,30 * * * * /home/cyphy/feitcsi_parser/scripts/capture_mtk_hourly.sh --mode 30min
 #   */10 * * * * /home/cyphy/feitcsi_parser/scripts/capture_mtk_hourly.sh --mode 10min
 #
 # Rather than writing those by hand, have the script emit the stanza:
@@ -51,6 +52,7 @@ usage() {
 Usage: capture_mtk_hourly.sh [OPTIONS]
 
   -m, --mode MODE       hourly  55 min every hour      (0 * * * *)
+                        30min   29.5 min every half hour (0,30 * * * *)
                         10min   9.5 min every ten min  (*/10 * * * *)
   -d, --duration SECS   override the mode's capture length
       --show-cron       print the crontab stanza for the mode and exit
@@ -75,8 +77,9 @@ done
 
 case $MODE in
     hourly) MODE_DURATION=3300; MODE_SCHEDULE='0 * * * *' ;;
+    30min)  MODE_DURATION=1770; MODE_SCHEDULE='0,30 * * * *' ;;
     10min)  MODE_DURATION=570;  MODE_SCHEDULE='*/10 * * * *' ;;
-    *) printf 'unknown mode: %s (expected hourly or 10min)\n' "$MODE" >&2; exit 2 ;;
+    *) printf 'unknown mode: %s (expected hourly, 30min or 10min)\n' "$MODE" >&2; exit 2 ;;
 esac
 
 if [ -n "$DURATION_FLAG" ]; then
@@ -142,7 +145,13 @@ WEBCAM_DEV=${WEBCAM_DEV:-/dev/video2}
 WEBCAM_W=${WEBCAM_W:-640}
 WEBCAM_H=${WEBCAM_H:-480}
 FRAME_TMP=${FRAME_TMP:-/tmp/csi-frames}
-export WEBCAM_DEV WEBCAM_W WEBCAM_H
+
+# Bounds on a camera that stops answering. WEBCAM_GRAB_TIMEOUT caps one grab
+# inside the grabber; WEBCAM_GRACE caps how long this script will wait for the
+# grabber itself once the CSI stream has closed.
+WEBCAM_GRAB_TIMEOUT=${WEBCAM_GRAB_TIMEOUT:-5}
+WEBCAM_GRACE=${WEBCAM_GRACE:-30}
+export WEBCAM_DEV WEBCAM_W WEBCAM_H WEBCAM_GRAB_TIMEOUT
 
 # The wired path is CSI-safe; WiFi is not (see check_transport below).
 REQUIRE_WIRED=${REQUIRE_WIRED:-1}
@@ -354,6 +363,7 @@ SECS=${1:-3300}
 IVAL=${2:-0.05}
 IW=/var/iwtools/iw-priv
 LOCK=/var/csi/capture.lock
+TOKEN=/var/csi/run_token
 
 say() { printf '%s board: %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 
@@ -407,7 +417,16 @@ fi
 
 say "AP $(iw dev wlan0 link 2>/dev/null \
         | awk '/SSID/{ssid=$2} /freq/{f=$2} /signal/{sig=$2} END{printf "%s %s MHz %s dBm", ssid, f, sig}')"
-say "stimulus $GW every ${IVAL}s, streaming ${SECS}s"
+# "flood" is -f: ping sends as fast as replies come back, with no fixed
+# period. Anything else is a period in seconds. Unquoted on purpose below --
+# it has to split into two words for the -i form.
+if [ "$IVAL" = "flood" ]; then
+    PING_MODE="-f"
+    say "stimulus $GW flooded, streaming ${SECS}s"
+else
+    PING_MODE="-i $IVAL"
+    say "stimulus $GW every ${IVAL}s, streaming ${SECS}s"
+fi
 $IW wlan0 driver "set_csi 2 0 1"    >/dev/null 2>&1   # 5 GHz
 $IW wlan0 driver "set_csi 2 3 0 34" >/dev/null 2>&1   # QoS data (32 = beacon)
 $IW wlan0 driver "set_csi 2 5 2"    >/dev/null 2>&1   # VHT80
@@ -418,10 +437,24 @@ $IW wlan0 driver "set_csi 1"        >/dev/null 2>&1
 # a signal we can catch, and a stimulus running forever plus an armed driver
 # would burn airtime and corrupt the following hour's capture. timeout and the
 # watchdog are separate processes, so they still fire once orphaned.
-timeout $(( SECS + 30 )) ping -I wlan0 -i "$IVAL" -q "$GW" >/dev/null 2>&1 &
+# Kept rather than discarded so the achieved stimulus rate can be reported.
+# -q still prints the summary; it only suppresses the per-packet lines.
+PING_OUT=/tmp/csi_ping_stats.$$
+rm -f "$PING_OUT"
+timeout $(( SECS + 30 )) ping -I wlan0 $PING_MODE -q "$GW" >"$PING_OUT" 2>&1 &
 PING_PID=$!
 
-setsid sh -c "sleep $(( SECS + 45 )); pkill -x ping; $IW wlan0 driver 'set_csi 0'" \
+# A watchdog outliving its own run must not disarm a later one. Surviving
+# SIGKILL is the whole point of it, but a run killed outright leaves it
+# ticking, and 45s later it would turn the driver off underneath whatever
+# capture started meanwhile -- which is how a 120s capture came back holding
+# 24s of data. The token says whose run it is; a stale watchdog sees someone
+# else's and exits without touching anything.
+RUN_TOKEN="$$-$(date +%s)"
+echo "$RUN_TOKEN" > "$TOKEN"
+setsid sh -c "sleep $(( SECS + 45 ));
+    [ \"\$(cat $TOKEN 2>/dev/null)\" = '$RUN_TOKEN' ] || exit 0;
+    pkill -x ping; $IW wlan0 driver 'set_csi 0'" \
     >/dev/null 2>&1 </dev/null 9>&- &
 WATCHDOG_PID=$!
 
@@ -434,6 +467,29 @@ case $rc in
     143|124) say "stream closed normally (rc=$rc)" ;;
     *)       say "stream ended unexpectedly rc=$rc" ;;
 esac
+
+# INT makes ping print its summary and exit, which is the only way to learn how
+# much stimulus actually went out -- the requested rate and the achieved one
+# differ, and for flood there is no requested rate at all.
+# INT makes ping print its summary and exit. Scoped to this run's own ping via
+# the timeout wrapper's child, not pkill -x, which would also cut short a
+# concurrent run's stimulus.
+pkill -INT -P "$PING_PID" 2>/dev/null || kill -INT "$PING_PID" 2>/dev/null
+# The summary is written only as ping exits, so it is not there immediately.
+n=0
+while [ "$n" -lt 15 ]; do
+    grep -q 'packets transmitted' "$PING_OUT" 2>/dev/null && break
+    sleep 0.2
+    n=$(( n + 1 ))
+done
+if grep -q 'packets transmitted' "$PING_OUT" 2>/dev/null; then
+    say "stimulus sent: $(sed -n '/packets transmitted/,$p' "$PING_OUT" | tr '\n' ' ')"
+else
+    # Saying so beats echoing ping's opening banner as though it were the
+    # summary, which is what the unguarded sed did.
+    say "stimulus stats unavailable"
+fi
+rm -f "$PING_OUT"
 exit 0
 BOARDEOF
 
@@ -501,7 +557,36 @@ fi
 # once. It is a real wait rather than a kill because a half-written final JPEG
 # would land in the archive as a corrupt file.
 if [ -n "$WEBCAM_PID" ]; then
+    # Bounded, not an open-ended wait. A UVC device that drops off the bus
+    # leaves its /dev node behind, so the -e check above still passes and the
+    # grab blocks on a device that will never answer. That used to hold the
+    # segment open indefinitely: it never archived, never uploaded, and the
+    # next cron fire was skipped on the lock. CSI is the primary signal and
+    # must not be held hostage by the camera that only labels it.
+    grace_end=$(( SECONDS + WEBCAM_GRACE ))
+    while kill -0 "$WEBCAM_PID" 2>/dev/null && [ "$SECONDS" -lt "$grace_end" ]; do
+        sleep 1
+    done
+    if kill -0 "$WEBCAM_PID" 2>/dev/null; then
+        log "WARN  webcam grabber overran ${WEBCAM_GRACE}s past the capture, killing it"
+        pkill -P "$WEBCAM_PID" 2>/dev/null
+        kill -TERM "$WEBCAM_PID" 2>/dev/null
+        sleep 2
+        pkill -9 -P "$WEBCAM_PID" 2>/dev/null
+        kill -9 "$WEBCAM_PID" 2>/dev/null
+    fi
     wait "$WEBCAM_PID" 2>/dev/null
+
+    # A grab killed mid-write leaves a truncated JPEG, and only the newest file
+    # can be that one. Every valid JPEG ends with the EOI marker FFD9, so an
+    # ending that is not FFD9 is a partial file rather than a dark frame.
+    newest=$(ls -t "$FRAMES"/*.jpg 2>/dev/null | head -1)
+    if [ -n "$newest" ] \
+       && [ "$(tail -c2 "$newest" | od -An -tx1 | tr -d ' \n')" != "ffd9" ]; then
+        log "WARN  dropped truncated final frame $(basename "$newest")"
+        rm -f "$newest"
+    fi
+
     frame_count=$(find "$FRAMES" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l)
     log "FRAMES $frame_count jpg in $(basename "$FRAMES")"
 fi
