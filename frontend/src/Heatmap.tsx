@@ -4,7 +4,7 @@ import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from "d3-zoom
 import { scaleLinear, type ScaleLinear } from "d3-scale";
 import { VIRIDIS, buildLut } from "./colormap";
 import { renderTileToImageData, subcarrierSourceRect, tileSourceRect } from "./render";
-import { fetchTile, type Tile, type Metric } from "./api";
+import { fetchTile, type Tile, type Metric, type DopplerMetric } from "./api";
 import { type TimeLink } from "./timelink";
 import { TileScheduler, type RequestReason } from "./tilefetch";
 import {
@@ -17,9 +17,15 @@ import {
   type View,
 } from "./view";
 
+/** Names the series a panel is drawing. The Doppler metrics are in here
+ *  because a Doppler panel is a Heatmap with a different `source`: the name
+ *  never reaches `fetchTile`, it only keys the request cache and tells a
+ *  metric switch from a pan. */
+type PanelMetric = Metric | DopplerMetric;
+
 interface HeatmapProps {
   path: string;
-  metric: Metric;
+  metric: PanelMetric;
   filename: string;
   numSubcarriers: number;
   captureTMin: number;
@@ -107,7 +113,7 @@ interface Geometry {
  * mount-once effect's draw/listeners never close over stale props. */
 interface PropsMirror {
   path: string;
-  metric: Metric;
+  metric: PanelMetric;
   filename: string;
   numSubcarriers: number;
   halfN: number;
@@ -212,7 +218,7 @@ export function Heatmap({
   const ampScaleRef = useRef<{ lo: number; hi: number } | null>(null);
   // Last metric drawn, so a metric switch can drop scale and tile state that
   // was fitted to the previous one. Null until the first render completes.
-  const metricRef = useRef<Metric | null>(null);
+  const metricRef = useRef<PanelMetric | null>(null);
 
   const halfN = Math.floor(numSubcarriers / 2);
 

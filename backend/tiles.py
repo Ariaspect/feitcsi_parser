@@ -55,6 +55,7 @@ from .doppler import (
     uniform_grid,
 )
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
+from .spectro import stft_complex
 from .ratio import (
     CONTEXT_FRAMES,
     Reference,
@@ -126,12 +127,24 @@ DERIVED_METRICS: dict[str, Derived] = {
         correct_ratio_amplitude,
         needs_reference=True,
     ),
-    # Time-axis unwrapping is built on the *corrected* ratio, never the raw
-    # one. Uncorrected, 1.2% of frame-to-frame steps exceed pi outright, and
-    # each one an unwrapper misreads offsets everything after it by 2*pi for
-    # good. Corrected, the 99th percentile step is 0.328 rad — a tenth of pi.
+    # Time-axis unwrapping is built on the raw ratio, like everything else
+    # here. It was built on the corrected one while Intel captures were the
+    # subject: there, 1.2% of frame-to-frame steps exceed pi outright, and each
+    # one an unwrapper misreads offsets everything after it by 2*pi for good.
+    # MediaTek does not swap. Measured across four MTK captures, ~7900 frames
+    # of one transmitter each, not one transition has a median step past pi/2
+    # -- against 0.78% and 15.30% on two Intel captures -- so the correction
+    # this used to sit on is a no-op that costs a reference decode and makes
+    # the panel demand a selected transmitter to draw at all.
+    #
+    # What remains is the honest residual: 0.207% of individual
+    # subcarrier-transitions still exceed pi/2 and 0.027% exceed 0.9*pi, from
+    # fast motion rather than from decode. Those the unwrapper can still get
+    # wrong, and each one it does is permanent. The complex Doppler panel is
+    # the one that never unwraps; this is the view that trades that risk for a
+    # continuous phase.
     "csi_ratio_phase_time_unwrapped": Derived(
-        ("csi_ratio_phase_corrected",), unwrap_time, needs_times=True
+        ("csi_ratio_phase",), unwrap_time, needs_times=True
     ),
     # Delay-domain view of the raw channel (rx0/tx0), not the ratio: no
     # correction applies because there is no second chain to have been
@@ -152,9 +165,12 @@ TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS)
 def _needs_reference(metric: str) -> bool:
     """True if *metric* or anything it is derived from needs a Reference.
 
-    ``csi_ratio_phase_time_unwrapped`` does not correct anything itself, but
-    it is built on the corrected ratio — so it needs the reference just as
-    much, one step removed.
+    The recursion is not decoration. A metric can inherit the need without
+    correcting anything itself, simply by being built on one that does — as
+    ``csi_ratio_phase_time_unwrapped`` was until it moved onto the raw ratio.
+    Only the two corrected metrics answer True today, and a view derived from
+    either of them tomorrow gets the reference without anyone remembering to
+    wire it.
     """
     derived = DERIVED_METRICS.get(metric)
     if derived is None:
@@ -899,11 +915,34 @@ def _interpolate_time_gaps(
 # ----------------------------------------------------------------------- #
 
 
-# Doppler runs on real-valued series only. Amplitude is the raw channel's
-# magnitude; the phase panel is built on the *time-unwrapped* ratio phase
-# because raw phase is wrapped, and its 2*pi jumps are broadband steps that
-# would dominate an FFT and read as motion that is not there.
-DOPPLER_METRICS: tuple[str, ...] = ("amplitude", "csi_ratio_phase_time_unwrapped")
+# What the Doppler panels may run on. Two are real-valued and one is not, and
+# the difference is the sign of the shift.
+#
+# ``csi_ratio_complex`` is not a tile metric and never will be -- a heatmap
+# draws one real plane, and this is the complex ratio itself, rebuilt from its
+# two planes and transformed without being flattened first. Being complex is
+# the whole point: a real series has a conjugate-symmetric spectrum, so its
+# Doppler is unsigned and approaching motion lands on the same row as
+# receding. It also never unwraps anything. Measured on
+# captures/lg/20260825_185637.bin, 0.027% of subcarrier-transitions step more
+# than 0.9*pi, and the time-unwrapped panel carries each one it misreads
+# forward as a permanent 2*pi offset -- the full-height bars at 29 s, 92 s and
+# 390 s in that capture are exactly those events.
+#
+# ``amplitude`` is the *raw* channel, which is why it is the noisiest of the
+# three: it carries the receiver's AGC. On the capture above rssi_1 walks four
+# levels in 3 dB steps, the per-frame common mode moves 2.34 dB at p99 against
+# the ratio's 1.09, and an AGC step is a frame-wide impulse -- broadband, in
+# every subcarrier at once. The ratio divides it out, both chains sharing the
+# gain and the oscillator. Occupied-against-empty contrast in 0.1-0.6 Hz on
+# that capture: 6.10 dB on the raw channel, 15.18 dB on the ratio amplitude.
+# It stays available as a diagnostic and is not the panel to read a room from.
+DOPPLER_COMPLEX_METRIC = "csi_ratio_complex"
+DOPPLER_METRICS: tuple[str, ...] = (
+    DOPPLER_COMPLEX_METRIC,
+    "amplitude",
+    "csi_ratio_phase_time_unwrapped",
+)
 
 # Floor on a clamped window. Below this a spectrogram column is too few samples
 # to carry a meaningful spectrum, and the honest answer is an error.
@@ -960,6 +999,21 @@ def compute_doppler(
 
     times = times_all[frame_ids]
 
+    # The complex branch decodes *before* the time axis is built on it. Frames
+    # that carry no ratio at all -- a single-rx frame has nothing to divide by,
+    # and MTK captures interleave them, 140 of 6000 on one measured range --
+    # have to leave the series first. A NaN row does not cost only its own
+    # sample: every output bin sums over a whole window, so one poisons every
+    # column that overlaps it.
+    ratio_series: np.ndarray | None = None
+    if metric == DOPPLER_COMPLEX_METRIC:
+        ratio_series, times, _ = _complex_ratio_series(
+            path, index, frame_ids, times, interpolate,
+            mimo=mimo, source_mac=source_mac,
+        )
+        if times.size < 2:
+            raise ValueError("no frames in range carry a two-antenna CSI ratio")
+
     # Sample rate comes from the whole (filtered) capture, not from the frames
     # in view. Taking it from the visible slice makes the frequency axis
     # rescale as the user zooms: capture.dat's 1st-percentile interval is
@@ -985,39 +1039,67 @@ def compute_doppler(
             f"a {MIN_DOPPLER_WIN}-sample minimum window"
         )
 
-    reference = (
-        get_reference(
-            path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
-            interpolate=interpolate,
-        )
-        if _needs_reference(metric)
-        else None
-    )
-    values = _decode_for_doppler(
-        path, index, frame_ids, metric, reference, interpolate
-    )
-
-    samples, fabricated = resample_uniform(
-        times, values, grid_times, gap_limit_for(times)
-    )
     hop = max(1, int(round(win * (1.0 - overlap))))
-    spec, freqs = stft_average(
-        samples, fs, win, hop,
-        fabricated=fabricated,
-        max_gap_fraction=max_gap_fraction,
-        zero_pad=zero_pad,
-    )
+    gap_limit = gap_limit_for(times)
+
+    if ratio_series is None:
+        reference = (
+            get_reference(
+                path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
+                interpolate=interpolate,
+            )
+            if _needs_reference(metric)
+            else None
+        )
+        values = _decode_for_doppler(
+            path, index, frame_ids, metric, reference, interpolate
+        )
+        samples, fabricated = resample_uniform(
+            times, values, grid_times, gap_limit
+        )
+        spec, freqs = stft_average(
+            samples, fs, win, hop,
+            fabricated=fabricated,
+            max_gap_fraction=max_gap_fraction,
+            zero_pad=zero_pad,
+        )
+        f_min = 0.0
+    else:
+        # Resampled as two real planes, then recombined. Interpolating an
+        # angle across the +/-pi seam averages the two ends of the circle and
+        # lands halfway round it; the real and imaginary parts have no seam.
+        real, fabricated = resample_uniform(
+            times, ratio_series.real, grid_times, gap_limit
+        )
+        imag, _ = resample_uniform(
+            times, ratio_series.imag, grid_times, gap_limit
+        )
+        spec, freqs, _ = stft_complex(
+            real + 1j * imag, fs, win, hop,
+            fabricated=fabricated,
+            max_gap_fraction=max_gap_fraction,
+            zero_pad=zero_pad,
+        )
+        # stft_complex returns power and ascending frequencies. Both are
+        # converted to this endpoint's contract: magnitude, because every
+        # other panel is drawn in magnitude and a power axis would let DC
+        # leakage own the colormap; and row 0 = highest frequency, so the
+        # renderer's top-down row order puts +Nyquist at the top and the
+        # receding half below zero at the bottom.
+        spec = np.sqrt(spec)[::-1, :]
+        f_min = float(freqs[0])
 
     finite = spec[np.isfinite(spec)]
     n_out = spec.shape[1]
     return spec.astype(np.float32), {
         "fs": float(fs),
+        "f_min": float(f_min),
         "f_max": float(freqs[-1]),
         "win": int(win),
         "hop": int(hop),
         "win_seconds": float(win * step),   # what was used, not what was asked
         "blank_columns": int(np.all(~np.isfinite(spec), axis=0).sum()),
-        "frames_used": int(frame_ids.size),
+        "frames_used": int(times.size),
         "t_min": float(times_all[0]) if times_all.size else 0.0,
         "t_max": float(times_all[-1]) if times_all.size else 0.0,
         # A column is centred on its window, so the first and last column
@@ -1086,6 +1168,52 @@ PRESENCE_METRICS: tuple[str, str] = (
 )
 
 
+def _complex_ratio_series(
+    path: Path,
+    index: FrameIndex,
+    frame_ids: np.ndarray,
+    times: np.ndarray,
+    interpolate: bool,
+    *,
+    mimo: tuple[int, int] | None,
+    source_mac: str | None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Decode ``frame_ids`` into the complex CSI ratio, frame by frame.
+
+    The one place the ratio is rebuilt from its two stored planes, so the
+    presence strip and the complex Doppler panel cannot end up looking at
+    different series -- same metrics, same reference gate, same rule about
+    which frames are allowed to stay.
+
+    Frames carrying no ratio at all are dropped rather than interpolated
+    through. Dropping them lets the hole they leave be measured as a gap like
+    any other, so a long run of them blanks its windows instead of being
+    silently bridged into a flat stretch.
+
+    Returns ``(ratio, times, n_without_ratio)``, the times being those of the
+    frames that survived.
+    """
+    reference = (
+        get_reference(
+            path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
+            interpolate=interpolate,
+        )
+        if any(_needs_reference(m) for m in PRESENCE_METRICS)
+        else None
+    )
+    amplitude_db = _decode_for_doppler(
+        path, index, frame_ids, PRESENCE_METRICS[0], reference, interpolate
+    )
+    phase_rad = _decode_for_doppler(
+        path, index, frame_ids, PRESENCE_METRICS[1], reference, interpolate
+    )
+    ratio = presence.complex_ratio(amplitude_db, phase_rad)
+
+    usable = np.isfinite(ratio).any(axis=1)
+    times = np.asarray(times, dtype=float)[: ratio.shape[0]][usable]
+    return ratio[usable], times, int(usable.size - int(usable.sum()))
+
+
 def _presence_grid(
     path: Path,
     t0: float,
@@ -1115,33 +1243,10 @@ def _presence_grid(
     if frame_ids.size < 2:
         raise ValueError("fewer than 2 frames in range")
 
-    # Only decoded when a PRESENCE_METRIC actually asks for one. On the raw
-    # ratio nothing does, and building it would cost a REFERENCE_SAMPLE decode
-    # per capture and filter to feed a correction that never runs.
-    reference = (
-        get_reference(
-            path, index, path.stat().st_size, mimo=mimo, source_mac=source_mac,
-            interpolate=interpolate,
-        )
-        if any(_needs_reference(m) for m in PRESENCE_METRICS)
-        else None
+    ratio, times, n_no_ratio = _complex_ratio_series(
+        path, index, frame_ids, times_all[frame_ids], interpolate,
+        mimo=mimo, source_mac=source_mac,
     )
-    amplitude_db = _decode_for_doppler(
-        path, index, frame_ids, PRESENCE_METRICS[0], reference, interpolate
-    )
-    phase_rad = _decode_for_doppler(
-        path, index, frame_ids, PRESENCE_METRICS[1], reference, interpolate
-    )
-    ratio = presence.complex_ratio(amplitude_db, phase_rad)
-
-    # Frames carrying no ratio at all -- a single-rx frame has nothing to
-    # divide by -- are dropped from the series rather than interpolated
-    # through. Dropping them lets the hole they leave be measured as a gap
-    # like any other, so a long run of them blanks its windows instead of
-    # being silently bridged into a flat stretch.
-    usable = np.isfinite(ratio).any(axis=1)
-    times = times_all[frame_ids][: ratio.shape[0]][usable]
-    ratio = ratio[usable]
     if times.size < 2:
         raise ValueError("no frames in range carry a two-antenna CSI ratio")
 
@@ -1165,7 +1270,7 @@ def _presence_grid(
         grid_times,
         times,
         times_all,
-        int(usable.size - int(usable.sum())),
+        n_no_ratio,
     )
 
 

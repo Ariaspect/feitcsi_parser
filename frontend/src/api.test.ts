@@ -268,7 +268,7 @@ describe("fetchTile", () => {
 });
 
 describe("fetchDoppler", () => {
-  function dopplerResponse(width: number, height: number) {
+  function dopplerResponse(width: number, height: number, fMin = "0") {
     const grid = new Float32Array(width * height).fill(1);
     return new Response(grid.buffer, {
       status: 200,
@@ -276,6 +276,7 @@ describe("fetchDoppler", () => {
         "X-Doppler-Width": String(width),
         "X-Doppler-Height": String(height),
         "X-Doppler-Fs": "17.86",
+        "X-Doppler-FMin": fMin,
         "X-Doppler-FMax": "8.93",
         "X-Doppler-Win": String((height - 1) * 2),
         "X-Doppler-Hop": String(height - 1),
@@ -302,6 +303,7 @@ describe("fetchDoppler", () => {
     expect(tile.height).toBe(129);
     expect(tile.grid.length).toBe(20 * 129);
     expect(tile.fs).toBeCloseTo(17.86);
+    expect(tile.fMin).toBe(0);
     expect(tile.fMax).toBeCloseTo(8.93);
     // Column centres, not the requested range.
     expect(tile.t0).toBeCloseTo(15);
@@ -316,6 +318,15 @@ describe("fetchDoppler", () => {
     expect(url).toContain("/api/doppler?");
     expect(url).toContain("win_seconds=45");
     expect(url).toContain("mimo=2x2");
+  });
+
+  it("reads a two-sided axis from the complex metric", async () => {
+    // The signed axis is the whole reason this metric exists: a panel that
+    // read fMin as 0 would label receding motion as approaching.
+    vi.stubGlobal("fetch", vi.fn(async () => dopplerResponse(20, 258, "-8.93")));
+    const tile = await fetchDoppler("c.dat", 0, 200, "csi_ratio_complex", 30);
+    expect(tile.fMin).toBeCloseTo(-8.93);
+    expect(tile.fMax).toBeCloseTo(8.93);
   });
 
   it("throws with the server status on an error", async () => {

@@ -215,19 +215,29 @@ export async function fetchTile(
   };
 }
 
-/** Metrics /api/doppler accepts. Both are real-valued series: amplitude, and
- *  the time-unwrapped ratio phase. Raw wrapped phase is deliberately absent —
- *  its 2π jumps are broadband steps that would dominate an FFT and read as
- *  motion that is not there. */
-export type DopplerMetric = "amplitude" | "csi_ratio_phase_time_unwrapped";
+/** Metrics /api/doppler accepts. `csi_ratio_complex` is the complex ratio
+ *  itself and is the one to read a room from: it is the only one whose
+ *  Doppler is *signed*, and it never unwraps anything. The other two are real
+ *  series, so their spectra are conjugate-symmetric and approaching motion
+ *  lands on the same row as receding. Raw wrapped phase is deliberately
+ *  absent — its 2π jumps are broadband steps that read as motion that is not
+ *  there. */
+export type DopplerMetric =
+  | "csi_ratio_complex"
+  | "amplitude"
+  | "csi_ratio_phase_time_unwrapped";
 
 export interface DopplerTile extends Tile {
   /** The capture's own median frame rate over the frames in range — not a
    *  function of any requested width. */
   fs: number;
-  /** Nyquist, fs/2. The axis runs 0..fMax and is one-sided: real input means
-   *  the sign of the Doppler shift is not recoverable, so approaching and
-   *  receding motion are indistinguishable. Motion above fMax aliases. */
+  /** Bottom of the frequency axis. 0 for the real metrics, whose spectra are
+   *  conjugate-symmetric — approaching and receding motion land on the same
+   *  row there. About -fs/2 for `csi_ratio_complex`, where the sign survives
+   *  and the two directions are separate rows. */
+  fMin: number;
+  /** Top of the frequency axis, Nyquist. Motion above it aliases: at 5 GHz a
+   *  1 m/s movement sits near 33 Hz, far above any capture here. */
   fMax: number;
   win: number;
   hop: number;
@@ -284,6 +294,7 @@ export async function fetchDoppler(
     pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),
     pHigh: parseFloat(h.get("X-Tile-PHigh") ?? "0"),
     fs: parseFloat(h.get("X-Doppler-Fs") ?? "0"),
+    fMin: parseFloat(h.get("X-Doppler-FMin") ?? "0"),
     fMax: parseFloat(h.get("X-Doppler-FMax") ?? "0"),
     win: parseInt(h.get("X-Doppler-Win") ?? "0", 10),
     hop: parseInt(h.get("X-Doppler-Hop") ?? "0", 10),
