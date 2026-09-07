@@ -793,6 +793,31 @@ class MTKIndex:
             self._csd = estimate_csd_slope(self.path, self)
         return self._csd  # type: ignore[return-value]
 
+    def dominant_peer(self) -> str | None:
+        """The MAC that sent most of this capture, or None if there are none.
+
+        The CSI engine latches frames it can hear, not only frames addressed to
+        us, so a capture can carry a second transmitter whose channel has
+        nothing to do with the link under test. On a clean wired-adjacent
+        capture that is a rounding error -- 20260904_192623.bin holds 3 foreign
+        records against 22627 from the AP -- but it is not guaranteed to stay
+        one, and a frame from another transmitter is not a worse sample of our
+        channel, it is a sample of a different channel.
+
+        Pair with ``filter_mask``::
+
+            mask = index.filter_mask(source_mac=index.dominant_peer())
+
+        Reported rather than applied: dropping frames here would renumber every
+        frame id, and callers already have a filter that does not.
+        """
+        if not self.source_macs:
+            return None
+        counts: dict[str, int] = {}
+        for m in self.source_macs:
+            counts[m] = counts.get(m, 0) + 1
+        return max(counts, key=lambda k: counts[k])
+
     def mimo_labels(self) -> list[str]:
         return [
             _mimo_label(int(rx), int(tx))

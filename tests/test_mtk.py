@@ -965,3 +965,17 @@ def test_the_rpi_plane_is_selectable_and_both_planes_carry_signal() -> None:
 def test_an_unknown_rpi_plane_is_refused() -> None:
     with pytest.raises(ValueError):
         MTKIndex("captures/20260904_192623.bin", plane=2)
+
+
+def test_the_dominant_peer_is_reported_and_filters_out_strays() -> None:
+    """The CSI engine latches other transmitters; naming the AP lets us drop them."""
+    path = Path("captures/20260904_192623.bin")
+    if not path.exists():
+        pytest.skip("capture not available")
+    index = MTKIndex(path)
+    peer = index.dominant_peer()
+    assert peer is not None and peer.count(":") == 5
+    mask = index.filter_mask(source_mac=peer)
+    # Overwhelmingly the AP, but not quite everything.
+    assert mask.mean() > 0.99
+    assert mask.sum() <= index.count
