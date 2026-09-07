@@ -181,14 +181,16 @@ export function Presence({
   // one. Seeded once per capture, and only while the operator has not chosen:
   // any manual pick outranks the protocol, because the protocol is what was
   // intended and the operator may have seen that it did not happen.
-  const [refSeeded, setRefSeeded] = useState<string | null>(null);
+  // Depends on `path` alone. Putting `reference` in the deps would abort this
+  // fetch every time the operator picked a range, and re-running it on each
+  // seed is a needless request; the current pick is read through a ref instead.
+  const referenceRef = useRef<[number, number] | null>(null);
+  referenceRef.current = reference;
   useEffect(() => {
-    if (refSeeded === path) return;
     const controller = new AbortController();
     fetchLabels(path, controller.signal)
       .then((labels) => {
-        setRefSeeded(path);
-        if (reference) return;
+        if (referenceRef.current) return;
         const empty = (labels.phases ?? []).find((ph) => ph.label === "empty");
         // The first empty phase only. A trailing one is not usable as a
         // reference: on both labelled runs the channel did not return to its
@@ -197,9 +199,9 @@ export function Presence({
         // room at the start, whatever the protocol called it.
         if (empty && empty.t1 > empty.t0) setReference([empty.t0, empty.t1]);
       })
-      .catch(() => setRefSeeded(path));
+      .catch(() => undefined);
     return () => controller.abort();
-  }, [path, reference, refSeeded]);
+  }, [path]);
   const [threshold, setThreshold] = useState(0.25);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
   const [data, setData] = useState<PresenceData | null>(null);
