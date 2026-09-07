@@ -125,9 +125,24 @@ _CHANNEL_WIDTH = {0: "20", 1: "40", 2: "80"}
 # on the far side to interpolate from.
 MAX_NULL_RUN = 3
 
-# Which rpi plane to read. Both ratio cleanly, but emitting two planes would
-# put two frames on the same timestamp, and the tile column mapping resolves
-# columns by time.
+# Default rpi plane. Both ratio cleanly, and emitting two planes at once would
+# put two frames on the same timestamp, which the tile column mapping cannot
+# represent because it resolves columns by time. That is a display constraint,
+# not a physical one, so the plane is a per-index choice: MTKIndex(path,
+# plane=1) reads the other one, and a caller wanting both indexes twice.
+#
+# They are SELECTED BETWEEN, never averaged. The two planes' tpi ratios share a
+# circular resultant of only 0.35, i.e. they carry different phase references,
+# so every combination measured on 20260904_192623.bin loses coherence against
+# plane 0 alone:
+#
+#     plane 0            0.9960     <- best
+#     plane 1            0.9917     <- nearly as good, independently
+#     complex mean       0.9882
+#     power-weighted     0.9842
+#     unit-phase mean    0.9743     <- worst
+#
+# Use them as two feature channels, not as one averaged channel.
 RPI_PLANE = 0
 
 _MAX_SLOTS = 2  # tpi in {0, 1}
@@ -168,6 +183,18 @@ def _sign_extend_14(raw: np.ndarray) -> np.ndarray:
     """14-bit two's complement -> signed. Masking as int16 is wrong."""
     v = raw.astype(np.int32) & 0x3FFF
     return np.where(v & 0x2000, v - 0x4000, v)
+
+
+def _sign_extend_8(raw: np.ndarray) -> np.ndarray:
+    """One-byte two's complement -> signed. Tag 3 is dBm and always negative.
+
+    Settled by measurement, not by assumption: on ``20260904_192623.bin`` the
+    byte reads -45.8 dBm mean (range -86..-41) signed, against 210.2 (range
+    170..215) unsigned, and the board itself reported -48/-49 dBm over ssh
+    while that capture was running. An unsigned read is off by exactly 256 dB.
+    """
+    v = raw.astype(np.int64) & 0xFF
+    return np.where(v & 0x80, v - 0x100, v)
 
 
 def _walk_records(view: memoryview, size: int):
@@ -370,8 +397,18 @@ class MTKIndex:
 
     chipset = "MediaTek"
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, plane: int = RPI_PLANE) -> None:
+        """``plane`` selects which ``rpi`` plane fills the rx slots.
+
+        The default reproduces every earlier index byte for byte. Plane 1 is a
+        genuinely different receive path, not a copy, so indexing a capture
+        twice yields two independent observations of the same frames -- see
+        ``RPI_PLANE`` for why they are selected between rather than combined.
+        """
+        if plane not in (0, 1):
+            raise ValueError(f"rpi plane must be 0 or 1, got {plane}")
         self.path = Path(path)
+        self.plane = int(plane)
         self._scan_end: int = 0
         self._scan_full()
 
@@ -442,7 +479,7 @@ class MTKIndex:
             t_rel, t_len = layout[TAG_TIMESTAMP]
             stamps_r[m] = _gather_le(mm, sel, t_rel, t_len).astype(np.int64)
             r_rel, r_len = layout[TAG_RSSI]
-            rssi_r[m] = _gather_le(mm, sel, r_rel, r_len).astype(np.int64)
+            rssi_r[m] = _sign_extend_8(_gather_le(mm, sel, r_rel, r_len))
             b_rel, b_len = layout[TAG_BANDWIDTH]
             bw_code[m] = _gather_le(mm, sel, b_rel, b_len).astype(np.int64)
             p_rel, p_len = layout[TAG_TPI]
@@ -484,7 +521,7 @@ class MTKIndex:
         counts = run_end - run_start
         idx_all = _expand_ranges(run_start, counts)
         owner = np.repeat(np.arange(n, dtype=np.int64), counts)
-        in_plane = rpi_r[idx_all] == RPI_PLANE
+        in_plane = rpi_r[idx_all] == self.plane
         # Order: plane first, then tpi ascending, stable within a group.
         order = np.lexsort((tpi_r[idx_all], ~in_plane, owner))
         idx_sorted = idx_all[order]
@@ -591,7 +628,7 @@ class MTKIndex:
 
         for gi, records in enumerate(groups):
             # Plane RPI_PLANE only; tpi ascending fills the rx slots.
-            plane = [r for r in records if _u(view, r[2].get(TAG_RPI)) == RPI_PLANE]
+            plane = [r for r in records if _u(view, r[2].get(TAG_RPI)) == self.plane]
             plane.sort(key=lambda r: _u(view, r[2].get(TAG_TPI)))
             if not plane:
                 plane = records[:1]  # keep the frame, mark it single-stream
@@ -615,7 +652,7 @@ class MTKIndex:
 
             offsets[gi] = base + plane[0][0]
             stamps[gi] = _u(view, head.get(TAG_TIMESTAMP))
-            rssi[gi] = _u(view, head.get(TAG_RSSI))
+            rssi[gi] = int(_sign_extend_8(np.array(_u(view, head.get(TAG_RSSI)))))
             csi_lengths[gi] = total
             bins[gi] = nbins
             num_rx[gi] = slots
@@ -755,6 +792,31 @@ class MTKIndex:
         if self._csd is _CSD_UNSET:
             self._csd = estimate_csd_slope(self.path, self)
         return self._csd  # type: ignore[return-value]
+
+    def dominant_peer(self) -> str | None:
+        """The MAC that sent most of this capture, or None if there are none.
+
+        The CSI engine latches frames it can hear, not only frames addressed to
+        us, so a capture can carry a second transmitter whose channel has
+        nothing to do with the link under test. On a clean wired-adjacent
+        capture that is a rounding error -- 20260904_192623.bin holds 3 foreign
+        records against 22627 from the AP -- but it is not guaranteed to stay
+        one, and a frame from another transmitter is not a worse sample of our
+        channel, it is a sample of a different channel.
+
+        Pair with ``filter_mask``::
+
+            mask = index.filter_mask(source_mac=index.dominant_peer())
+
+        Reported rather than applied: dropping frames here would renumber every
+        frame id, and callers already have a filter that does not.
+        """
+        if not self.source_macs:
+            return None
+        counts: dict[str, int] = {}
+        for m in self.source_macs:
+            counts[m] = counts.get(m, 0) + 1
+        return max(counts, key=lambda k: counts[k])
 
     def mimo_labels(self) -> list[str]:
         return [
@@ -925,11 +987,12 @@ def decode_frames(
     NaN-padded — both bandwidths are centred on DC, so centring is the honest
     placement.
 
-    ``scaled`` defaults to False, unlike the FeitCSI path. Tag 3 is a single
-    byte whose sign is unresolved; read unsigned it would offset ``amplitude``
-    by ~256 dB. Scaling touches only ``amplitude`` — both ratio metrics and
-    both phases are provably independent of it — so leaving it off costs an
-    absolute dB reference and nothing else.
+    ``scaled`` still defaults to False, but no longer because the reference is
+    unusable: tag 3 is a signed byte (see ``_sign_extend_8``), so scaling now
+    yields a real dBm reference rather than one offset by 256 dB. It stays off
+    by default only so that existing callers keep the amplitudes they already
+    have; scaling touches ``amplitude`` alone — both ratio metrics and both
+    phases are provably independent of it.
 
     ``deslope`` removes the transmitter's cyclic-shift ramp from the ratio,
     using the whole file's estimate via ``MTKIndex.csd_slope``. It is aimed at
