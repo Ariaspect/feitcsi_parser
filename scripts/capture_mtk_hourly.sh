@@ -141,6 +141,9 @@ LIVE_DIR=${LIVE_DIR:-$REMOTE_DIR/live}
 # segment ends, and only the archive is kept and uploaded -- 570 loose files
 # per segment is a burden on the filesystem and a very slow scp.
 WEBCAM=${WEBCAM:-1}
+# Set by the experiment wrapper: a run whose whole purpose is labelled
+# ground truth must not silently degrade into an unlabelled one.
+WEBCAM_REQUIRED=${WEBCAM_REQUIRED:-0}
 WEBCAM_DEV=${WEBCAM_DEV:-/dev/video2}
 WEBCAM_W=${WEBCAM_W:-640}
 WEBCAM_H=${WEBCAM_H:-480}
@@ -518,13 +521,25 @@ start=$SECONDS
 # Started before the stream rather than after, so the first frame covers the
 # beginning of the CSI instead of trailing it by a second. Both are given the
 # same DURATION and both are wall-clock paced, so they end together.
+# Existence is not availability: webcam_stream.sh opens the same camera, and a
+# v4l2 device already held by another process does not fail at open here -- it
+# fails on every single grab, leaving "0 frames, N failures" in the log and a
+# capture with no labels at all. For a labelled experiment that is worse than
+# not starting, so a busy camera is fatal rather than a warning.
 WEBCAM_PID=""
 if [ "$WEBCAM" = "1" ]; then
-    if [ -e "$WEBCAM_DEV" ]; then
+    if [ ! -e "$WEBCAM_DEV" ]; then
+        log "WARN  $WEBCAM_DEV absent, capturing CSI without frames"
+    elif fuser "$WEBCAM_DEV" >/dev/null 2>&1; then
+        holder=$(fuser -v "$WEBCAM_DEV" 2>&1 | tail -1 | awk '{print $NF}')
+        if [ "$WEBCAM_REQUIRED" = "1" ]; then
+            log "ABORT $WEBCAM_DEV is busy (held by ${holder:-unknown}) -- refusing to capture unlabelled"
+            exit 1
+        fi
+        log "WARN  $WEBCAM_DEV busy (${holder:-unknown}), capturing CSI without frames"
+    else
         "$(dirname "$0")/webcam_capture.sh" "$DURATION" "$FRAMES" >>"$LOG" 2>&1 &
         WEBCAM_PID=$!
-    else
-        log "WARN  $WEBCAM_DEV absent, capturing CSI without frames"
     fi
 fi
 

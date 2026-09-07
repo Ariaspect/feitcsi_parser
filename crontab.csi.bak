@@ -1,0 +1,4 @@
+# 30min mode: 1770s capture on 0,30 * * * *
+MAILTO=""
+RETAIN_DAYS=7
+0,30 * * * * /home/cyphy/feitcsi_parser/scripts/capture_mtk_hourly.sh --mode 30min

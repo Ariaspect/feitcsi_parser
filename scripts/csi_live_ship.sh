@@ -12,10 +12,20 @@
 # is the offset we continue from. Exits when GUARD_PID is gone and local and
 # remote agree.
 #
-# Radio note: this streams over the laptop's uplink (wlo1, 5620 MHz), which is
-# 320 MHz clear of the 5240 MHz channel the board measures. It does NOT go over
-# the board's own link -- that would feed ACKs back as stimulus, the feedback
-# loop REQUIRE_WIRED exists to prevent.
+# Radio note: this streams over the laptop's uplink (wlo1), NOT over the board's
+# own link -- that would feed ACKs back as stimulus, the feedback loop
+# REQUIRE_WIRED exists to prevent.
+#
+# The uplink being harmless is NOT guaranteed, and this comment used to claim it
+# was: it said wlo1 sat at 5620 MHz, "320 MHz clear" of the measured channel.
+# That held for the AP in use when this was written. On 2026-09-04 wlo1 was on
+# ch52 (5250-5290 MHz) while the board measured 5170-5250 MHz VHT80 -- directly
+# adjacent, zero guard. Whoever moves networks moves this property with them, so
+# check it rather than trust it:
+#     iw dev wlo1 info                 # laptop uplink centre + width
+#     ssh root@$BOARD iw dev wlan0 info  # measured channel
+# Data captured while adjacent still looked clean (18.7 groups/s, 0 gaps>1s,
+# 97% two-stream), so this is an unquantified risk, not a known fault.
 set -u
 
 LOCAL=${1:?usage: csi_live_ship.sh LOCAL_FILE REMOTE_PATH [GUARD_PID]}
