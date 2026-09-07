@@ -13,6 +13,7 @@ import {
 import {
   fetchLabels,
   fetchPresence,
+  type Labels,
   type Meta,
   type Presence as PresenceData,
   type PresenceChannel,
@@ -181,27 +182,60 @@ export function Presence({
   // one. Seeded once per capture, and only while the operator has not chosen:
   // any manual pick outranks the protocol, because the protocol is what was
   // intended and the operator may have seen that it did not happen.
-  // Depends on `path` alone. Putting `reference` in the deps would abort this
-  // fetch every time the operator picked a range, and re-running it on each
-  // seed is a needless request; the current pick is read through a ref instead.
+  // Fetched once per capture and kept, so the reference can be re-derived on
+  // demand rather than only at load. Depends on `path` alone: listing
+  // `reference` here would abort this request every time the operator picked a
+  // range, and the current pick is read through a ref instead.
+  const [labels, setLabels] = useState<Labels | null>(null);
   const referenceRef = useRef<[number, number] | null>(null);
   referenceRef.current = reference;
   useEffect(() => {
     const controller = new AbortController();
+    setLabels(null);
     fetchLabels(path, controller.signal)
-      .then((labels) => {
-        if (referenceRef.current) return;
-        const empty = (labels.phases ?? []).find((ph) => ph.label === "empty");
-        // The first empty phase only. A trailing one is not usable as a
-        // reference: on both labelled runs the channel did not return to its
-        // starting state after the occupant left -- 0.55 dB to 2.92 on one
-        // run, 0.40 to 1.60 on the other -- so the room at the end is not the
-        // room at the start, whatever the protocol called it.
-        if (empty && empty.t1 > empty.t0) setReference([empty.t0, empty.t1]);
-      })
-      .catch(() => undefined);
+      .then(setLabels)
+      .catch(() => setLabels(null));
     return () => controller.abort();
   }, [path]);
+
+  // The stretch this capture is known to have been empty for.
+  //
+  // Taken from the CAMERA where there is one, not from the protocol: the
+  // protocol says what was intended and the detections say what happened, and
+  // on the labelled runs so far the occupant arrived 2-12 s after the phase
+  // said they would. Ending the reference at the first detection rather than
+  // at the nominal boundary keeps those seconds out of it.
+  //
+  // The LEADING empty stretch only, never a trailing one. On both labelled
+  // runs the channel did not return to its starting state once the occupant
+  // left -- 0.55 dB to 2.92 on one, 0.40 to 1.60 on the other -- so the room
+  // at the end is not the room at the start whatever the protocol called it,
+  // and averaging the two would calibrate against a room that no longer
+  // exists. MARGIN backs off a little further, because the approach to the
+  // chair is motion that the camera sees late.
+  const emptyRef = useMemo<[number, number] | null>(() => {
+    const MARGIN = 2;
+    const present = labels?.present;
+    if (present && present.timeS.length) {
+      const first = present.present.indexOf(true);
+      const end =
+        first === -1
+          ? present.timeS[present.timeS.length - 1]
+          : present.timeS[first] - MARGIN;
+      if (end > present.timeS[0]) return [Math.max(0, present.timeS[0]), end];
+    }
+    const phase = (labels?.phases ?? []).find((ph) => ph.label === "empty");
+    if (phase && phase.t1 > phase.t0) return [phase.t0, phase.t1];
+    return null;
+  }, [labels]);
+
+  // Seed it once, so a labelled capture opens with the offset trace already
+  // populated instead of the "no reference" placeholder. A manual pick
+  // outranks this: the protocol is intent, and the operator may have watched
+  // it not happen.
+  useEffect(() => {
+    if (emptyRef && !referenceRef.current) setReference(emptyRef);
+  }, [emptyRef]);
   const [threshold, setThreshold] = useState(0.25);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
   const [data, setData] = useState<PresenceData | null>(null);
@@ -419,6 +453,17 @@ export function Presence({
           >
             Use this view
           </Button>
+          {emptyRef && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              title={`Set the reference to ${emptyRef[0].toFixed(1)}-${emptyRef[1].toFixed(1)} s, the stretch the camera saw nobody in`}
+              onClick={() => setReference(emptyRef)}
+            >
+              Use empty label
+            </Button>
+          )}
         </div>
 
         {data && (
