@@ -215,9 +215,24 @@ export function Presence({
   // chair is motion that the camera sees late.
   const emptyRef = useMemo<[number, number] | null>(() => {
     const MARGIN = 2;
+    // A detection must persist before it counts as an arrival. At roughly one
+    // frame a second a lone true is detector flicker, not a person, and taking
+    // it at face value would truncate the reference to the first few seconds
+    // of the capture -- the failure would look like a working reference, which
+    // is the kind worth spending three lines on. The mirror of this has been
+    // seen for real: 20260904_193228 carries a single dropped frame mid-sit,
+    // 0.81 confidence before it and 0.89 after.
+    const MIN_RUN = 3;
     const present = labels?.present;
     if (present && present.timeS.length) {
-      const first = present.present.indexOf(true);
+      const flags = present.present;
+      let first = -1;
+      for (let i = 0; i + MIN_RUN <= flags.length; i++) {
+        if (flags.slice(i, i + MIN_RUN).every(Boolean)) {
+          first = i;
+          break;
+        }
+      }
       const end =
         first === -1
           ? present.timeS[present.timeS.length - 1]
