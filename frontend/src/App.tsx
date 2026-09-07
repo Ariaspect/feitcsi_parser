@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
+import { PresenceBar } from "./PresenceBar";
 import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -530,6 +531,13 @@ export function App() {
               mimo={mimo}
               sourceMac={sourceMac}
               interpolate={interpolate}
+              dark={dark}
+            />
+            <PresenceBar
+              path={path}
+              captureTMin={meta.t_min}
+              captureTMax={meta.t_max}
+              timeLink={timeLink}
               dark={dark}
             />
             <FoldedPanel

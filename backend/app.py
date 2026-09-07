@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -464,6 +465,97 @@ def _nullable(values: np.ndarray) -> list[float | None]:
     what a window with no verdict should look like.
     """
     return [float(v) if np.isfinite(v) else None for v in np.asarray(values, dtype=float)]
+
+
+@app.get("/api/labels")
+def labels(
+    path: str = Query(..., description="Path to the capture"),
+) -> dict:
+    """Ground-truth labels recorded alongside a capture, if any.
+
+    Two sidecars, written by ``scripts/run_experiment.sh`` and the CV pass that
+    follows it, sit next to the capture and share its stamp:
+
+    ``<stamp>_cv.json``    per-frame person detections from the webcam
+    ``<stamp>_meta.json``  the run's intended protocol phases
+
+    Times come back relative to the capture's first sample, which is what every
+    other endpoint here plots against. The frame filenames are stamped in local
+    time while the sidecar carries a resolved UTC epoch per frame, so the
+    conversion goes through ``capture_start_utc_epoch`` and never parses a
+    local-time string -- a naive read of those names lands hours out.
+
+    Phases are the operator's INTENDED protocol, not observed truth: measured
+    transitions on the first labelled runs ran 2-18 s late in both directions.
+    Where the two disagree the detections are the better evidence, which is why
+    both are returned rather than reconciled here.
+
+    Absent sidecars are not an error -- most captures have none.
+    """
+    p = resolve_capture_path(path)
+    stem = p.with_suffix("")
+    cv_path = stem.parent / f"{stem.name}_cv.json"
+    meta_path = stem.parent / f"{stem.name}_meta.json"
+
+    out: dict = {
+        "present": None,
+        "phases": None,
+        "source": None,
+        "captureStartUtcEpoch": None,
+    }
+
+    t0: float | None = None
+    if meta_path.exists():
+        try:
+            m = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            m = None
+        if m:
+            t0 = m.get("capture_start_utc_epoch")
+            out["captureStartUtcEpoch"] = t0
+            out["position"] = m.get("position")
+            phases = m.get("phases") or []
+            out["phases"] = [
+                {
+                    "label": str(ph.get("label", "")),
+                    "t0": float(ph.get("start_s", 0.0)),
+                    "t1": float(ph.get("end_s", 0.0)),
+                }
+                for ph in phases
+            ]
+
+    if cv_path.exists():
+        try:
+            c = json.loads(cv_path.read_text())
+        except (OSError, ValueError):
+            c = None
+        if c:
+            frames = c.get("frames") or []
+            # Prefer the meta anchor; fall back to the first frame's own epoch
+            # so a capture with a cv sidecar but no meta still plots.
+            base = t0
+            if base is None and frames:
+                base = frames[0].get("epoch")
+            if base is not None:
+                times, present, conf = [], [], []
+                for f in frames:
+                    e = f.get("epoch")
+                    if e is None:
+                        continue
+                    times.append(float(e) - float(base))
+                    boxes = f.get("boxes") or []
+                    present.append(bool(boxes))
+                    conf.append(float(f.get("max_conf") or 0.0))
+                out["present"] = {
+                    "timeS": times,
+                    "present": present,
+                    "maxConf": conf,
+                    "roi": c.get("roi"),
+                    "model": c.get("model"),
+                }
+                out["source"] = cv_path.name
+
+    return out
 
 
 @app.get("/api/presence")

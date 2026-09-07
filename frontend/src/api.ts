@@ -491,3 +491,40 @@ export async function fetchPresence(
     warnings: body.warnings ?? [],
   };
 }
+
+/** Ground truth recorded beside a capture by the labelled-run wrapper. */
+export interface LabelPresence {
+  timeS: number[];
+  present: boolean[];
+  maxConf: number[];
+  roi: number[] | null;
+  model: string | null;
+}
+
+export interface LabelPhase {
+  label: string;
+  t0: number;
+  t1: number;
+}
+
+export interface Labels {
+  /** Per-frame webcam detections, or null when no `_cv.json` sits beside the
+   *  capture. Times are relative to the capture's first sample. */
+  present: LabelPresence | null;
+  /** The run's INTENDED protocol, not observed truth — measured transitions
+   *  have run 2-18 s late. Where the two disagree, `present` is the evidence. */
+  phases: LabelPhase[] | null;
+  position?: string | null;
+  source: string | null;
+  captureStartUtcEpoch: number | null;
+}
+
+export async function fetchLabels(
+  path: string,
+  signal?: AbortSignal,
+): Promise<Labels> {
+  const url = `/api/labels?path=${encodeURIComponent(path)}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`labels: ${res.status}`);
+  return res.json();
+}

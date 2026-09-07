@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  fetchLabels,
   fetchPresence,
   type Meta,
   type Presence as PresenceData,
@@ -174,6 +175,31 @@ export function Presence({
   // because a reference taken from recent history absorbs an occupant who
   // sits still and then reports the room as empty precisely while it is not.
   const [reference, setReference] = useState<[number, number] | null>(null);
+  // ...except when the capture states its own. A labelled run records the
+  // stretch it was empty for, and requiring the operator to re-declare that by
+  // hand leaves the offset trace blank on exactly the captures built to have
+  // one. Seeded once per capture, and only while the operator has not chosen:
+  // any manual pick outranks the protocol, because the protocol is what was
+  // intended and the operator may have seen that it did not happen.
+  const [refSeeded, setRefSeeded] = useState<string | null>(null);
+  useEffect(() => {
+    if (refSeeded === path) return;
+    const controller = new AbortController();
+    fetchLabels(path, controller.signal)
+      .then((labels) => {
+        setRefSeeded(path);
+        if (reference) return;
+        const empty = (labels.phases ?? []).find((ph) => ph.label === "empty");
+        // The first empty phase only. A trailing one is not usable as a
+        // reference: on both labelled runs the channel did not return to its
+        // starting state after the occupant left -- 0.55 dB to 2.92 on one
+        // run, 0.40 to 1.60 on the other -- so the room at the end is not the
+        // room at the start, whatever the protocol called it.
+        if (empty && empty.t1 > empty.t0) setReference([empty.t0, empty.t1]);
+      })
+      .catch(() => setRefSeeded(path));
+    return () => controller.abort();
+  }, [path, reference, refSeeded]);
   const [threshold, setThreshold] = useState(0.25);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
   const [data, setData] = useState<PresenceData | null>(null);
