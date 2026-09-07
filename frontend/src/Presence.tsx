@@ -225,11 +225,21 @@ export function Presence({
   //
   // MIN_RUN: a lone detection is flicker, not an arrival, and a lone miss is
   // flicker, not a departure -- 20260904_193228 carries exactly one dropped
-  // frame mid-sit, 0.81 confidence before it and 0.89 after. MARGIN keeps the
-  // seconds either side of a transition out, since the camera sees the walk to
-  // the chair late and the walk away early.
+  // frame mid-sit, 0.81 confidence before it and 0.89 after.
+  //
+  // MARGIN is a grace period either side of every transition, and it exists
+  // because the camera bounds the OCCUPANT, not the MOTION. A person walks to
+  // the chair before the detector first boxes them and away from it after the
+  // last box, and on the approach they are also nearer the transmitter than
+  // they will be once seated -- so the seconds adjacent to a transition carry
+  // the largest channel disturbance in the run while the camera still reads
+  // nobody. Folding those into a reference is precisely backwards: it
+  // calibrates "empty" against the loudest motion present. Five seconds is
+  // what the walk to and from the chair costs at this room's geometry; the
+  // detections themselves cannot recover it, since the evidence is missing
+  // from the frames rather than merely uncertain in them.
   const emptyRefs = useMemo<[number, number][]>(() => {
-    const MARGIN = 2;
+    const MARGIN = 5;
     const MIN_RUN = 3;
     const present = labels?.present;
     if (present && present.timeS.length) {
