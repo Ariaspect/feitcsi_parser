@@ -921,3 +921,18 @@ def test_the_scan_stops_at_a_bad_magic_mid_run(tmp_path, monkeypatch) -> None:
     assert fast.count == 1
     assert int(fast._stamps[0]) == 1000
     assert_same_index(fast, _slow_index(cap, monkeypatch))
+
+
+def test_rssi_is_read_as_a_signed_byte() -> None:
+    """Tag 3 is dBm, so the byte is two's complement, not unsigned.
+
+    Read unsigned the value lands near +210 instead of -46 -- a 256 dB offset
+    that silently poisons any RSSI-scaled amplitude. The capture used here was
+    taken while the board reported -48/-49 dBm on its own wifi link.
+    """
+    path = Path("captures/20260904_192623.bin")
+    if not path.exists():
+        pytest.skip("capture not available")
+    index = MTKIndex(path)
+    assert index.rssi_1.max() < 0
+    assert -90 < index.rssi_1.mean() < -20

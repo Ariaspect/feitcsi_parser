@@ -170,6 +170,18 @@ def _sign_extend_14(raw: np.ndarray) -> np.ndarray:
     return np.where(v & 0x2000, v - 0x4000, v)
 
 
+def _sign_extend_8(raw: np.ndarray) -> np.ndarray:
+    """One-byte two's complement -> signed. Tag 3 is dBm and always negative.
+
+    Settled by measurement, not by assumption: on ``20260904_192623.bin`` the
+    byte reads -45.8 dBm mean (range -86..-41) signed, against 210.2 (range
+    170..215) unsigned, and the board itself reported -48/-49 dBm over ssh
+    while that capture was running. An unsigned read is off by exactly 256 dB.
+    """
+    v = raw.astype(np.int64) & 0xFF
+    return np.where(v & 0x80, v - 0x100, v)
+
+
 def _walk_records(view: memoryview, size: int):
     """Yield ``(offset, end, tags)`` per record; tags map tag -> (off, len).
 
@@ -442,7 +454,7 @@ class MTKIndex:
             t_rel, t_len = layout[TAG_TIMESTAMP]
             stamps_r[m] = _gather_le(mm, sel, t_rel, t_len).astype(np.int64)
             r_rel, r_len = layout[TAG_RSSI]
-            rssi_r[m] = _gather_le(mm, sel, r_rel, r_len).astype(np.int64)
+            rssi_r[m] = _sign_extend_8(_gather_le(mm, sel, r_rel, r_len))
             b_rel, b_len = layout[TAG_BANDWIDTH]
             bw_code[m] = _gather_le(mm, sel, b_rel, b_len).astype(np.int64)
             p_rel, p_len = layout[TAG_TPI]
@@ -615,7 +627,7 @@ class MTKIndex:
 
             offsets[gi] = base + plane[0][0]
             stamps[gi] = _u(view, head.get(TAG_TIMESTAMP))
-            rssi[gi] = _u(view, head.get(TAG_RSSI))
+            rssi[gi] = int(_sign_extend_8(np.array(_u(view, head.get(TAG_RSSI)))))
             csi_lengths[gi] = total
             bins[gi] = nbins
             num_rx[gi] = slots
@@ -925,11 +937,12 @@ def decode_frames(
     NaN-padded — both bandwidths are centred on DC, so centring is the honest
     placement.
 
-    ``scaled`` defaults to False, unlike the FeitCSI path. Tag 3 is a single
-    byte whose sign is unresolved; read unsigned it would offset ``amplitude``
-    by ~256 dB. Scaling touches only ``amplitude`` — both ratio metrics and
-    both phases are provably independent of it — so leaving it off costs an
-    absolute dB reference and nothing else.
+    ``scaled`` still defaults to False, but no longer because the reference is
+    unusable: tag 3 is a signed byte (see ``_sign_extend_8``), so scaling now
+    yields a real dBm reference rather than one offset by 256 dB. It stays off
+    by default only so that existing callers keep the amplitudes they already
+    have; scaling touches ``amplitude`` alone — both ratio metrics and both
+    phases are provably independent of it.
 
     ``deslope`` removes the transmitter's cyclic-shift ramp from the ratio,
     using the whole file's estimate via ``MTKIndex.csd_slope``. It is aimed at
