@@ -569,3 +569,46 @@ def test_in_band_weighting_prefers_a_tone_over_a_drifting_subcarrier() -> None:
     assert weight[0] > weight[1], (
         f"tone weighted {weight[0]:.3f} vs drift {weight[1]:.3f}"
     )
+
+
+def test_several_empty_ranges_are_scored_against_the_nearest_one() -> None:
+    """A room empty in two different ways is empty in both.
+
+    Averaging the two states would give a profile matching neither, and the
+    spread around it would measure the distance between them rather than the
+    wander within them -- which a k-multiple threshold reads as noise and
+    inflates out of usefulness. Distance to the nearest state is what a verdict
+    needs, so a window matching either stretch must score near zero against the
+    pooled reference.
+    """
+    rng = np.random.default_rng(11)
+    n_sc, n = 48, 600
+    # Two genuinely different empty rooms, far apart compared to their own wander.
+    a = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    b = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0
+    ref = presence_reference(
+        [a.astype(complex), b.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0,
+    )
+    assert ref["n_ranges"] == 2
+    assert len(ref["profiles"]) == 2
+
+    near_a = baseline_deviation(
+        amplitude_profile(a.astype(complex)), ref["profiles"][0]
+    )
+    near_b = baseline_deviation(
+        amplitude_profile(b.astype(complex)), ref["profiles"][1]
+    )
+    # Each stretch sits on top of its own profile...
+    assert near_a < 0.1 and near_b < 0.1
+    # ...and dev_p95 stays a measure of within-room wander, not of the gap
+    # between the two rooms, which here is several dB.
+    assert ref["dev_p95"] < 0.5
+
+
+def test_one_empty_range_still_behaves_as_before() -> None:
+    rng = np.random.default_rng(12)
+    a = (rng.normal(0.0, 0.02, size=(600, 48)) + 1.0).astype(complex)
+    ref = presence_reference(a, 20.0, window_seconds=5.0, hop_seconds=1.0)
+    assert ref["n_ranges"] == 1
+    assert ref["profile"].shape == (48,)

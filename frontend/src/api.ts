@@ -344,6 +344,10 @@ export interface PresenceReference {
   devP95: number;
   motionFloor: number;
   nWindows: number;
+  /** How many known-empty stretches were pooled. More than one means the
+   *  verdict measures distance to the NEAREST empty state, not to their
+   *  average — which is what keeps a changed room from reading as occupied. */
+  nRanges?: number;
 }
 
 /** Series are aligned with `timeS` and hold `null` where a window has no
@@ -402,8 +406,12 @@ export interface PresenceOptions {
   motionFracHi?: number;
   /** A stretch of capture known to be empty. Both ends or neither. Without
    *  it the detector reports motion but never absence. */
-  refT0?: number | null;
-  refT1?: number | null;
+  /** Known-empty stretches. Several are meaningful, not redundant: a room
+   *  that changed while the capture ran is empty in more than one way, and a
+   *  reference holding only the first calls every later empty window
+   *  occupied. Sent as repeated query parameters, paired in order. */
+  refT0?: number | number[] | null;
+  refT1?: number | number[] | null;
   /** Capture holding the reference range; defaults to the analysed one. */
   refPath?: string | null;
   baselineDevK?: number;
@@ -411,6 +419,21 @@ export interface PresenceOptions {
   mimo?: string | null;
   sourceMac?: string | null;
   interpolate?: boolean;
+}
+
+/** Pair up the reference ranges as repeated `ref_t0`/`ref_t1` parameters.
+ *  A bare `${array}` would join with commas and the server would reject it. */
+function refParams(
+  t0: number | number[] | null | undefined,
+  t1: number | number[] | null | undefined,
+): string {
+  if (t0 == null || t1 == null) return "";
+  const starts = Array.isArray(t0) ? t0 : [t0];
+  const ends = Array.isArray(t1) ? t1 : [t1];
+  if (starts.length !== ends.length) return "";
+  return starts
+    .map((s, i) => `&ref_t0=${s}&ref_t1=${ends[i]}`)
+    .join("");
 }
 
 export async function fetchPresence(
@@ -446,7 +469,7 @@ export async function fetchPresence(
     `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&present_threshold=${presentThreshold}` +
     `&motion_frac_lo=${motionFracLo}&motion_frac_hi=${motionFracHi}` +
     `&baseline_dev_k=${baselineDevK}&motion_ratio_hi=${motionRatioHi}` +
-    (refT0 != null && refT1 != null ? `&ref_t0=${refT0}&ref_t1=${refT1}` : "") +
+    refParams(refT0, refT1) +
     (refPath ? `&ref_path=${encodeURIComponent(refPath)}` : "") +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
@@ -481,6 +504,7 @@ export async function fetchPresence(
           devP95: body.reference.dev_p95,
           motionFloor: body.reference.motion_floor,
           nWindows: body.reference.n_windows,
+          nRanges: body.reference.n_ranges,
         }
       : null,
     framesUsed: body.frames_used,

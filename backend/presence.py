@@ -71,6 +71,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from collections.abc import Sequence
+
 import numpy as np
 from scipy.signal import butter, filtfilt
 
@@ -326,13 +328,13 @@ def in_band_weight(
 
 
 def presence_reference(
-    ratio: np.ndarray,
+    ratio: np.ndarray | Sequence[np.ndarray],
     fs: float,
     *,
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     hop_seconds: float = DEFAULT_HOP_SECONDS,
 ) -> dict[str, Any]:
-    """Reduce a stretch of known-empty capture to what a verdict needs.
+    """Reduce one or more stretches of known-empty capture to what a verdict needs.
 
     Three numbers, each with one job. ``profile`` is what a window's channel
     state is compared against. ``dev_p95`` is how far the empty room's own
@@ -343,35 +345,85 @@ def presence_reference(
     emphatically not zero: 0.069 on
     captures/lg_csi_captures/20260825/20260825_185637.bin.
 
-    The caller names the range. Deriving it instead -- taking the quietest
+    The caller names the ranges. Deriving them instead -- taking the quietest
     stretch of the range under analysis -- was tried and does not work: a
     reference built from recent history absorbs an occupant who sits still for
     a few minutes, and then reports the room as empty precisely while it is
     not. Measured on the capture above with a 180 s lookback, the metric
     inverts outright (1.51 dB occupied against 2.23 dB empty). An empty room
     is a fact about the world, so it has to come from outside the data.
+
+    SEVERAL RANGES may be passed as a sequence, and for a room that changes
+    they are the honest input. A run that ends empty does not end in the room
+    it started in. Measured across the two labelled runs, offset from a
+    leading-only reference reads 2.44 dB and 1.50 dB during the *trailing*
+    empty stretch, against 2.69 dB and 3.60 dB while genuinely occupied -- so
+    a threshold drawn from the leading stretch alone calls the entire trailing
+    empty phase occupied, 100% of its windows, on both runs. Pooling the empty
+    stretches puts that change inside the reference's own spread, where it
+    belongs, and drops those false positives to zero.
+
+    It is not free. ``dev_p95`` widens to cover the difference between the
+    stretches, so the threshold rises and a faint occupant can slip under it:
+    on the run whose room moved most, pooling loses the occupant entirely
+    (100% of occupied windows found on a leading-only reference, 0% on a
+    pooled one). Which way to go is a property of the capture rather than a
+    default worth guessing, so the caller passes what it has and the result
+    reports ``n_ranges``.
+
+    Each range is windowed on its own and the results pooled. Concatenating
+    the samples first would fabricate windows, and frame-to-frame differences,
+    spanning the gap between two stretches recorded minutes apart.
     """
-    ratio = np.asarray(ratio)
-    if ratio.ndim != 2:
-        raise ValueError(f"ratio must be 2-D (n_samples, n_sc), got {ratio.shape}")
+    segments = [
+        np.asarray(r)
+        for r in (ratio if isinstance(ratio, (list, tuple)) else [ratio])
+    ]
+    if not segments:
+        raise ValueError("at least one reference range is required")
+    for seg in segments:
+        if seg.ndim != 2:
+            raise ValueError(f"ratio must be 2-D (n_samples, n_sc), got {seg.shape}")
+    if len({seg.shape[1] for seg in segments}) != 1:
+        raise ValueError("every reference range must have the same subcarrier count")
     if not np.isfinite(fs) or fs <= 0:
         raise ValueError(f"fs must be positive and finite, got {fs}")
 
-    profile = amplitude_profile(ratio)
-    if not np.isfinite(profile).any():
+    # One profile PER RANGE, not one profile over all of them. Averaging two
+    # genuinely different empty states yields a mean that matches neither, and
+    # the spread around it then measures the difference between the states
+    # rather than the noise within them -- which a k-multiple threshold reads
+    # as if it were noise, and inflates out of all usefulness. Measured on
+    # 20260904_193228: a pooled-mean reference puts the threshold at 5.69 dB
+    # against an occupied signal of 3.4, missing the occupant entirely.
+    #
+    # A window is empty if it matches ANY known-empty state, so what a verdict
+    # needs is the distance to the NEAREST one; see presence_windows.
+    profiles = [amplitude_profile(seg) for seg in segments]
+    if not any(np.isfinite(pr).any() for pr in profiles):
         raise ValueError("no subcarrier in the reference range carries a CSI ratio")
+    profile = profiles[0]
 
-    n_samples = ratio.shape[0]
-    win = min(max(MIN_WINDOW_SAMPLES, int(round(window_seconds * fs))), n_samples)
     hop = max(1, int(round(hop_seconds * fs)))
-    frac_full = fractional_motion(ratio)
-
-    devs, levels = [], []
-    for start in range(0, n_samples - win + 1, hop):
-        devs.append(baseline_deviation(amplitude_profile(ratio[start : start + win]), profile))
-        seg = frac_full[start : start + win - 1]
-        if seg.size and np.isfinite(seg).any():
-            levels.append(float(np.nanmedian(seg)))
+    devs: list[float] = []
+    levels: list[float] = []
+    win = 0
+    for seg, own in zip(segments, profiles):
+        n_samples = seg.shape[0]
+        win = min(max(MIN_WINDOW_SAMPLES, int(round(window_seconds * fs))), n_samples)
+        frac_full = fractional_motion(seg)
+        for start in range(0, n_samples - win + 1, hop):
+            # Each range's windows are scored against their OWN profile, so
+            # dev_p95 stays a measure of how much one empty room wanders and
+            # not of how far two empty rooms sit apart.
+            devs.append(
+                baseline_deviation(
+                    amplitude_profile(seg[start : start + win]), own
+                )
+            )
+            piece = frac_full[start : start + win - 1]
+            if piece.size and np.isfinite(piece).any():
+                levels.append(float(np.nanmedian(piece)))
 
     dev_a = np.asarray(devs, dtype=float)
     level_a = np.asarray(levels, dtype=float)
@@ -382,11 +434,13 @@ def presence_reference(
 
     return {
         "profile": profile,
+        "profiles": profiles,
         # A floor under both, so a pathologically quiet reference cannot make
         # every later window look like an occupant by dividing by nothing.
         "dev_p95": max(float(np.percentile(finite_dev, 95)), 1e-3),
         "motion_floor": max(float(np.median(finite_lvl)), 1e-6),
         "n_windows": int(finite_dev.size),
+        "n_ranges": len(segments),
         "window_seconds": float(win / fs),
     }
 
@@ -708,7 +762,11 @@ def presence_windows(
     motion_gate_l, motion_level_l, rate_l, unknown_l = [], [], [], []
     baseline_dev_l: list[float] = []
 
-    ref_profile = None if reference is None else np.asarray(reference["profile"])
+    ref_profiles = (
+        None
+        if reference is None
+        else [np.asarray(pr) for pr in reference.get("profiles", [reference["profile"]])]
+    )
 
     for start in starts:
         stop = start + win
@@ -761,8 +819,14 @@ def presence_windows(
 
         baseline_dev_l.append(
             float("nan")
-            if ref_profile is None
-            else baseline_deviation(amplitude_profile(ratio_full[start:stop]), ref_profile)
+            if ref_profiles is None
+            else min(
+                # Nearest known-empty state. A room that was empty two
+                # different ways is empty in both, and a window matching
+                # either one is not evidence of an occupant.
+                baseline_deviation(amplitude_profile(ratio_full[start:stop]), pr)
+                for pr in ref_profiles
+            )
         )
 
         centres.append((start + win / 2.0) / fs)
@@ -859,6 +923,7 @@ def presence_windows(
             "dev_p95": float(reference["dev_p95"]),
             "motion_floor": float(reference["motion_floor"]),
             "n_windows": int(reference["n_windows"]),
+            "n_ranges": int(reference.get("n_ranges", 1)),
         },
         "params": {
             "channel": channel,

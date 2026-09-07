@@ -175,7 +175,7 @@ export function Presence({
   // The empty-room reference. Named by the operator rather than derived,
   // because a reference taken from recent history absorbs an occupant who
   // sits still and then reports the room as empty precisely while it is not.
-  const [reference, setReference] = useState<[number, number] | null>(null);
+  const [reference, setReference] = useState<[number, number][] | null>(null);
   // ...except when the capture states its own. A labelled run records the
   // stretch it was empty for, and requiring the operator to re-declare that by
   // hand leaves the offset trace blank on exactly the captures built to have
@@ -187,7 +187,7 @@ export function Presence({
   // `reference` here would abort this request every time the operator picked a
   // range, and the current pick is read through a ref instead.
   const [labels, setLabels] = useState<Labels | null>(null);
-  const referenceRef = useRef<[number, number] | null>(null);
+  const referenceRef = useRef<[number, number][] | null>(null);
   referenceRef.current = reference;
   useEffect(() => {
     const controller = new AbortController();
@@ -213,35 +213,57 @@ export function Presence({
   // and averaging the two would calibrate against a room that no longer
   // exists. MARGIN backs off a little further, because the approach to the
   // chair is motion that the camera sees late.
-  const emptyRef = useMemo<[number, number] | null>(() => {
+  // EVERY stretch the camera saw nobody in, not just the first.
+  //
+  // A room does not return to its starting state once an occupant has been in
+  // it: measured on both labelled runs, a reference built from the leading
+  // stretch alone calls 100% of the trailing empty windows occupied. Pooling
+  // the stretches fixes that outright -- 0% false, with the occupant still
+  // found in 98% and 100% of windows -- because the verdict then measures
+  // distance to the NEAREST empty state rather than to one arbitrary state or
+  // to an average matching neither.
+  //
+  // MIN_RUN: a lone detection is flicker, not an arrival, and a lone miss is
+  // flicker, not a departure -- 20260904_193228 carries exactly one dropped
+  // frame mid-sit, 0.81 confidence before it and 0.89 after. MARGIN keeps the
+  // seconds either side of a transition out, since the camera sees the walk to
+  // the chair late and the walk away early.
+  const emptyRefs = useMemo<[number, number][]>(() => {
     const MARGIN = 2;
-    // A detection must persist before it counts as an arrival. At roughly one
-    // frame a second a lone true is detector flicker, not a person, and taking
-    // it at face value would truncate the reference to the first few seconds
-    // of the capture -- the failure would look like a working reference, which
-    // is the kind worth spending three lines on. The mirror of this has been
-    // seen for real: 20260904_193228 carries a single dropped frame mid-sit,
-    // 0.81 confidence before it and 0.89 after.
     const MIN_RUN = 3;
     const present = labels?.present;
     if (present && present.timeS.length) {
       const flags = present.present;
-      let first = -1;
-      for (let i = 0; i + MIN_RUN <= flags.length; i++) {
-        if (flags.slice(i, i + MIN_RUN).every(Boolean)) {
-          first = i;
-          break;
+      const held = flags.map((_, i) =>
+        i + MIN_RUN <= flags.length
+          ? flags.slice(i, i + MIN_RUN).every(Boolean)
+          : flags[i],
+      );
+      const out: [number, number][] = [];
+      let start: number | null = present.timeS[0];
+      for (let i = 0; i < held.length; i++) {
+        if (held[i] && start !== null) {
+          const end = present.timeS[i] - MARGIN;
+          if (end > start) out.push([Math.max(0, start), end]);
+          start = null;
+        } else if (!flags[i] && start === null) {
+          // Symmetric: only reopen once absence has held, so one dropped
+          // frame mid-sit does not split the occupied stretch in two.
+          const quiet = flags.slice(i, i + MIN_RUN);
+          if (quiet.length === MIN_RUN && quiet.every((v) => !v)) {
+            start = present.timeS[i] + MARGIN;
+          }
         }
       }
-      const end =
-        first === -1
-          ? present.timeS[present.timeS.length - 1]
-          : present.timeS[first] - MARGIN;
-      if (end > present.timeS[0]) return [Math.max(0, present.timeS[0]), end];
+      if (start !== null) {
+        const end = present.timeS[present.timeS.length - 1];
+        if (end > start) out.push([Math.max(0, start), end]);
+      }
+      if (out.length) return out;
     }
-    const phase = (labels?.phases ?? []).find((ph) => ph.label === "empty");
-    if (phase && phase.t1 > phase.t0) return [phase.t0, phase.t1];
-    return null;
+    return (labels?.phases ?? [])
+      .filter((ph) => ph.label === "empty" && ph.t1 > ph.t0)
+      .map((ph) => [ph.t0, ph.t1] as [number, number]);
   }, [labels]);
 
   // Seed it once, so a labelled capture opens with the offset trace already
@@ -249,8 +271,8 @@ export function Presence({
   // outranks this: the protocol is intent, and the operator may have watched
   // it not happen.
   useEffect(() => {
-    if (emptyRef && !referenceRef.current) setReference(emptyRef);
-  }, [emptyRef]);
+    if (emptyRefs.length && !referenceRef.current) setReference(emptyRefs);
+  }, [emptyRefs]);
   const [threshold, setThreshold] = useState(0.25);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
   const [data, setData] = useState<PresenceData | null>(null);
@@ -299,8 +321,8 @@ export function Presence({
         windowSeconds,
         presentThreshold: threshold,
         motionFracHi,
-        refT0: reference?.[0] ?? null,
-        refT1: reference?.[1] ?? null,
+        refT0: reference?.map(([a]) => a) ?? null,
+        refT1: reference?.map(([, b]) => b) ?? null,
         mimo,
         sourceMac,
         interpolate,
@@ -443,10 +465,13 @@ export function Presence({
           <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">
             Empty reference
           </Label>
-          {reference ? (
+          {reference?.length ? (
             <>
               <span className="text-[11px] tabular-nums">
-                {reference[0].toFixed(1)}–{reference[1].toFixed(1)} s
+                {reference
+                  .map(([a, b]) => `${a.toFixed(1)}–${b.toFixed(1)}`)
+                  .join(", ")}{" "}
+                s
               </span>
               <Button
                 variant="outline"
@@ -464,19 +489,21 @@ export function Presence({
             variant="outline"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            onClick={() => setReference([range[0], range[1]])}
+            onClick={() => setReference([[range[0], range[1]]])}
           >
             Use this view
           </Button>
-          {emptyRef && (
+          {emptyRefs.length > 0 && (
             <Button
               variant="outline"
               size="sm"
               className="h-7 px-2 text-[11px]"
-              title={`Set the reference to ${emptyRef[0].toFixed(1)}-${emptyRef[1].toFixed(1)} s, the stretch the camera saw nobody in`}
-              onClick={() => setReference(emptyRef)}
+              title={`Set the reference to every stretch the camera saw nobody in: ${emptyRefs
+                .map(([a, b]) => `${a.toFixed(1)}-${b.toFixed(1)}`)
+                .join(", ")} s`}
+              onClick={() => setReference(emptyRefs)}
             >
-              Use empty label
+              Use empty label{emptyRefs.length > 1 ? `s (${emptyRefs.length})` : ""}
             </Button>
           )}
         </div>

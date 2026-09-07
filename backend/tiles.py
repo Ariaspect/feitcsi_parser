@@ -1329,20 +1329,33 @@ def compute_presence(
     if ref_t0 is not None or ref_t1 is not None:
         if ref_t0 is None or ref_t1 is None:
             raise ValueError("ref_t0 and ref_t1 must be given together")
-        if not ref_t1 > ref_t0:
-            raise ValueError(f"ref_t1 must exceed ref_t0, got {ref_t0} and {ref_t1}")
         ref_file = path if ref_path is None else ref_path
-        ref_grid, _, ref_fs, _, _, _, _ = _presence_grid(
-            ref_file, ref_t0, ref_t1,
-            mimo=mimo, source_mac=source_mac, interpolate=interpolate,
-        )
-        if ref_grid.shape[1] != grid.shape[1]:
-            raise ValueError(
-                f"the reference range has {ref_grid.shape[1]} subcarriers and this "
-                f"range has {grid.shape[1]} -- profiles cannot be compared bin for bin"
+        # ref_t0/ref_t1 may each be a scalar or a matching sequence: a room
+        # that changes across a capture needs every stretch it was empty for,
+        # not just the first. Each is loaded and windowed separately -- see
+        # presence.presence_reference for why they are not concatenated.
+        starts = list(ref_t0) if isinstance(ref_t0, (list, tuple)) else [ref_t0]
+        ends = list(ref_t1) if isinstance(ref_t1, (list, tuple)) else [ref_t1]
+        if len(starts) != len(ends):
+            raise ValueError("ref_t0 and ref_t1 must name the same number of ranges")
+        ref_grids = []
+        ref_fs = None
+        for a0, a1 in zip(starts, ends):
+            if not a1 > a0:
+                raise ValueError(f"ref_t1 must exceed ref_t0, got {a0} and {a1}")
+            g, _, f, _, _, _, _ = _presence_grid(
+                ref_file, a0, a1,
+                mimo=mimo, source_mac=source_mac, interpolate=interpolate,
             )
+            if g.shape[1] != grid.shape[1]:
+                raise ValueError(
+                    f"the reference range has {g.shape[1]} subcarriers and this "
+                    f"range has {grid.shape[1]} -- profiles cannot be compared bin for bin"
+                )
+            ref_grids.append(g)
+            ref_fs = f if ref_fs is None else ref_fs
         ref_summary = presence.presence_reference(
-            ref_grid, ref_fs,
+            ref_grids, ref_fs,
             window_seconds=window_seconds, hop_seconds=hop_seconds,
         )
 
