@@ -971,6 +971,57 @@ def estimate_csd_slope(path: str | Path, index: MTKIndex) -> float | None:
     return slope
 
 
+def decode_complex(
+    path: str | Path,
+    index: MTKIndex,
+    frame_ids: np.ndarray,
+    *,
+    interpolate: bool = True,
+) -> np.ndarray:
+    """Decode selected frames to the complex tensor ``(n, tpi, subcarriers)``.
+
+    The same read path ``decode_frames`` uses -- one vectorised gather per
+    stream out of a memmap, rather than walking records -- but stopping at the
+    complex values instead of reducing them to amplitude and phase. Exists so a
+    caller wanting to run its own arithmetic does not have to reconstruct
+    ``z`` from dB and radians, or reach into the index's private offsets.
+
+    Only this index's ``rpi`` plane is returned; stack two indexes built with
+    ``plane=0`` and ``plane=1`` for the full grid. Frames narrower than the
+    file's widest are NaN-padded and centred, as elsewhere.
+    """
+    path = Path(path)
+    frame_ids = np.asarray(frame_ids, dtype=np.int64)
+    width = index.num_subcarriers
+    out = np.full((len(frame_ids), _MAX_SLOTS, width), np.nan, dtype=np.complex128)
+    if frame_ids.size == 0:
+        return out
+
+    bins = index._bins[frame_ids]
+    for nbins in np.unique(bins):
+        nbins = int(nbins)
+        if nbins == 0:
+            continue
+        sel = np.flatnonzero(bins == nbins)
+        ids = frame_ids[sel]
+        lo = (width - nbins) // 2
+        for slot in range(_MAX_SLOTS):
+            r_off = index._real_off[ids, slot]
+            i_off = index._imag_off[ids, slot]
+            present = (r_off >= 0) & (i_off >= 0)
+            if not present.any():
+                continue
+            rows = np.flatnonzero(present)
+            z = np.full((len(ids), nbins), np.nan, dtype=np.complex128)
+            real = _read_plane(path, r_off[rows], nbins)
+            imag = _read_plane(path, i_off[rows], nbins)
+            z[rows] = np.fft.fftshift(real + 1j * imag, axes=1)
+            if interpolate:
+                z[rows] = _fill_nulls(z[rows])
+            out[sel[:, None], slot, np.arange(lo, lo + nbins)[None, :]] = z
+    return out
+
+
 def decode_frames(
     path: str | Path,
     index: MTKIndex,

@@ -552,3 +552,42 @@ export async function fetchLabels(
   if (!res.ok) throw new Error(`labels: ${res.status}`);
   return res.json();
 }
+
+/** Output of the vendored MT7921 parser's processing over a capture. */
+export interface LgParse {
+  frames: number;
+  framesInFile: number;
+  nrx: number;
+  ntx: number;
+  nsub: number;
+  /** Subcarriers their occupancy rule judges to carry data. Fewer than ours
+   *  keeps: they take bins measured non-zero, we interpolate pilots and DC. */
+  activeBins: number[];
+  occupancy: number[];
+  rawSpectrum: (number | null)[];
+  /** Amplitude after their RSSI-based AGC restoration, so absolute dBm rather
+   *  than the chip's relative scale. */
+  agcSpectrum: (number | null)[];
+  /** Lag-1 phase coherence per candidate feature. `conj_rx` is their default;
+   *  `conj_tx` is the axis this project divides along. The gap between them is
+   *  the substantive disagreement between the two parsers. */
+  coherence: Record<string, number>;
+  rssiMean: number;
+  twoStreamFrames: number;
+  peer: string | null;
+  macCensus: [string, number][];
+  tMin: number;
+  tMax: number;
+  toolVersion: string;
+}
+
+export async function fetchLgParse(
+  path: string,
+  maxFrames = 4096,
+  signal?: AbortSignal,
+): Promise<LgParse> {
+  const url = `/api/lgparse?path=${encodeURIComponent(path)}&max_frames=${maxFrames}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`lgparse: ${res.status}`);
+  return res.json();
+}

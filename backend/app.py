@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+from . import lgproc
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -465,6 +466,31 @@ def _nullable(values: np.ndarray) -> list[float | None]:
     what a window with no verdict should look like.
     """
     return [float(v) if np.isfinite(v) else None for v in np.asarray(values, dtype=float)]
+
+
+@app.get("/api/lgparse")
+def lgparse(
+    path: str = Query(..., description="Path to the capture"),
+    max_frames: int = Query(4096, ge=64, le=20000, description="Frames sampled evenly across the capture"),
+) -> dict:
+    """Run the vendored MT7921 parser's processing over a capture.
+
+    Their arithmetic, this project's reader: see ``backend/lgproc``. The point
+    is a second opinion on the same bytes, so every number here comes from
+    calling their functions rather than reimplementing them, and the axis
+    convention is theirs -- ``H`` is (packet, rx, tx, subcarrier) with rx = our
+    rpi and tx = our tpi.
+
+    The comparison worth reading is ``coherence``: their ``feature_conj``
+    conjugates across rx, this project divides along tx, and the two disagree
+    about which is the usable phase signal. One capture settles it.
+    """
+    p = resolve_capture_path(path)
+    try:
+        return lgproc.summarise(p, max_frames=max_frames)
+    except ValueError as exc:
+        # A capture with no two-stream frame has nothing for them to work on.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/labels")
