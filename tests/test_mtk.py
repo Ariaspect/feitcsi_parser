@@ -936,3 +936,32 @@ def test_rssi_is_read_as_a_signed_byte() -> None:
     index = MTKIndex(path)
     assert index.rssi_1.max() < 0
     assert -90 < index.rssi_1.mean() < -20
+
+
+def test_the_rpi_plane_is_selectable_and_both_planes_carry_signal() -> None:
+    """Plane 1 is a second receive path, not a copy of plane 0.
+
+    Both index to the same frames and both ratio coherently; they differ in
+    what the channel did on that path. Averaging them is what fails -- see
+    RPI_PLANE -- so the parser selects rather than combines.
+    """
+    path = Path("captures/20260904_192623.bin")
+    if not path.exists():
+        pytest.skip("capture not available")
+    a = MTKIndex(path, plane=0)
+    b = MTKIndex(path, plane=1)
+    assert a.count == b.count
+    ids_a = np.flatnonzero(a.num_rx_arr >= 2)
+    ids_b = np.flatnonzero(b.num_rx_arr >= 2)
+    assert ids_a.size > 0 and ids_b.size > 0
+
+    amp_a, _, _, _ = decode_frames(path, a, ids_a[:64])
+    amp_b, _, _, _ = decode_frames(path, b, ids_b[:64])
+    # Same order of magnitude, but genuinely different measurements.
+    assert abs(np.nanmean(amp_a) - np.nanmean(amp_b)) < 6.0
+    assert not np.allclose(np.nan_to_num(amp_a), np.nan_to_num(amp_b))
+
+
+def test_an_unknown_rpi_plane_is_refused() -> None:
+    with pytest.raises(ValueError):
+        MTKIndex("captures/20260904_192623.bin", plane=2)

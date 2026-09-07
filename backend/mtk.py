@@ -125,9 +125,24 @@ _CHANNEL_WIDTH = {0: "20", 1: "40", 2: "80"}
 # on the far side to interpolate from.
 MAX_NULL_RUN = 3
 
-# Which rpi plane to read. Both ratio cleanly, but emitting two planes would
-# put two frames on the same timestamp, and the tile column mapping resolves
-# columns by time.
+# Default rpi plane. Both ratio cleanly, and emitting two planes at once would
+# put two frames on the same timestamp, which the tile column mapping cannot
+# represent because it resolves columns by time. That is a display constraint,
+# not a physical one, so the plane is a per-index choice: MTKIndex(path,
+# plane=1) reads the other one, and a caller wanting both indexes twice.
+#
+# They are SELECTED BETWEEN, never averaged. The two planes' tpi ratios share a
+# circular resultant of only 0.35, i.e. they carry different phase references,
+# so every combination measured on 20260904_192623.bin loses coherence against
+# plane 0 alone:
+#
+#     plane 0            0.9960     <- best
+#     plane 1            0.9917     <- nearly as good, independently
+#     complex mean       0.9882
+#     power-weighted     0.9842
+#     unit-phase mean    0.9743     <- worst
+#
+# Use them as two feature channels, not as one averaged channel.
 RPI_PLANE = 0
 
 _MAX_SLOTS = 2  # tpi in {0, 1}
@@ -382,8 +397,18 @@ class MTKIndex:
 
     chipset = "MediaTek"
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, plane: int = RPI_PLANE) -> None:
+        """``plane`` selects which ``rpi`` plane fills the rx slots.
+
+        The default reproduces every earlier index byte for byte. Plane 1 is a
+        genuinely different receive path, not a copy, so indexing a capture
+        twice yields two independent observations of the same frames -- see
+        ``RPI_PLANE`` for why they are selected between rather than combined.
+        """
+        if plane not in (0, 1):
+            raise ValueError(f"rpi plane must be 0 or 1, got {plane}")
         self.path = Path(path)
+        self.plane = int(plane)
         self._scan_end: int = 0
         self._scan_full()
 
@@ -496,7 +521,7 @@ class MTKIndex:
         counts = run_end - run_start
         idx_all = _expand_ranges(run_start, counts)
         owner = np.repeat(np.arange(n, dtype=np.int64), counts)
-        in_plane = rpi_r[idx_all] == RPI_PLANE
+        in_plane = rpi_r[idx_all] == self.plane
         # Order: plane first, then tpi ascending, stable within a group.
         order = np.lexsort((tpi_r[idx_all], ~in_plane, owner))
         idx_sorted = idx_all[order]
@@ -603,7 +628,7 @@ class MTKIndex:
 
         for gi, records in enumerate(groups):
             # Plane RPI_PLANE only; tpi ascending fills the rx slots.
-            plane = [r for r in records if _u(view, r[2].get(TAG_RPI)) == RPI_PLANE]
+            plane = [r for r in records if _u(view, r[2].get(TAG_RPI)) == self.plane]
             plane.sort(key=lambda r: _u(view, r[2].get(TAG_TPI)))
             if not plane:
                 plane = records[:1]  # keep the frame, mark it single-stream
