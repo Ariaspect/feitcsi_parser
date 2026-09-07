@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
+import { LgParser } from "./LgParser";
 import { PresenceBar } from "./PresenceBar";
 import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
@@ -513,6 +514,7 @@ export function App() {
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
+              <TabsTrigger value="lgparse">LG parser</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -769,6 +771,19 @@ export function App() {
                     longer than the frames in view. Shorten it, or widen the time range.
                   </div>
                 )}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="lgparse">
+              <div className="space-y-3">
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  A second MT7921 parser's reading of this capture. Its
+                  arithmetic, this project's reader: the vendored functions are
+                  called rather than reimplemented, over the same memmapped
+                  index the other tabs use, because a second opinion that has
+                  been retyped is no longer independent.
+                </p>
+                <LgParser path={path} dark={dark} />
               </div>
             </TabsContent>
 
