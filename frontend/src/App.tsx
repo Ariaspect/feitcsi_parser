@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
+import { LgDetector } from "./LgDetector";
 import { LgParser } from "./LgParser";
 import { PresenceBar } from "./PresenceBar";
 import { Presence } from "./Presence";
@@ -515,6 +516,7 @@ export function App() {
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
               <TabsTrigger value="lgparse">LG parser</TabsTrigger>
+              <TabsTrigger value="lgdetect">LG detector</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -863,6 +865,31 @@ export function App() {
                 >
                   <LgParser path={path} dark={dark} />
                 </FoldedPanel>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="lgdetect">
+              <div className="space-y-3">
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  The LG on-board presence detector, replayed over this
+                  capture. Its own <code>mtk_read_bf_csi</code> and{" "}
+                  <code>process_csi_data</code> decide — nothing here
+                  reimplements them. It runs under a NumPy 1.x interpreter
+                  matching the board, because its TLV length arithmetic shifts
+                  a <code>uint8</code> left by 8: NumPy 2 keeps that as
+                  <code>uint8</code>, evaluates it to 0, and the walk
+                  desynchronises at the first CSI field — silently, yielding
+                  frames with zeroed imaginary parts rather than an error.
+                  Replayed on the project venv it would be measuring the NumPy
+                  version rather than the detector.
+                </p>
+                <LgDetector
+                  path={path}
+                  captureTMin={meta.t_min}
+                  captureTMax={meta.t_max}
+                  timeLink={timeLink}
+                  dark={dark}
+                />
               </div>
             </TabsContent>
 

@@ -598,3 +598,46 @@ export async function fetchLgParse(
   if (!res.ok) throw new Error(`lgparse: ${res.status}`);
   return res.json();
 }
+
+/** What the LG on-board detector said when replayed over a capture. */
+export interface LgDetect {
+  events: { kind: "+" | "-"; t: number }[];
+  intervals: { t0: number; t1: number }[];
+  records: number;
+  parseFailures: number;
+  duration: number;
+  threshold: number;
+  absenceDuration: number;
+  /** The interpreter it ran under. NumPy 1.x is not incidental: under NumPy 2
+   *  its TLV walk desynchronises at the first CSI field, silently. */
+  numpy: string;
+  python: string;
+  cached: boolean;
+  truth: {
+    timeS: number[];
+    present: boolean[];
+    tp: number; fp: number; fn: number; tn: number;
+    accuracy: number;
+    precision: number;
+    recall: number;
+    /** What it would score by always saying "present" — the bar to clear. */
+    baseRate: number;
+  } | null;
+}
+
+export async function fetchLgDetect(
+  path: string,
+  threshold = 26,
+  absence = 10,
+  signal?: AbortSignal,
+): Promise<LgDetect> {
+  const url =
+    `/api/lgdetect?path=${encodeURIComponent(path)}` +
+    `&threshold=${threshold}&absence=${absence}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `lgdetect: ${res.status}`);
+  }
+  return res.json();
+}

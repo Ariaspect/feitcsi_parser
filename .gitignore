@@ -31,3 +31,9 @@ node_modules/
 
 # machine-local npm prefix
 .npmrc
+
+# interpreter matched to the board (numpy 1.x); see scripts/lg_detect_replay.py
+.venv-board/
+
+# cached detector replays; deterministic, re-derivable
+.cache/

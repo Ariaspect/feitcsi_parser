@@ -13,7 +13,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-from . import lgproc
+import subprocess
+
+from . import lgdetect, lgproc
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -466,6 +468,86 @@ def _nullable(values: np.ndarray) -> list[float | None]:
     what a window with no verdict should look like.
     """
     return [float(v) if np.isfinite(v) else None for v in np.asarray(values, dtype=float)]
+
+
+@app.get("/api/lgdetect")
+def lg_detect(   # not `lgdetect`: that name is the module this calls
+    path: str = Query(..., description="Path to the capture"),
+    threshold: float = Query(26.0, gt=0, le=200, description="Its change-detection threshold in dB; 26 is the value the script ships with"),
+    absence: float = Query(10.0, gt=0, le=600, description="Seconds without movement before it reports absence"),
+) -> dict:
+    """Replay the LG on-board detector over a capture and report what it said.
+
+    The detector runs under a NumPy 1.x interpreter, matching the board. Its
+    length arithmetic shifts a numpy uint8 left by 8, which NumPy 2 keeps as
+    uint8 and evaluates to 0 -- the TLV walk then desynchronises at the first
+    CSI field and produces frames with zeroed imaginary parts rather than an
+    error. Replayed on the project venv it would be measuring the NumPy
+    version rather than the detector, so it gets its own venv and a subprocess.
+
+    A first run costs about 20 s per 5-minute capture -- it loops over 256
+    subcarriers per record in pure Python -- and is cached thereafter.
+
+    Where the capture carries webcam labels, its verdict is scored against
+    them. The comparison is the point: the detector is a frame-to-frame
+    amplitude-difference trigger, so it answers "is something changing", and
+    the labels say whether anyone was actually there.
+    """
+    p = resolve_capture_path(path)
+    try:
+        result = lgdetect.run(p, threshold=threshold, absence=absence)
+    except lgdetect.BoardEnvMissing as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"replay timed out: {exc}") from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    spans = lgdetect.intervals(result["events"], result["duration"])
+    out = dict(result)
+    out["intervals"] = [{"t0": a, "t1": b} for a, b in spans]
+
+    # Score against the webcam labels when the capture has them.
+    out["truth"] = None
+    stem = p.with_suffix("")
+    cv_path = stem.parent / f"{stem.name}_cv.json"
+    meta_path = stem.parent / f"{stem.name}_meta.json"
+    if cv_path.exists():
+        try:
+            cv = json.loads(cv_path.read_text())
+            base = None
+            if meta_path.exists():
+                base = json.loads(meta_path.read_text()).get("capture_start_utc_epoch")
+            frames = cv.get("frames") or []
+            if base is None and frames:
+                base = frames[0].get("epoch")
+            if base is not None and frames:
+                times, truth = [], []
+                for f in frames:
+                    if f.get("epoch") is None:
+                        continue
+                    times.append(float(f["epoch"]) - float(base))
+                    truth.append(bool(f.get("boxes")))
+                said = [any(a <= t < b for a, b in spans) for t in times]
+                tp = sum(1 for s, t in zip(said, truth) if s and t)
+                fp = sum(1 for s, t in zip(said, truth) if s and not t)
+                fn = sum(1 for s, t in zip(said, truth) if not s and t)
+                tn = sum(1 for s, t in zip(said, truth) if not s and not t)
+                n = max(len(times), 1)
+                out["truth"] = {
+                    "timeS": times,
+                    "present": truth,
+                    "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+                    "accuracy": (tp + tn) / n,
+                    "precision": tp / max(tp + fp, 1),
+                    "recall": tp / max(tp + fn, 1),
+                    # What it would score by always saying "present": the bar
+                    # any detector has to clear to have said anything.
+                    "baseRate": sum(truth) / n,
+                }
+        except (OSError, ValueError):
+            out["truth"] = None
+    return out
 
 
 @app.get("/api/lgparse")
