@@ -43,6 +43,7 @@ from typing import NamedTuple
 import numpy as np
 
 from . import mtk, presence
+from . import lgproc
 from .batch import decode_frames as _decode_feitcsi
 from .cir import csi_to_cir_centred
 from .index import FrameIndex
@@ -159,7 +160,11 @@ DERIVED_METRICS: dict[str, Derived] = {
     ),
 }
 
-TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS)
+# The vendored parser's own planes. Not derived from ours: they come out of
+# its functions over the same reader, so they are decoded on their own path.
+LG_METRICS = lgproc.LG_METRICS
+
+TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS) + LG_METRICS
 
 
 def _needs_reference(metric: str) -> bool:
@@ -202,7 +207,7 @@ MAX_HOLD_METRICS = (
 # through the cut. Every other metric here — including the *_unwrapped and
 # *_detrended views, whose whole point is to no longer be an angle on a
 # circle — is a plain number and takes ordinary linear interpolation.
-CIRCULAR_METRICS = ("phase", "csi_ratio_phase", "csi_ratio_phase_corrected")
+CIRCULAR_METRICS = ("phase", "csi_ratio_phase", "csi_ratio_phase_corrected", "lg_conj_phase")
 
 # Maximum frames decoded per /api/tile request. When the requested time range
 # holds more frames than this, stride-sample approximately BUDGET frames evenly
@@ -716,6 +721,15 @@ def _decode_block_cached(
     block_start = block_idx * BLOCK_SIZE
     block_end = block_start + n_block
     block_ids = np.arange(block_start, block_end)
+
+    if metric in LG_METRICS:
+        planes = lgproc.decode_block(path, index, block_ids, interpolate=interpolate)
+        for m, arr in planes.items():
+            _block_cache.put((str(path), m, block_idx, n_block, interpolate), arr)
+        with _block_cache._lock:
+            _block_cache.frames_decoded += len(block_ids)
+        return planes[metric]
+
     amp, phase, ratio_amp, ratio_phase = decode_frames(
         path, index, block_ids, interpolate=interpolate
     )
@@ -1503,6 +1517,15 @@ def _decode_selection(
         return _decode_via_blocks(
             path, index, frame_ids, metric, reference, interpolate=interpolate
         )
+    if metric in LG_METRICS:
+        # The vendored parser's planes are not derived from ours, so a
+        # non-contiguous selection is decoded on its own path too. Its
+        # arithmetic is per frame, which is what makes that safe: nothing here
+        # compares a row with its neighbour.
+        return lgproc.decode_block(
+            path, index, frame_ids, interpolate=interpolate
+        )[metric]
+
     amp, phase, ratio_amp, ratio_phase = decode_frames(
         path, index, frame_ids, interpolate=interpolate
     )

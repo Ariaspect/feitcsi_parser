@@ -79,3 +79,38 @@ def test_the_endpoint_reports_the_capture() -> None:
     assert body["peer"] and body["peer"].count(":") == 5
     assert len(body["occupancy"]) == body["nsub"]
     assert body["rssiMean"] < 0        # dBm, so the signed read matters here too
+
+
+def test_their_planes_render_as_tiles() -> None:
+    """The point of the tab is a heatmap, so the planes must go through tiles.
+
+    A summary of coherence numbers answers "which parser is better"; a heatmap
+    answers "what does this parser see", which is the question a capture gets
+    opened to ask.
+    """
+    for metric in ("lg_amplitude", "lg_conj_phase", "lg_conj_amplitude"):
+        r = client.get(
+            "/api/tile",
+            params={"path": str(_capture()), "t0": 0, "t1": 300,
+                    "width": 200, "metric": metric},
+        )
+        assert r.status_code == 200, metric
+        assert len(r.content) > 0
+
+
+def test_bins_their_occupancy_rule_rejects_are_blank() -> None:
+    """Guard bands must be NaN, not plotted.
+
+    Drawn as measurements they would take over the colour scale, which is the
+    thing their occupancy rule exists to prevent.
+    """
+    import numpy as np
+
+    from backend.mtk import MTKIndex
+    path = _capture()
+    index = MTKIndex(path)
+    ids = np.flatnonzero(index.num_rx_arr >= 2)[:64]
+    planes = lgproc.decode_block(path, index, ids)
+    amp = planes["lg_amplitude"]
+    assert np.isnan(amp).any()                    # something is masked
+    assert np.isfinite(amp).sum(axis=1).max() <= 234

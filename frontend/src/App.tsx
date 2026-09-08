@@ -775,15 +775,94 @@ export function App() {
             </TabsContent>
 
             <TabsContent value="lgparse">
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  A second MT7921 parser's reading of this capture. Its
-                  arithmetic, this project's reader: the vendored functions are
-                  called rather than reimplemented, over the same memmapped
-                  index the other tabs use, because a second opinion that has
-                  been retyped is no longer independent.
+                  The vendored MT7921 parser&apos;s own view of this capture.
+                  Its arithmetic over this project&apos;s reader: the planes
+                  below are produced by its functions — RSSI-based AGC
+                  restoration, its occupancy rule for which bins are real, and
+                  its conjugate-across-receive-paths phase feature — and
+                  rendered through the same tile path as every other heatmap,
+                  so they pan and zoom with the Channel tab.
                 </p>
-                <LgParser path={path} dark={dark} />
+
+                <Heatmap
+                  path={path}
+                  metric="lg_amplitude"
+                  filename={meta.filename}
+                  numSubcarriers={meta.num_subcarriers}
+                  captureTMin={meta.t_min}
+                  captureTMax={meta.t_max}
+                  title="Amplitude, AGC-restored"
+                  colorLabel="Amplitude (dBm, absolute)"
+                  height={320}
+                  timeLink={timeLink}
+                  mimo={mimo}
+                  sourceMac={sourceMac}
+                  interpolate={interpolate}
+                  dark={dark}
+                />
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  The chip strips its own AGC, so its amplitude is relative.
+                  This restores an absolute dBm scale from RSSI. Bins their
+                  occupancy rule rejects are blank rather than plotted — a
+                  guard band drawn as a measurement would dominate the colour
+                  scale, which is what the rule exists to prevent.
+                </p>
+
+                <FoldedPanel
+                  title="Phase, conjugated across rx"
+                  hint="their feature_conj — the phase feature this project does not adopt"
+                >
+                  <Heatmap
+                    path={path}
+                    metric="lg_conj_phase"
+                    filename={meta.filename}
+                    numSubcarriers={meta.num_subcarriers}
+                    captureTMin={meta.t_min}
+                    captureTMax={meta.t_max}
+                    minValue={-Math.PI}
+                    maxValue={Math.PI}
+                    title="feature_conj phase"
+                    colorLabel="Phase (rad)"
+                    height={280}
+                    palette={TWILIGHT}
+                    timeLink={timeLink}
+                    mimo={mimo}
+                    sourceMac={sourceMac}
+                    interpolate={interpolate}
+                    dark={dark}
+                  />
+                </FoldedPanel>
+
+                <FoldedPanel
+                  title="Magnitude of the conjugate product"
+                  hint="|H_rx0 · conj(H_rx1)| — their amplitude feature"
+                >
+                  <Heatmap
+                    path={path}
+                    metric="lg_conj_amplitude"
+                    filename={meta.filename}
+                    numSubcarriers={meta.num_subcarriers}
+                    captureTMin={meta.t_min}
+                    captureTMax={meta.t_max}
+                    title="feature_conj magnitude"
+                    colorLabel="Magnitude (dB)"
+                    height={280}
+                    timeLink={timeLink}
+                    mimo={mimo}
+                    sourceMac={sourceMac}
+                    interpolate={interpolate}
+                    dark={dark}
+                  />
+                </FoldedPanel>
+
+                <FoldedPanel
+                  title="Parser comparison"
+                  hint="how their reading differs from ours, in numbers"
+                >
+                  <LgParser path={path} dark={dark} />
+                </FoldedPanel>
               </div>
             </TabsContent>
 

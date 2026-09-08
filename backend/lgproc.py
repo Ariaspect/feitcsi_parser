@@ -158,3 +158,92 @@ def summarise(path: str | Path, *, max_frames: int = MAX_FRAMES) -> dict[str, An
         "tMax": float(t["times"][-1]) if len(t["times"]) else 0.0,
         "toolVersion": cp.__version__,
     }
+
+
+# ---------------------------------------------------------------------- #
+#  Tile planes                                                            #
+# ---------------------------------------------------------------------- #
+#
+# The metrics below exist so the vendored parser's output can be looked at in
+# the same heatmap as everything else, panned and zoomed through the same tile
+# path. A summary of coherence numbers answers "which parser is better"; a
+# heatmap answers "what does this parser see", which is the question a capture
+# is opened to ask.
+
+LG_METRICS = ("lg_amplitude", "lg_conj_phase", "lg_conj_amplitude")
+
+# Both are properties of the file rather than of a block, and rebuilding either
+# per block would dominate the decode. The plane-1 index costs a full scan; the
+# active-bin set costs a decode of its own.
+_plane1: dict[str, MTKIndex] = {}
+_active: dict[str, np.ndarray] = {}
+
+
+def _plane1_index(path: Path) -> MTKIndex:
+    key = str(path)
+    if key not in _plane1:
+        _plane1[key] = MTKIndex(path, plane=1)
+    return _plane1[key]
+
+
+def _active_mask(path: Path, nsub: int) -> np.ndarray:
+    """Their occupancy rule, measured once over a sample of the capture.
+
+    Computed on RAW samples for the reason build_tensor documents: their rule
+    counts non-zero bins, so interpolated pilots would read as carrying data.
+    """
+    key = str(path)
+    if key not in _active:
+        t = build_tensor(path, max_frames=512, interpolate=False)
+        mask = np.zeros(nsub, dtype=bool)
+        mask[cp.active_bins(t["H"], t["tx_valid"])] = True
+        _active[key] = mask
+    return _active[key]
+
+
+def decode_block(
+    path: Path,
+    index: MTKIndex,
+    frame_ids: np.ndarray,
+    *,
+    interpolate: bool = True,
+) -> dict[str, np.ndarray]:
+    """Their planes for a block of frames, shaped as the tile path expects.
+
+    ``(frames, subcarriers)`` float32 with NaN where they have nothing to say —
+    the same contract ``mtk.decode_frames`` returns, so these drop into the
+    tile cache beside the ordinary metrics.
+
+    Bins their occupancy rule rejects are NaN rather than plotted: showing a
+    guard band as though it were a measurement is what the rule exists to
+    prevent, and it would dominate the colour scale.
+    """
+    p0 = decode_complex(path, index, frame_ids, interpolate=interpolate)
+    p1 = decode_complex(path, _plane1_index(path), frame_ids, interpolate=interpolate)
+    H = np.stack([p0, p1], axis=1).astype(np.complex64)     # (n, rx, tx, sub)
+    nsub = H.shape[3]
+
+    tx_valid = np.isfinite(H).any(axis=(1, 3))
+    H = np.nan_to_num(H, nan=0.0)
+    rssi = np.repeat(index.rssi_1[frame_ids][:, None], H.shape[1], axis=1).astype(np.int16)
+    active = _active_mask(path, nsub)
+
+    agc = cp.apply_agc(H, rssi, tx_valid, np.flatnonzero(active))
+    conj = cp.feature_conj(H)          # theirs: conjugated ACROSS rx
+
+    def masked(a: np.ndarray) -> np.ndarray:
+        out = np.asarray(a, dtype=np.float32).copy()
+        out[:, ~active] = np.nan
+        return out
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        amp = 20 * np.log10(np.abs(agc[:, 0, 0, :]))
+        camp = 20 * np.log10(np.abs(conj[:, 0, 0, :]))
+    amp[~np.isfinite(amp)] = np.nan
+    camp[~np.isfinite(camp)] = np.nan
+
+    return {
+        "lg_amplitude": masked(amp),
+        "lg_conj_amplitude": masked(camp),
+        "lg_conj_phase": masked(np.angle(conj[:, 0, 0, :])),
+    }

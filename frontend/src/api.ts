@@ -154,6 +154,13 @@ export type Metric =
   // Unwrapped along time on the corrected ratio: accumulated phase, so it
   // leaves [-pi, pi] and takes a fitted scale like the amplitude metrics.
   | "csi_ratio_phase_time_unwrapped"
+  // The vendored parser's own planes, produced by its functions rather than
+  // derived from ours: RSSI-restored absolute amplitude, and the phase and
+  // magnitude of its conjugate-across-rx feature. Bins its occupancy rule
+  // rejects arrive as NaN, so they render blank rather than as measurements.
+  | "lg_amplitude"
+  | "lg_conj_phase"
+  | "lg_conj_amplitude"
   // Delay-domain view of the raw channel (rx0/tx0), not the ratio:
   // abs(IFFT(amplitude, phase)) per frame. Row 0 is not a subcarrier here,
   // it is a delay tap, fftshifted onto the same centred axis the other
