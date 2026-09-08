@@ -20,7 +20,6 @@ Where the two disagree, both readings are worth having:
   bins by measured occupancy and keeps 234.
 * This one filters to the dominant transmitter and restores absolute amplitude
   from RSSI, both of which ours gained after reviewing it.
-"""
 
 The detector additionally requires NUMPY 1.x, which is why ``.venv-board``
 exists. Its TLV length arithmetic shifts a ``uint8`` left by 8: NumPy 1.x
@@ -31,3 +30,4 @@ The board runs 1.26.4. Create the venv with::
 
     uv venv --python 3.12 .venv-board
     VIRTUAL_ENV=.venv-board uv pip install numpy==1.26.4
+"""
