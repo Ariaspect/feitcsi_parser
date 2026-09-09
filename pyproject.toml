@@ -26,7 +26,21 @@ module-name = "backend"
 module-root = ""
 
 [dependency-groups]
+cv = [
+    "opencv-python-headless>=5.0.0.93",
+    "tzdata>=2026.3",
+    "ultralytics>=8.4.138",
+]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
+
+[tool.uv]
+# ultralytics pulls opencv-python, whose cv2 links libGL. This host is a
+# headless container and apt is sudo-gated, so libGL.so.1 is not installable.
+# The headless wheel is the same cv2 minus the GUI backends -- which nothing
+# here wants, since every frame is read from a tar and written to JSON. The
+# never-satisfiable marker drops the GUI build; the real one is declared in
+# the cv group.
+override-dependencies = ["opencv-python ; python_version < '0'"]
