@@ -727,6 +727,25 @@ if [ "$UPLOAD" = "1" ]; then
     else
         log "WARN  cannot mkdir $dest on $REMOTE, skipping upload"
     fi
+
+    # Label the frames while the capture is still fresh. A capture whose labels
+    # were never generated is one nobody can score later without going back to
+    # find the frames, and by then the reason for caring has usually passed.
+    #
+    # Runs after the upload because it works on the archive that upload just
+    # placed, and on the collection host because that is where the GPU is --
+    # 55 fps there against a CPU crawl here, and labelling must never compete
+    # with a capture for this laptop's radio or its camera.
+    #
+    # Never fatal. The frames are archived either way, and scripts/label_frames.sh
+    # re-runs against them at any time.
+    if [ "${CV:-1}" = "1" ] && [ -f "$ARCHIVE" ]; then
+        if out=$("$(dirname "$0")/label_frames.sh" "$STAMP" 2>&1); then
+            printf '%s\n' "$out" | while IFS= read -r line; do log "LABEL$line"; done
+        else
+            log "WARN  labelling skipped: $(printf '%s' "$out" | tail -1)"
+        fi
+    fi
 fi
 
 exit 0

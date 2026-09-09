@@ -41,8 +41,6 @@ BOARD=${BOARD:-192.168.50.80}
 REMOTE=${REMOTE:-lg}
 REMOTE_DIR=${REMOTE_DIR:-/home/lg_csi/lg_csi_captures}
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR)
-CV_PY=${CV_PY:-/home/lg_csi/feitcsi_parser/.venv/bin/python}
-CV_SCRIPT=${CV_SCRIPT:-/home/lg_csi/feitcsi_parser/scripts/cv_presence.py}
 
 WEBCAM_DEV=${WEBCAM_DEV:-/dev/video2}
 if fuser "$WEBCAM_DEV" >/dev/null 2>&1; then
@@ -181,32 +179,10 @@ fi
 # Boxes are stored WITH confidences and WITHOUT an ROI filter for the same
 # reason: a bystander at the desk makes any frame-wide "occupied" boolean wrong,
 # and the fix is to score a region later, not to discard the evidence now.
-if [ "${CV:-1}" = "1" ]; then
-    REMOTE_TAR=$REMOTE_DIR/$DAY/${STAMP}_frames.tar
-    CV_JSON=$CAPTURE_DIR/${STAMP}_cv.json
-    echo "labelling frames on $REMOTE..."
-    if ssh "${SSH_OPTS[@]}" "$REMOTE" \
-        "$CV_PY $CV_SCRIPT '$REMOTE_TAR' --save-annotated 6" >/dev/null 2>&1
-    then
-        if scp -o BatchMode=yes -o LogLevel=ERROR -q \
-            "$REMOTE:$REMOTE_DIR/$DAY/${STAMP}_cv.json" "$CV_JSON" 2>/dev/null
-        then
-            python3 - "$CV_JSON" <<'CVPY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-fr = d.get("frames", d if isinstance(d, list) else [])
-n = len(fr)
-withp = sum(1 for f in fr if f.get("boxes"))
-print("  cv: %d/%d frames with a person (%.1f%%)" % (withp, n, 100.0 * withp / n) if n else "  cv: no frames")
-CVPY
-            echo "  cv sidecar: $(basename "$CV_JSON")"
-        else
-            echo "  warning: cv ran but sidecar did not come back" >&2
-        fi
-    else
-        echo "  warning: cv labelling failed, frames are archived and can be re-run" >&2
-    fi
-fi
+# Labelling is done by capture_mtk_hourly.sh for every capture, labelled run
+# or not, so there is nothing to do here. It used to be duplicated: two copies
+# of the same ssh-and-scp drifted the moment one of them learned that the
+# archive may be .tar or .tar.zst.
 
 echo
 echo "  $STAMP  position=$POSITION  frames=$FRAMES"
