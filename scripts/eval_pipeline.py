@@ -124,6 +124,18 @@ def score_ours(cap, refs, grid_s, k, ref_seconds):
     if len(grids) < 2:
         return None, "reference subcarrier width does not match"
 
+    # Screen before trusting: a pool spanning two different room states makes
+    # dev_scale the gap between them rather than the wander within either. Two
+    # camera-empty captures six hours apart on 20260914 sat 10.6 dB apart and
+    # produced a 63 dB threshold that nothing could reach.
+    profs = [presence.amplitude_profile(x) for x in grids]
+    keep, spread = presence.screen_reference_pool(profs)
+    if len(keep) < 2:
+        return None, (f"reference pool disagrees by {spread:.2f} dB; no subset of "
+                      f"2 or more agrees within "
+                      f"{presence.DEFAULT_MAX_POOL_SPREAD_DB:g} dB")
+    grids = [grids[i] for i in keep]
+
     # loo: the pool stands in for "captures that are not this one", which is
     # exactly what this capture is to them.
     ref = presence.presence_reference(grids, fs_ref, scale_mode="loo")

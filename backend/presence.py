@@ -349,6 +349,65 @@ def in_band_weight(
     return _weight_from_power(power, freqs, band)
 
 
+# How far two profiles in a reference pool may sit apart before they are taken
+# to describe different rooms rather than one room twice. Measured on the
+# labelled corpus: consecutive empty captures of an undisturbed room sit 0.21 dB
+# apart (median over 162 pairs under 90 min), a moved NIC shows as 3-5 dB, and
+# the pair that provoked this check -- 20260914_131846 against 20260914_193002,
+# six hours apart -- sits 10.6 dB apart. 2.0 dB admits the first and rejects the
+# other two, which is the split that matters: a pool spanning two different
+# rooms makes dev_scale measure the gap between them rather than the wander
+# within either, and the threshold that follows is unreachable.
+DEFAULT_MAX_POOL_SPREAD_DB = 2.0
+
+
+def screen_reference_pool(
+    profiles: Sequence[np.ndarray],
+    max_spread_db: float = DEFAULT_MAX_POOL_SPREAD_DB,
+) -> tuple[list[int], float]:
+    """Which pooled references describe the same room, and how far they spread.
+
+    Returns the indices to keep and the median pairwise distance across the
+    WHOLE pool -- not the kept set, whose spread is small by construction and
+    would hide exactly the disagreement worth reporting. The kept set is the
+    largest group agreeing with one profile
+    within *max_spread_db*, chosen by trying each profile as the anchor -- a
+    plain "drop anything far from the median" rule fails when the pool splits
+    evenly, because then the median sits between the two groups and everything
+    looks equally far from it.
+
+    A caller that ends up with fewer than two profiles has no usable pool and
+    should say so rather than calibrate on one, which measures within-capture
+    wander instead of the between-capture distance a verdict compares against.
+    """
+    n = len(profiles)
+    if n == 0:
+        return [], float("nan")
+    if n == 1:
+        return [0], 0.0
+
+    dist = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = baseline_deviation(profiles[i], profiles[j])
+            dist[i, j] = dist[j, i] = d
+    np.fill_diagonal(dist, 0.0)
+
+    best: list[int] = []
+    for anchor in range(n):
+        group = [j for j in range(n)
+                 if np.isfinite(dist[anchor, j]) and dist[anchor, j] <= max_spread_db]
+        if len(group) > len(best):
+            best = group
+    if not best:
+        best = [0]
+
+    pairs = [dist[i, j] for i in range(n) for j in range(i + 1, n)
+             if np.isfinite(dist[i, j])]
+    spread = float(np.median(pairs)) if pairs else 0.0
+    return sorted(best), spread
+
+
 def presence_reference(
     ratio: np.ndarray | Sequence[np.ndarray],
     fs: float,
@@ -493,6 +552,10 @@ def presence_reference(
             float(np.median(finite_dev)) * DEFAULT_DEV_SCALE_MULT, 1e-3
         ),
         "dev_p95": max(float(np.percentile(finite_dev, 95)), 1e-3),
+        # Median pairwise distance between the pooled profiles. Small means
+        # they describe one room; large means dev_scale above is measuring the
+        # gap between two different rooms and the threshold is not reachable.
+        "profile_spread": screen_reference_pool(profiles)[1],
         # The raw per-window deviations, kept so a caller can ask what a
         # different statistic would have said without decoding the range
         # again. Nothing in the verdict path reads this.

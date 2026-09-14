@@ -679,6 +679,10 @@ export interface Phase1 {
     present: boolean[];
     threshold: number;
     devScale: number;
+    /** Median pairwise distance between the pooled references. Small means they
+     *  describe one room; large means the pool spans two and its scale would
+     *  measure the gap between them. */
+    poolSpread: number;
     references: string[];
     confusion: Confusion;
   } | null;

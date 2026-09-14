@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from backend import presence as presence_mod
+
 from backend.presence import (
     STATE_EMPTY,
     STATE_MOVING,
@@ -657,3 +659,37 @@ def test_one_empty_range_still_behaves_as_before() -> None:
     ref = presence_reference(a, 20.0, window_seconds=5.0, hop_seconds=1.0)
     assert ref["n_ranges"] == 1
     assert ref["profile"].shape == (48,)
+
+
+def test_reference_pool_screening_rejects_two_different_rooms() -> None:
+    """A pool has to be one room seen twice, not two rooms averaged.
+
+    dev_scale under scale_mode="loo" is the distance between pooled captures,
+    which is the right unit only while they describe the same room. Let a pool
+    span two states and that distance becomes the threshold, and the threshold
+    becomes unreachable: on 20260914 two camera-empty captures six hours apart
+    sat 10.6 dB apart, gave dev_scale 21.1 against 0.05 for either alone, and a
+    63 dB threshold the detector never once crossed over a capture with 122 s of
+    occupancy. Screening has to catch that before a verdict is offered.
+    """
+    rng = np.random.default_rng(5)
+    n_sc, n = 48, 400
+    room_a1 = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    room_a2 = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    room_b = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0
+
+    prof = [amplitude_profile(x.astype(complex)) for x in (room_a1, room_a2, room_b)]
+    keep, spread = presence_mod.screen_reference_pool(prof)
+
+    # The two views of one room survive; the third is a different room.
+    assert keep == [0, 1]
+    # The spread reported is the WHOLE pool's, so the disagreement is visible
+    # rather than hidden by reporting only the surviving group.
+    assert spread > 2.0
+
+    # A pool that is two different rooms and nothing else leaves no usable
+    # subset, which is what makes a caller report "uncalibrated" instead of
+    # emitting a threshold nothing can reach.
+    keep2, spread2 = presence_mod.screen_reference_pool([prof[0], prof[2]])
+    assert len(keep2) < 2
+    assert spread2 > 2.0

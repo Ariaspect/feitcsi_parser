@@ -612,7 +612,7 @@ def phase1(
         )
     else:
         try:
-            state, thr, scale = _score_ours(p, refs, grid, k, centres)
+            state, thr, scale, spread_out = _score_ours(p, refs, grid, k, centres)
         except ValueError as exc:
             out["ours"] = None
             out["calibrated"] = False
@@ -623,6 +623,7 @@ def phase1(
                 "present": [bool(v) for v in state],
                 "threshold": thr,
                 "devScale": scale,
+                "poolSpread": spread_out,
                 "references": [r.name for r in refs],
                 "confusion": _confusion(centres, state, truth, grid),
             }
@@ -706,7 +707,7 @@ def _empty_reference_pool(capture: Path, max_age_h: float, pool: int) -> list[Pa
 
 
 def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
-                centres: np.ndarray) -> tuple[np.ndarray, float, float]:
+                centres: np.ndarray) -> tuple[np.ndarray, float, float, float]:
     from . import presence as presence_mod
 
     grids, fs_ref = [], None
@@ -723,6 +724,22 @@ def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
             "the reference captures do not share this capture's subcarrier width"
         )
 
+    # Screen the pool before trusting it. A pool spanning two different room
+    # states makes dev_scale measure the gap between them, not the wander
+    # within either: 20260914_131846 and 20260914_193002 are both camera-empty
+    # and sit 10.6 dB apart, which produced a 63 dB threshold and a detector
+    # that never fired once across a capture with 122 s of occupancy. Silently
+    # returning that is worse than returning nothing.
+    all_profiles = [presence_mod.amplitude_profile(g_) for g_ in grids]
+    keep, spread = presence_mod.screen_reference_pool(all_profiles)
+    if len(keep) < 2:
+        raise ValueError(
+            f"the {len(grids)} empty captures nearest this one disagree by "
+            f"{spread:.2f} dB, so they describe different room states rather "
+            f"than one room twice; no subset of 2 or more agrees within "
+            f"{presence_mod.DEFAULT_MAX_POOL_SPREAD_DB:g} dB"
+        )
+    grids = [grids[i] for i in keep]
     ref = presence_mod.presence_reference(grids, fs_ref, scale_mode="loo")
     thr = k * ref["dev_scale"]
     profiles = ref["profiles"]
@@ -741,7 +758,7 @@ def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
         raise ValueError("no window in this capture carries a CSI ratio")
     state = np.interp(centres, np.asarray(times), np.asarray(devs),
                       left=np.nan, right=np.nan) > thr
-    return state, float(thr), float(ref["dev_scale"])
+    return state, float(thr), float(ref["dev_scale"]), float(spread)
 
 
 def _lg_state_on_grid(events: list[dict], centres: np.ndarray) -> np.ndarray:

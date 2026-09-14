@@ -267,7 +267,7 @@ export function Phase1({ path, dark }: { path: string; dark: boolean }) {
             one grid. Windows the camera cannot call unambiguously are dropped
             rather than guessed. LG fired {data.lg.events} events.
             {data.ours &&
-              ` Ours calibrated against ${data.ours.references.length} empty captures, threshold ${data.ours.threshold.toFixed(3)} dB.`}
+              ` Ours calibrated against ${data.ours.references.length} empty captures agreeing within ${data.ours.poolSpread.toFixed(2)} dB, threshold ${data.ours.threshold.toFixed(3)} dB.`}
           </p>
         </>
       )}
