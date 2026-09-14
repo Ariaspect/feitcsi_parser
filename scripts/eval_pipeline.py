@@ -28,6 +28,16 @@ The calibration rule is the point of the whole thing, so it is explicit:
     20260904 capture's windows above the threshold that follows -- its quietest
     second included, at 9x. Widening the window buys silently wrong verdicts.
 
+  * There is no numeric test for "does this pool apply to this capture", and
+    one was looked for. The capture's distance from its pool, in thresholds,
+    spans 0.09-5.65 over 22 calibrations from the August protocol that scored
+    94% recall at 91% specificity, while two known-broken calibrations read
+    4.94 and 5.20 -- inside that range. It cannot separate them because the
+    numerator also carries how occupied the capture is: every healthy case
+    above 5 is occupied 96-100% of the time and is therefore far from any empty
+    reference for honest reasons. The time window is the guard; there is no
+    second one.
+
   * When a capture cannot be calibrated under those rules it is reported as
     UNSCOREABLE, never scored against a fallback. The September controlled
     sessions are all unscoreable and should read that way rather than

@@ -249,23 +249,25 @@ export function Phase1({ path, dark }: { path: string; dark: boolean }) {
             </div>
           )}
 
-          {data.ours &&
-            data.ours.applicability !== null &&
-            data.ours.applicability > 5 && (
-              <div className="text-[11px] leading-relaxed rounded border-l-2 border-amber-500 bg-amber-500/10 px-3 py-2">
-                <span className="font-medium">
-                  These references may not describe this room.
-                </span>{" "}
-                Its quietest second still sits{" "}
-                {data.ours.applicability.toFixed(1)}× the threshold away from
-                them ({data.ours.minDeviation.toFixed(2)} dB). A reference the
-                capture belongs to gets approached by something in it — around
-                2–4× when an occupant accounts for the gap. The references agree
-                with each other here; agreeing with each other is not the same
-                as applying to this capture, and only their distance in time
-                guards that. Treat the numbers below with suspicion.
-              </div>
-            )}
+          {data.ours && (
+            <div className="text-[11px] text-muted-foreground leading-relaxed rounded border-l-2 border-muted px-3 py-2">
+              <span className="font-medium text-foreground">
+                Whether these references describe this room is not checked, and
+                cannot be.
+              </span>{" "}
+              The pool is screened for agreeing with itself, but a pool can
+              agree with itself perfectly and still be the wrong room: five
+              captures from one morning agree to 0.16 dB and put 100% of a
+              capture eight days later above their threshold. Only the{" "}
+              {data.ours.referenceAgeH.toFixed(1)} h between this capture and
+              its nearest reference stands against that. A numeric test was
+              tried and does not exist — measured over 22 working calibrations,
+              the capture&apos;s distance from its pool ranges 0.09–5.65×
+              threshold while two known-broken ones read 4.94× and 5.20×,
+              because a capture occupied end to end is far from any empty
+              reference for honest reasons. Read the matrices knowing that.
+            </div>
+          )}
 
           <div className="flex flex-wrap gap-10">
             {data.ours && (
@@ -285,7 +287,7 @@ export function Phase1({ path, dark }: { path: string; dark: boolean }) {
             one grid. Windows the camera cannot call unambiguously are dropped
             rather than guessed. LG fired {data.lg.events} events.
             {data.ours &&
-              ` Ours calibrated against ${data.ours.references.length} empty captures agreeing within ${data.ours.poolSpread.toFixed(2)} dB, threshold ${data.ours.threshold.toFixed(3)} dB.`}
+              ` Ours calibrated against ${data.ours.references.length} empty captures agreeing within ${data.ours.poolSpread.toFixed(2)} dB, threshold ${data.ours.threshold.toFixed(3)} dB, nearest reference ${data.ours.referenceAgeH.toFixed(1)} h away.`}
           </p>
         </>
       )}

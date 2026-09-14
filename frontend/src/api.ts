@@ -685,11 +685,15 @@ export interface Phase1 {
     poolSpread: number;
     /** How far the capture's quietest window still sits from the pool. */
     minDeviation: number;
-    /** That distance in thresholds. Around 2-4 when a real occupant explains
-     *  the gap; far above means the pool describes a different room and the
-     *  verdict should not be believed. Reported, never enforced — a capture
-     *  occupied end to end never looks empty either. */
+    /** That distance in thresholds. Diagnostic only: it does NOT separate a
+     *  usable calibration from a broken one. Measured over 22 working
+     *  calibrations it spans 0.09–5.65, while two known-broken ones read 4.94
+     *  and 5.20 — fully inside that range, because the numerator also carries
+     *  how occupied the capture is and the denominator how tight the pool is. */
     applicability: number | null;
+    /** Hours between this capture and its nearest reference. This is the real
+     *  guard against a pool from a different room, so it is shown. */
+    referenceAgeH: number;
     references: string[];
     confusion: Confusion;
   } | null;

@@ -620,6 +620,7 @@ def phase1(
 
     # ---- ours, only if a reference exists that is not this capture ----------
     refs = _empty_reference_pool(p, ref_age_h, pool)
+    ref_age = _nearest_reference_age_h(p, refs)
     if len(refs) < 2:
         out["ours"] = None
         out["calibrated"] = False
@@ -643,16 +644,25 @@ def phase1(
                 "devScale": scale,
                 "poolSpread": spread_out,
                 "minDeviation": min_dev,
-                # How far the capture's QUIETEST window still sits from the
-                # pool, in thresholds. A correct reference is approached by
-                # something in the capture; around 2-4 when a real occupant
-                # accounts for the gap. Far above that means the pool is
-                # describing another room -- 9x on the 20260827/20260904 pair
-                # -- and the verdict is not to be believed. Reported rather
-                # than enforced: a capture occupied end to end never looks
-                # empty either, and refusing those would cost more than the
-                # warning saves.
+                # How far the capture's quietest window still sits from the
+                # pool, in thresholds. DIAGNOSTIC ONLY -- it does not separate
+                # a usable calibration from a broken one, and was briefly wired
+                # to a warning that did. Measured over 22 calibrations from the
+                # August protocol that scored 94% recall at 91% specificity, it
+                # spans 0.09 to 5.65; two calibrations known to be broken
+                # (20260827 references against 20260904 captures, specificity
+                # 0.006) read 4.94 and 5.20, inside that range. It cannot
+                # separate them because it mixes three things: how far the pool
+                # is (wanted), how tight the pool is (the denominator), and how
+                # occupied the capture is (the numerator -- every healthy case
+                # above 5 is occupied 96-100% of the time and so is honestly far
+                # from any empty reference).
                 "applicability": (min_dev / thr) if thr > 0 else None,
+                # Hours to the nearest reference. Unlike the two numbers above
+                # this one actually guards against a pool from another room,
+                # because it is the only thing that does -- see the endpoint
+                # docstring.
+                "referenceAgeH": ref_age,
                 "references": [r.name for r in refs],
                 "confusion": _confusion(centres, state, truth, grid),
             }
@@ -733,6 +743,21 @@ def _empty_reference_pool(capture: Path, max_age_h: float, pool: int) -> list[Pa
                 found.append((age, cand))
     found.sort(key=lambda pair: pair[0])
     return [q for _, q in found[:pool]]
+
+
+def _nearest_reference_age_h(capture: Path, refs: list[Path]) -> float:
+    from datetime import datetime
+
+    def when(q: Path) -> datetime | None:
+        try:
+            return datetime.strptime(q.stem[:15], "%Y%m%d_%H%M%S")
+        except ValueError:
+            return None
+
+    here = when(capture)
+    ages = [abs((here - w).total_seconds()) / 3600.0
+            for w in (when(r) for r in refs) if here and w]
+    return min(ages) if ages else float("nan")
 
 
 def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
