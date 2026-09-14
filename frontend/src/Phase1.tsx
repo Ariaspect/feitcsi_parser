@@ -249,6 +249,24 @@ export function Phase1({ path, dark }: { path: string; dark: boolean }) {
             </div>
           )}
 
+          {data.ours &&
+            data.ours.applicability !== null &&
+            data.ours.applicability > 5 && (
+              <div className="text-[11px] leading-relaxed rounded border-l-2 border-amber-500 bg-amber-500/10 px-3 py-2">
+                <span className="font-medium">
+                  These references may not describe this room.
+                </span>{" "}
+                Its quietest second still sits{" "}
+                {data.ours.applicability.toFixed(1)}× the threshold away from
+                them ({data.ours.minDeviation.toFixed(2)} dB). A reference the
+                capture belongs to gets approached by something in it — around
+                2–4× when an occupant accounts for the gap. The references agree
+                with each other here; agreeing with each other is not the same
+                as applying to this capture, and only their distance in time
+                guards that. Treat the numbers below with suspicion.
+              </div>
+            )}
+
           <div className="flex flex-wrap gap-10">
             {data.ours && (
               <Matrix title="ours" c={data.ours.confusion} accent={oursColor} />

@@ -20,6 +20,14 @@ The calibration rule is the point of the whole thing, so it is explicit:
     low. On 20260914 one empty capture was all there was and every threshold
     from 0.08 to 3.7 dB failed: 100% recall at 0% specificity, or the reverse.
 
+  * The reference also has to be NEAR IN TIME, and --ref-age-h is the only
+    thing enforcing that. The pool screen cannot: it sees the reference
+    profiles and never the capture's, so it can only ask whether the references
+    agree with each other. Five camera-empty captures from one 20260827 morning
+    agree to 0.161 dB, give a healthy 0.175 dB scale, and put 100% of a
+    20260904 capture's windows above the threshold that follows -- its quietest
+    second included, at 9x. Widening the window buys silently wrong verdicts.
+
   * When a capture cannot be calibrated under those rules it is reported as
     UNSCOREABLE, never scored against a fallback. The September controlled
     sessions are all unscoreable and should read that way rather than

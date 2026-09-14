@@ -558,7 +558,7 @@ def phase1(
     k: float = Query(3.0, gt=0, le=100, description="Threshold as a multiple of the reference's dev_scale"),
     lg_threshold: float = Query(26.0, gt=0, le=200, description="LG's change-detection threshold in dB"),
     lg_absence: float = Query(10.0, gt=0, le=600, description="Seconds without movement before LG reports absence"),
-    ref_age_h: float = Query(6.0, gt=0, le=720, description="How far in time a calibration capture may sit from this one"),
+    ref_age_h: float = Query(6.0, gt=0, le=720, description="How far in time a calibration capture may sit from this one. LOAD-BEARING: the pool screen cannot replace it, see below"),
     pool: int = Query(5, ge=2, le=32, description="How many empty captures to calibrate against"),
 ) -> dict:
     """Both detectors on one grid, against the camera, honestly calibrated.
@@ -579,7 +579,24 @@ def phase1(
     capture between them: every threshold from 0.08 to 3.7 dB gave either 100%
     recall at 0% specificity or the reverse.
 
-    When no such reference exists this returns ``calibrated: false`` and no
+    Two different failures are guarded, and NEITHER guard covers the other:
+
+    ``ref_age_h`` bounds how far in time a reference may sit from the capture,
+    and is the only thing standing between a verdict and a pool that describes
+    a different room. ``screen_reference_pool`` cannot do that job: it is shown
+    the reference profiles and never the capture's, so it can only ask whether
+    the references agree with each OTHER. Measured -- five camera-empty captures
+    from one 20260827 morning agree to 0.161 dB, give a healthy dev_scale of
+    0.175 and a 0.524 dB threshold, and applied to a capture from 20260904 put
+    100% of its windows above that threshold, its quietest one included, at 9x
+    the threshold. The screen passes it; only the 6 h window stops it. Widening
+    ref_age_h buys silently wrong verdicts, so treat the default as a limit
+    rather than a starting point.
+
+    The screen guards the other direction: a pool whose own members disagree
+    makes dev_scale the gap between them instead of the wander within either.
+
+    When no usable reference exists this returns ``calibrated: false`` and no
     verdict for our side, rather than falling back to something that would
     produce a number. LG needs no reference at all -- it compares each frame to
     the one before -- so its side is still scored, which is precisely the
@@ -612,7 +629,8 @@ def phase1(
         )
     else:
         try:
-            state, thr, scale, spread_out = _score_ours(p, refs, grid, k, centres)
+            state, thr, scale, spread_out, min_dev = _score_ours(
+                p, refs, grid, k, centres)
         except ValueError as exc:
             out["ours"] = None
             out["calibrated"] = False
@@ -624,6 +642,17 @@ def phase1(
                 "threshold": thr,
                 "devScale": scale,
                 "poolSpread": spread_out,
+                "minDeviation": min_dev,
+                # How far the capture's QUIETEST window still sits from the
+                # pool, in thresholds. A correct reference is approached by
+                # something in the capture; around 2-4 when a real occupant
+                # accounts for the gap. Far above that means the pool is
+                # describing another room -- 9x on the 20260827/20260904 pair
+                # -- and the verdict is not to be believed. Reported rather
+                # than enforced: a capture occupied end to end never looks
+                # empty either, and refusing those would cost more than the
+                # warning saves.
+                "applicability": (min_dev / thr) if thr > 0 else None,
                 "references": [r.name for r in refs],
                 "confusion": _confusion(centres, state, truth, grid),
             }
@@ -707,7 +736,7 @@ def _empty_reference_pool(capture: Path, max_age_h: float, pool: int) -> list[Pa
 
 
 def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
-                centres: np.ndarray) -> tuple[np.ndarray, float, float, float]:
+                centres: np.ndarray) -> tuple[np.ndarray, float, float, float, float]:
     from . import presence as presence_mod
 
     grids, fs_ref = [], None
@@ -756,9 +785,11 @@ def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
         devs.append(min(near))
     if not times:
         raise ValueError("no window in this capture carries a CSI ratio")
-    state = np.interp(centres, np.asarray(times), np.asarray(devs),
+    devs_a = np.asarray(devs)
+    state = np.interp(centres, np.asarray(times), devs_a,
                       left=np.nan, right=np.nan) > thr
-    return state, float(thr), float(ref["dev_scale"]), float(spread)
+    return (state, float(thr), float(ref["dev_scale"]), float(spread),
+            float(devs_a.min()))
 
 
 def _lg_state_on_grid(events: list[dict], centres: np.ndarray) -> np.ndarray:

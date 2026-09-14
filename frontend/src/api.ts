@@ -683,6 +683,13 @@ export interface Phase1 {
      *  describe one room; large means the pool spans two and its scale would
      *  measure the gap between them. */
     poolSpread: number;
+    /** How far the capture's quietest window still sits from the pool. */
+    minDeviation: number;
+    /** That distance in thresholds. Around 2-4 when a real occupant explains
+     *  the gap; far above means the pool describes a different room and the
+     *  verdict should not be believed. Reported, never enforced — a capture
+     *  occupied end to end never looks empty either. */
+    applicability: number | null;
     references: string[];
     confusion: Confusion;
   } | null;
