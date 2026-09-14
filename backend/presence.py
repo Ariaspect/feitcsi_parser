@@ -116,8 +116,10 @@ DEFAULT_PRESENT_THRESHOLD = 0.25
 # margin on both sides.
 DEFAULT_BASELINE_DEV_K = 3.0
 
-# The scale that k multiplies is the MEDIAN of the reference windows' own
+# The scale that k multiplies is the MEDIAN of the reference windows'
 # deviations, doubled to land it near where the 95th percentile used to sit.
+# Which deviation depends on presence_reference's scale_mode: within-range for
+# a bracketed single capture, leave-one-out for a pool of separate captures.
 # It was the 95th percentile until 20260914, and that is a breakable choice: a
 # reference range covers ~20 windows, so a single unsettled one sets the
 # threshold outright. The trailing empty stretch of a bracketed run is exactly
@@ -353,6 +355,7 @@ def presence_reference(
     *,
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     hop_seconds: float = DEFAULT_HOP_SECONDS,
+    scale_mode: str = "within",
 ) -> dict[str, Any]:
     """Reduce one or more stretches of known-empty capture to what a verdict needs.
 
@@ -428,19 +431,44 @@ def presence_reference(
     devs: list[float] = []
     levels: list[float] = []
     win = 0
-    for seg, own in zip(segments, profiles):
+    # Two ways to turn the reference windows into a scale, because there are
+    # two ways the ranges relate to the capture being judged, and they need
+    # opposite treatment:
+    #
+    # "within" (default) -- the ranges are the empty stretches of the SAME
+    #   capture under analysis (the bracketed lead/trail the UI passes). The
+    #   verdict scores that capture's occupied middle against those same
+    #   stretches, so the relevant baseline is how much THIS capture wanders
+    #   inside itself: score each range's windows against their own profile.
+    #   Measured over the 26 bracketed captures with camera truth, this holds
+    #   92% recall at 2% false. Leave-one-out here instead scores lead against
+    #   trail -- 1-2 dB apart within one capture -- and inflates the scale to
+    #   2-6 dB, which took recall to 4%.
+    #
+    # "loo" -- the ranges are a POOL of separate prior empty captures, and the
+    #   capture under analysis is NOT one of them. The verdict scores it
+    #   against the nearest pooled profile, so the scale must be that same
+    #   cross-capture distance: score each pooled range against the nearest of
+    #   the OTHERS (leave-one-out), each standing in for "a capture not in the
+    #   pool". Within-range here measures how one capture wanders inside itself
+    #   (~0.04 dB overnight) while the verdict compares whole captures (~0.2 dB
+    #   even 10 min apart) -- the threshold came out ~5x too low and a
+    #   perfectly empty room read as occupied 79% of the time (21%
+    #   specificity). Leave-one-out lifts that to ~91% at ~94% recall.
+    if scale_mode not in ("within", "loo"):
+        raise ValueError(f"scale_mode must be 'within' or 'loo', got {scale_mode!r}")
+    for i, (seg, own) in enumerate(zip(segments, profiles)):
         n_samples = seg.shape[0]
         win = min(max(MIN_WINDOW_SAMPLES, int(round(window_seconds * fs))), n_samples)
         frac_full = fractional_motion(seg)
+        if scale_mode == "loo":
+            others = [pr for j, pr in enumerate(profiles) if j != i]
+            refset = others if others else [own]
+        else:
+            refset = [own]
         for start in range(0, n_samples - win + 1, hop):
-            # Each range's windows are scored against their OWN profile, so
-            # dev_p95 stays a measure of how much one empty room wanders and
-            # not of how far two empty rooms sit apart.
-            devs.append(
-                baseline_deviation(
-                    amplitude_profile(seg[start : start + win]), own
-                )
-            )
+            w = amplitude_profile(seg[start : start + win])
+            devs.append(min(baseline_deviation(w, pr) for pr in refset))
             piece = frac_full[start : start + win - 1]
             if piece.size and np.isfinite(piece).any():
                 levels.append(float(np.nanmedian(piece)))

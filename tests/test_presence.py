@@ -573,18 +573,15 @@ def test_in_band_weighting_prefers_a_tone_over_a_drifting_subcarrier() -> None:
 
 
 def test_several_empty_ranges_are_scored_against_the_nearest_one() -> None:
-    """A room empty in two different ways is empty in both.
+    """A window matching any pooled empty state scores near zero against it.
 
-    Averaging the two states would give a profile matching neither, and the
-    spread around it would measure the distance between them rather than the
-    wander within them -- which a k-multiple threshold reads as noise and
-    inflates out of usefulness. Distance to the nearest state is what a verdict
-    needs, so a window matching either stretch must score near zero against the
-    pooled reference.
+    Averaging the states would give a profile matching neither, so the pool
+    keeps one profile per range and a verdict takes the distance to the
+    NEAREST -- which is what lets a window that matches either stretch read as
+    empty.
     """
     rng = np.random.default_rng(11)
     n_sc, n = 48, 600
-    # Two genuinely different empty rooms, far apart compared to their own wander.
     a = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
     b = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0
     ref = presence_reference(
@@ -594,17 +591,64 @@ def test_several_empty_ranges_are_scored_against_the_nearest_one() -> None:
     assert ref["n_ranges"] == 2
     assert len(ref["profiles"]) == 2
 
+    # The pool does NOT average: each stretch sits on top of its own profile.
     near_a = baseline_deviation(
         amplitude_profile(a.astype(complex)), ref["profiles"][0]
     )
     near_b = baseline_deviation(
         amplitude_profile(b.astype(complex)), ref["profiles"][1]
     )
-    # Each stretch sits on top of its own profile...
     assert near_a < 0.1 and near_b < 0.1
-    # ...and dev_scale stays a measure of within-room wander, not of the gap
-    # between the two rooms, which here is several dB.
-    assert ref["dev_scale"] < 0.5
+
+
+def test_dev_scale_is_leave_one_out_across_ranges() -> None:
+    """The threshold's unit is the cross-range distance, not within-range wander.
+
+    A verdict scores a window from the analysed capture -- which is never one
+    of the reference ranges -- against the nearest reference profile. So the
+    scale has to be built the same way: each range's windows scored against the
+    OTHER ranges, never their own. Two SIMILAR empty rooms validate each other
+    and the scale stays small; two DISSIMILAR rooms are the honest warning that
+    this pool cannot tell a third empty room from an occupant, and the scale
+    grows to say so. Until 20260914 the scale was within-range wander (~0.04 dB
+    overnight) while the verdict compared cross-capture gaps (~0.2 dB), and a
+    perfectly empty room read as occupied 79% of the time.
+    """
+    rng = np.random.default_rng(11)
+    n_sc, n = 48, 600
+    a = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    a2 = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0  # same room, second look
+    far = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0  # a different room
+
+    similar = presence_reference(
+        [a.astype(complex), a2.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0, scale_mode="loo",
+    )
+    dissimilar = presence_reference(
+        [a.astype(complex), far.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0, scale_mode="loo",
+    )
+    # Similar rooms: leave-one-out distance is small, ~their shared wander.
+    assert similar["dev_scale"] < 0.5
+    # Dissimilar rooms: leave-one-out surfaces the several-dB gap between them.
+    assert dissimilar["dev_scale"] > 2.0
+
+    # The default mode is within-range: even dissimilar rooms score against
+    # their own profile, so the scale stays small. This is the bracketed
+    # single-capture path the UI uses, and scoring lead against trail (loo)
+    # there inflated the threshold and took recall to 4%.
+    within = presence_reference(
+        [a.astype(complex), far.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0,
+    )
+    assert within["dev_scale"] < 0.5
+
+    # A single range has no "other": loo falls back to within-range.
+    solo = presence_reference(
+        [a.astype(complex)], 20.0, window_seconds=5.0, hop_seconds=1.0,
+        scale_mode="loo",
+    )
+    assert solo["dev_scale"] < 0.5
 
 
 def test_one_empty_range_still_behaves_as_before() -> None:
