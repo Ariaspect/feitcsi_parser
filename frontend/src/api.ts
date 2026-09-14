@@ -344,10 +344,13 @@ export interface PresenceParams {
 }
 
 /** What the empty-room reference range measured, or `null` when none was
- *  given. `devP95` is how far that room's own windows strayed from its
- *  profile — the unit `baselineDev` is judged in — and `motionFloor` is its
- *  fractional-motion noise floor, which is never zero. */
+ *  given. `devScale` is how far that room's own windows typically strayed from
+ *  its profile — the unit `baselineDev` is judged in — and `motionFloor` is its
+ *  fractional-motion noise floor, which is never zero. `devP95` is the same
+ *  quantity at the 95th percentile, which the threshold used until 20260914;
+ *  a `devP95` far above `devScale` means the reference range never settled. */
 export interface PresenceReference {
+  devScale: number;
   devP95: number;
   motionFloor: number;
   nWindows: number;
@@ -508,6 +511,7 @@ export async function fetchPresence(
     baselineDevThreshold: body.baseline_dev_threshold ?? null,
     reference: body.reference
       ? {
+          devScale: body.reference.dev_scale ?? body.reference.dev_p95,
           devP95: body.reference.dev_p95,
           motionFloor: body.reference.motion_floor,
           nWindows: body.reference.n_windows,

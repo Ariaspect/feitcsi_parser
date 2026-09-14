@@ -106,7 +106,7 @@ DEFAULT_PRESENT_THRESHOLD = 0.25
 
 # How far a window's channel state must sit from the empty-room reference
 # before a still occupant is claimed, in units of how much that same empty
-# room wandered on its own (``dev_p95``). Expressing it that way is what makes
+# room wandered on its own (``dev_scale``). Expressing it that way is what makes
 # one number work across radios: the absolute deviation that means "occupied"
 # is a property of the room and the hardware, the *ratio* to the room's own
 # variability is not. Measured on
@@ -115,6 +115,26 @@ DEFAULT_PRESENT_THRESHOLD = 0.25
 # reads 2.32 dB at the 5th percentile -- 3.75x -- so 3.0 separates them with
 # margin on both sides.
 DEFAULT_BASELINE_DEV_K = 3.0
+
+# The scale that k multiplies is the MEDIAN of the reference windows' own
+# deviations, doubled to land it near where the 95th percentile used to sit.
+# It was the 95th percentile until 20260914, and that is a breakable choice: a
+# reference range covers ~20 windows, so a single unsettled one sets the
+# threshold outright. The trailing empty stretch of a bracketed run is exactly
+# that -- the room does not snap back the instant the occupant leaves. On
+# 20260914_134409 the tail was still at 0.26-0.48 dB against 0.06 dB before
+# the occupant arrived, which put dev_p95 at 0.451 and the threshold at 1.35,
+# above the 1.10 dB the occupant themselves read: 6% recall on a person the
+# same detector found 100% of the time three minutes later, facing the other
+# way. A median needs half the windows contaminated before it moves.
+#
+# Scored over the 26 bracketed captures that carry camera ground truth
+# (20260904, 20260909, 20260911, 20260914): recall 85% -> 92% at an unchanged
+# 2% false-positive rate. The multiplier is an operating point on a slope, not
+# a plateau -- x4 reaches 98% recall but 7% false, x8 holds 2% false at 84%
+# recall -- so it wants re-measuring against the full labelled corpus rather
+# than trusting these 26.
+DEFAULT_DEV_SCALE_MULT = 2.0
 
 # Gross motion as a multiple of the room's own fractional-motion floor. The
 # absolute test alone cannot do this job: on the capture above the floor is
@@ -337,8 +357,8 @@ def presence_reference(
     """Reduce one or more stretches of known-empty capture to what a verdict needs.
 
     Three numbers, each with one job. ``profile`` is what a window's channel
-    state is compared against. ``dev_p95`` is how far the empty room's own
-    windows strayed from that profile, which is the unit the presence
+    state is compared against. ``dev_scale`` is how far the empty room's own
+    windows typically strayed from that profile, which is the unit the presence
     threshold is expressed in -- an absolute dB threshold would have to be
     re-tuned per radio and per room, a multiple of the room's own wander does
     not. ``motion_floor`` is the fractional-motion noise floor here, which is
@@ -437,7 +457,18 @@ def presence_reference(
         "profiles": profiles,
         # A floor under both, so a pathologically quiet reference cannot make
         # every later window look like an occupant by dividing by nothing.
+        # dev_scale is what the verdict divides by; dev_p95 is kept beside it
+        # because it is what the panels have always displayed and because the
+        # gap between the two is the diagnostic for a reference range that did
+        # not settle.
+        "dev_scale": max(
+            float(np.median(finite_dev)) * DEFAULT_DEV_SCALE_MULT, 1e-3
+        ),
         "dev_p95": max(float(np.percentile(finite_dev, 95)), 1e-3),
+        # The raw per-window deviations, kept so a caller can ask what a
+        # different statistic would have said without decoding the range
+        # again. Nothing in the verdict path reads this.
+        "devs": finite_dev,
         "motion_floor": max(float(np.median(finite_lvl)), 1e-6),
         "n_windows": int(finite_dev.size),
         "n_ranges": len(segments),
@@ -870,7 +901,9 @@ def presence_windows(
         dev_threshold: float | None = None
     else:
         motion_ratio_a = motion_level_a / float(reference["motion_floor"])
-        dev_threshold = float(baseline_dev_k) * float(reference["dev_p95"])
+        dev_threshold = float(baseline_dev_k) * float(
+            reference.get("dev_scale", reference["dev_p95"])
+        )
 
     warnings: list[str] = []
     if reference is None:
@@ -920,6 +953,7 @@ def presence_windows(
         "reference": None
         if reference is None
         else {
+            "dev_scale": float(reference.get("dev_scale", reference["dev_p95"])),
             "dev_p95": float(reference["dev_p95"]),
             "motion_floor": float(reference["motion_floor"]),
             "n_windows": int(reference["n_windows"]),

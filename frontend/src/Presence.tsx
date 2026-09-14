@@ -640,7 +640,8 @@ export function Presence({
           {data.reference && (
             <p className="text-[11px] text-muted-foreground leading-relaxed">
               Reference: {data.reference.nWindows} windows, wandering{" "}
-              {data.reference.devP95.toFixed(2)} dB on their own (p95) — so
+              {data.reference.devScale.toFixed(2)} dB on their own (median×2;
+              p95 {data.reference.devP95.toFixed(2)}) — so
               “occupied” is {data.params.baseline_dev_k}× that, or{" "}
               {(data.baselineDevThreshold ?? 0).toFixed(2)} dB. Motion floor{" "}
               {data.reference.motionFloor.toFixed(3)}, and gross motion is{" "}

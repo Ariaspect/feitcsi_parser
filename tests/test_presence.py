@@ -413,7 +413,7 @@ def test_a_nan_motion_level_is_unknown_not_empty() -> None:
 def test_a_reference_summarises_the_room_it_was_measured_in() -> None:
     """The reference is three numbers, and each one has a job downstream.
 
-    ``profile`` is what a window is compared against, ``dev_p95`` is how much
+    ``profile`` is what a window is compared against, ``dev_scale`` is how much
     the empty room wanders on its own -- the unit the presence threshold is
     expressed in -- and ``motion_floor`` is the fractional-motion noise floor
     of this radio in this room, which is not zero.
@@ -422,7 +422,8 @@ def test_a_reference_summarises_the_room_it_was_measured_in() -> None:
 
     assert ref["profile"].shape == (8,)
     assert np.isfinite(ref["profile"]).all()
-    assert ref["dev_p95"] > 0.0, "an empty room is never perfectly still"
+    assert ref["dev_scale"] > 0.0, "an empty room is never perfectly still"
+    assert ref["dev_p95"] >= ref["dev_scale"] * 0.5
     assert ref["motion_floor"] > 0.0, "fractional motion has a noise floor"
     assert ref["n_windows"] > 0
 
@@ -440,7 +441,7 @@ def test_baseline_deviation_is_zero_against_the_room_it_came_from() -> None:
     ratio = _synthetic_ratio(None, noise=0.002)
     ref = presence_reference(ratio, FS)
 
-    assert baseline_deviation(amplitude_profile(ratio), ref["profile"]) < ref["dev_p95"]
+    assert baseline_deviation(amplitude_profile(ratio), ref["profile"]) < ref["dev_scale"]
 
 
 def test_a_displaced_channel_reads_as_present_without_any_periodicity() -> None:
@@ -459,7 +460,7 @@ def test_a_displaced_channel_reads_as_present_without_any_periodicity() -> None:
 
     result = presence_windows(occupied, FS, reference=ref)
 
-    assert np.nanmedian(result["baseline_dev"]) > ref["dev_p95"] * 3.0
+    assert np.nanmedian(result["baseline_dev"]) > ref["dev_scale"] * 3.0
     assert set(result["state"]) == {STATE_PRESENT}
     assert np.nanmax(result["score"]) < 0.25, "no periodicity was involved"
 
@@ -601,9 +602,9 @@ def test_several_empty_ranges_are_scored_against_the_nearest_one() -> None:
     )
     # Each stretch sits on top of its own profile...
     assert near_a < 0.1 and near_b < 0.1
-    # ...and dev_p95 stays a measure of within-room wander, not of the gap
+    # ...and dev_scale stays a measure of within-room wander, not of the gap
     # between the two rooms, which here is several dB.
-    assert ref["dev_p95"] < 0.5
+    assert ref["dev_scale"] < 0.5
 
 
 def test_one_empty_range_still_behaves_as_before() -> None:
