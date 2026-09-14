@@ -3,7 +3,7 @@ import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, trun
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { LgDetector } from "./LgDetector";
-import { LgParser } from "./LgParser";
+import { Phase1 } from "./Phase1";
 import { PresenceBar } from "./PresenceBar";
 import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
@@ -68,13 +68,15 @@ function FoldedPanel({
   title,
   hint,
   children,
+  defaultOpen = false,
 }: {
   title: string;
   hint: string;
   children: React.ReactNode;
+  defaultOpen?: boolean;
 }) {
   return (
-    <Collapsible>
+    <Collapsible defaultOpen={defaultOpen}>
       <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[panel-open]:rotate-90" />
         <span className="text-sm font-medium">{title}</span>
@@ -515,8 +517,7 @@ export function App() {
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
-              <TabsTrigger value="lgparse">LG parser</TabsTrigger>
-              <TabsTrigger value="lgdetect">LG detector</TabsTrigger>
+              <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -776,120 +777,51 @@ export function App() {
               </div>
             </TabsContent>
 
-            <TabsContent value="lgparse">
-              <div className="space-y-4">
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  The vendored MT7921 parser&apos;s own view of this capture.
-                  Its arithmetic over this project&apos;s reader: the planes
-                  below are produced by its functions — RSSI-based AGC
-                  restoration, its occupancy rule for which bins are real, and
-                  its conjugate-across-receive-paths phase feature — and
-                  rendered through the same tile path as every other heatmap,
-                  so they pan and zoom with the Channel tab.
-                </p>
-
-                <Heatmap
-                  path={path}
-                  metric="lg_amplitude"
-                  filename={meta.filename}
-                  numSubcarriers={meta.num_subcarriers}
-                  captureTMin={meta.t_min}
-                  captureTMax={meta.t_max}
-                  title="Amplitude, AGC-restored"
-                  colorLabel="Amplitude (dBm, absolute)"
-                  height={320}
-                  timeLink={timeLink}
-                  mimo={mimo}
-                  sourceMac={sourceMac}
-                  interpolate={interpolate}
-                  dark={dark}
-                />
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  The chip strips its own AGC, so its amplitude is relative.
-                  This restores an absolute dBm scale from RSSI. Bins their
-                  occupancy rule rejects are blank rather than plotted — a
-                  guard band drawn as a measurement would dominate the colour
-                  scale, which is what the rule exists to prevent.
-                </p>
-
-                <FoldedPanel
-                  title="Phase, conjugated across rx"
-                  hint="their feature_conj — the phase feature this project does not adopt"
-                >
-                  <Heatmap
-                    path={path}
-                    metric="lg_conj_phase"
-                    filename={meta.filename}
-                    numSubcarriers={meta.num_subcarriers}
-                    captureTMin={meta.t_min}
-                    captureTMax={meta.t_max}
-                    minValue={-Math.PI}
-                    maxValue={Math.PI}
-                    title="feature_conj phase"
-                    colorLabel="Phase (rad)"
-                    height={280}
-                    palette={TWILIGHT}
-                    timeLink={timeLink}
-                    mimo={mimo}
-                    sourceMac={sourceMac}
-                    interpolate={interpolate}
-                    dark={dark}
-                  />
-                </FoldedPanel>
-
-                <FoldedPanel
-                  title="Magnitude of the conjugate product"
-                  hint="|H_rx0 · conj(H_rx1)| — their amplitude feature"
-                >
-                  <Heatmap
-                    path={path}
-                    metric="lg_conj_amplitude"
-                    filename={meta.filename}
-                    numSubcarriers={meta.num_subcarriers}
-                    captureTMin={meta.t_min}
-                    captureTMax={meta.t_max}
-                    title="feature_conj magnitude"
-                    colorLabel="Magnitude (dB)"
-                    height={280}
-                    timeLink={timeLink}
-                    mimo={mimo}
-                    sourceMac={sourceMac}
-                    interpolate={interpolate}
-                    dark={dark}
-                  />
-                </FoldedPanel>
-
-                <FoldedPanel
-                  title="Parser comparison"
-                  hint="how their reading differs from ours, in numbers"
-                >
-                  <LgParser path={path} dark={dark} />
-                </FoldedPanel>
-              </div>
-            </TabsContent>
 
             <TabsContent value="lgdetect">
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  The LG on-board presence detector, replayed over this
-                  capture. Its own <code>mtk_read_bf_csi</code> and{" "}
-                  <code>process_csi_data</code> decide — nothing here
-                  reimplements them. It runs under a NumPy 1.x interpreter
-                  matching the board, because its TLV length arithmetic shifts
-                  a <code>uint8</code> left by 8: NumPy 2 keeps that as
-                  <code>uint8</code>, evaluates it to 0, and the walk
-                  desynchronises at the first CSI field — silently, yielding
-                  frames with zeroed imaginary parts rather than an error.
-                  Replayed on the project venv it would be measuring the NumPy
-                  version rather than the detector.
+                  Both detectors against the camera, on one grid. Ours compares
+                  a window to an empty-room reference; LG&apos;s compares each
+                  frame to the one before, so it answers &ldquo;is something
+                  changing&rdquo; and cannot see a motionless occupant at all.
+                  The reference for our side is drawn only from OTHER captures
+                  the camera labelled empty — never this one&apos;s own empty
+                  stretches, which would be knowing the answer in advance.
                 </p>
-                <LgDetector
-                  path={path}
-                  captureTMin={meta.t_min}
-                  captureTMax={meta.t_max}
-                  timeLink={timeLink}
-                  dark={dark}
-                />
+
+                <FoldedPanel
+                  title="Verdicts and confusion matrices"
+                  hint="ground truth, ours, theirs — same grid, same windows"
+                  defaultOpen
+                >
+                  <Phase1 path={path} dark={dark} />
+                </FoldedPanel>
+
+                <FoldedPanel
+                  title="LG detector in detail"
+                  hint="its raw +/- events and per-threshold behaviour"
+                >
+                  <div className="space-y-3">
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      Its own <code>mtk_read_bf_csi</code> and{" "}
+                      <code>process_csi_data</code> decide — nothing here
+                      reimplements them. It runs under a NumPy 1.x interpreter
+                      matching the board, because its TLV length arithmetic
+                      shifts a <code>uint8</code> left by 8: NumPy 2 keeps that
+                      as <code>uint8</code>, evaluates it to 0, and the walk
+                      desynchronises at the first CSI field — silently, yielding
+                      frames with zeroed imaginary parts rather than an error.
+                    </p>
+                    <LgDetector
+                      path={path}
+                      captureTMin={meta.t_min}
+                      captureTMax={meta.t_max}
+                      timeLink={timeLink}
+                      dark={dark}
+                    />
+                  </div>
+                </FoldedPanel>
               </div>
             </TabsContent>
 

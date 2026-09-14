@@ -645,3 +645,65 @@ export async function fetchLgDetect(
   }
   return res.json();
 }
+
+/** One cell-count set, plus the rates derived from it. Nulls where a rate has
+ *  no denominator — a capture with no empty window has no specificity, and
+ *  saying 0% would be a different claim from saying "not measured". */
+export interface Confusion {
+  tp: number;
+  fp: number;
+  fn: number;
+  tn: number;
+  total: number;
+  accuracy: number | null;
+  recall: number | null;
+  specificity: number | null;
+  precision: number | null;
+}
+
+/** Both detectors resampled onto one grid and scored against the camera.
+ *
+ *  `ours` is null when the capture could not be calibrated — the reference has
+ *  to come from other camera-empty captures, never this one's own stretches,
+ *  and there have to be at least two. `calibrationNote` says which condition
+ *  failed. `lg` is always present: it compares each frame to the one before and
+ *  so needs no reference at all, which is exactly the trade the two make. */
+export interface Phase1 {
+  path: string;
+  gridSeconds: number;
+  timeS: number[];
+  groundTruth: { timeS: number[]; present: boolean[] };
+  calibrated: boolean;
+  calibrationNote?: string;
+  ours: {
+    present: boolean[];
+    threshold: number;
+    devScale: number;
+    references: string[];
+    confusion: Confusion;
+  } | null;
+  lg: {
+    present: boolean[];
+    threshold: number;
+    absence: number;
+    events: number;
+    confusion: Confusion;
+  };
+}
+
+export async function fetchPhase1(
+  path: string,
+  opts: { grid?: number; k?: number; lgThreshold?: number; lgAbsence?: number } = {},
+  signal?: AbortSignal,
+): Promise<Phase1> {
+  const { grid = 1, k = 3, lgThreshold = 26, lgAbsence = 10 } = opts;
+  const url =
+    `/api/phase1?path=${encodeURIComponent(path)}` +
+    `&grid=${grid}&k=${k}&lg_threshold=${lgThreshold}&lg_absence=${lgAbsence}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `phase1: ${res.status}`);
+  }
+  return res.json();
+}

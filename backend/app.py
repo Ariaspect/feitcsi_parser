@@ -21,6 +21,7 @@ from .stream import get_stream
 from .tiles import (
     DOPPLER_METRICS,
     TILE_METRICS,
+    _presence_grid,
     compute_doppler,
     compute_presence,
     compute_tile,
@@ -548,6 +549,235 @@ def lg_detect(   # not `lgdetect`: that name is the module this calls
         except (OSError, ValueError):
             out["truth"] = None
     return out
+
+
+@app.get("/api/phase1")
+def phase1(
+    path: str = Query(..., description="Path to the capture"),
+    grid: float = Query(1.0, gt=0.05, le=60, description="Seconds per verdict; 1 s is the camera's own rate and there is no ground truth finer"),
+    k: float = Query(3.0, gt=0, le=100, description="Threshold as a multiple of the reference's dev_scale"),
+    lg_threshold: float = Query(26.0, gt=0, le=200, description="LG's change-detection threshold in dB"),
+    lg_absence: float = Query(10.0, gt=0, le=600, description="Seconds without movement before LG reports absence"),
+    ref_age_h: float = Query(6.0, gt=0, le=720, description="How far in time a calibration capture may sit from this one"),
+    pool: int = Query(5, ge=2, le=32, description="How many empty captures to calibrate against"),
+) -> dict:
+    """Both detectors on one grid, against the camera, honestly calibrated.
+
+    The two are not comparable as they stand: ours reduces a window to a single
+    verdict, LG's emits movement events and holds a state between them. So both
+    are resampled onto the same grid before anything is counted.
+
+    What makes this different from ``/api/presence`` is where the reference
+    comes from. That endpoint takes ranges the caller names, and in the UI those
+    are the capture's own empty stretches -- which is knowing the answer in
+    advance. Here the reference is drawn only from OTHER captures the camera
+    labelled completely empty, and never from this one. It also needs at least
+    two of them: a single capture reports how far it wanders from itself (about
+    0.04 dB overnight), not how far two captures sit apart (about 0.2 dB even
+    ten minutes apart), and a threshold built on the former is roughly 5x too
+    low. Measured on the 20260914 sessions, which have exactly one clean empty
+    capture between them: every threshold from 0.08 to 3.7 dB gave either 100%
+    recall at 0% specificity or the reverse.
+
+    When no such reference exists this returns ``calibrated: false`` and no
+    verdict for our side, rather than falling back to something that would
+    produce a number. LG needs no reference at all -- it compares each frame to
+    the one before -- so its side is still scored, which is precisely the
+    trade-off the two approaches make.
+    """
+    p = resolve_capture_path(path)
+    out: dict = {"path": str(p), "gridSeconds": grid}
+
+    truth = _camera_truth(p)
+    if truth is None:
+        raise HTTPException(
+            status_code=404,
+            detail="this capture has no camera labels, so neither detector can be scored",
+        )
+    out["groundTruth"] = {"timeS": truth[:, 0].tolist(),
+                          "present": [bool(v) for v in truth[:, 1]]}
+
+    duration = float(truth[-1, 0])
+    centres = np.arange(grid / 2, duration, grid)
+    out["timeS"] = centres.tolist()
+
+    # ---- ours, only if a reference exists that is not this capture ----------
+    refs = _empty_reference_pool(p, ref_age_h, pool)
+    if len(refs) < 2:
+        out["ours"] = None
+        out["calibrated"] = False
+        out["calibrationNote"] = (
+            f"needs 2 or more camera-empty captures within {ref_age_h:g} h that are "
+            f"not this one; found {len(refs)}"
+        )
+    else:
+        try:
+            state, thr, scale = _score_ours(p, refs, grid, k, centres)
+        except ValueError as exc:
+            out["ours"] = None
+            out["calibrated"] = False
+            out["calibrationNote"] = str(exc)
+        else:
+            out["calibrated"] = True
+            out["ours"] = {
+                "present": [bool(v) for v in state],
+                "threshold": thr,
+                "devScale": scale,
+                "references": [r.name for r in refs],
+                "confusion": _confusion(centres, state, truth, grid),
+            }
+
+    # ---- theirs, which never needs one --------------------------------------
+    try:
+        lg = lgdetect.run(p, threshold=lg_threshold, absence=lg_absence)
+    except lgdetect.BoardEnvMissing as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    lg_state = _lg_state_on_grid(lg.get("events") or [], centres)
+    out["lg"] = {
+        "present": [bool(v) for v in lg_state],
+        "threshold": lg_threshold,
+        "absence": lg_absence,
+        "events": len(lg.get("events") or []),
+        "confusion": _confusion(centres, lg_state, truth, grid),
+    }
+    return out
+
+
+def _camera_truth(capture: Path) -> np.ndarray | None:
+    """(time_s, present) per camera frame, relative to the capture's start."""
+    cv_path = capture.with_name(f"{capture.stem}_cv.json")
+    if not cv_path.is_file():
+        return None
+    frames = (json.loads(cv_path.read_text()).get("frames") or [])
+    if not frames:
+        return None
+    base = frames[0].get("epoch")
+    rows = []
+    for f in frames:
+        e = f.get("epoch")
+        if e is None:
+            continue
+        present = bool(f.get("n", 0) > 0 and float(f.get("max_conf") or 0.0) >= 0.5)
+        rows.append([float(e) - float(base), 1.0 if present else 0.0])
+    return np.asarray(rows) if rows else None
+
+
+def _empty_reference_pool(capture: Path, max_age_h: float, pool: int) -> list[Path]:
+    """Captures the camera saw as completely empty, nearest in time, never this one.
+
+    Both directions in time are allowed: a reference recorded an hour after a
+    run describes the same room as one from an hour before, and requiring
+    "before" alone discards half the evidence for no physical reason.
+    """
+    from datetime import datetime
+
+    def stamp_of(q: Path) -> datetime | None:
+        try:
+            return datetime.strptime(q.stem[:15], "%Y%m%d_%H%M%S")
+        except ValueError:
+            return None
+
+    here = stamp_of(capture)
+    if here is None:
+        return []
+    found: list[tuple[float, Path]] = []
+    seen: set[Path] = set()
+    for root in capture_roots():
+        for cand in _walk_captures(root, MAX_CAPTURE_DEPTH, seen):
+            if cand == capture or cand.suffix not in CAPTURE_SUFFIXES:
+                continue
+            when = stamp_of(cand)
+            if when is None:
+                continue
+            age = abs((here - when).total_seconds())
+            if age > max_age_h * 3600:
+                continue
+            cv_path = cand.with_name(f"{cand.stem}_cv.json")
+            if not cv_path.is_file():
+                continue
+            try:
+                summary = json.loads(cv_path.read_text()).get("summary") or {}
+            except (OSError, json.JSONDecodeError):
+                continue
+            if summary.get("fraction_occupied") == 0.0:
+                found.append((age, cand))
+    found.sort(key=lambda pair: pair[0])
+    return [q for _, q in found[:pool]]
+
+
+def _score_ours(capture: Path, refs: list[Path], grid: float, k: float,
+                centres: np.ndarray) -> tuple[np.ndarray, float, float]:
+    from . import presence as presence_mod
+
+    grids, fs_ref = [], None
+    for r in refs:
+        g, _, f, *_ = _presence_grid(r, 0.0, 120.0, mimo=None, source_mac=None,
+                                     interpolate=True)
+        grids.append(g)
+        fs_ref = f if fs_ref is None else fs_ref
+    g, _, fs, gtimes, *_ = _presence_grid(capture, 0.0, 1e9, mimo=None,
+                                          source_mac=None, interpolate=True)
+    grids = [x for x in grids if x.shape[1] == g.shape[1]]
+    if len(grids) < 2:
+        raise ValueError(
+            "the reference captures do not share this capture's subcarrier width"
+        )
+
+    ref = presence_mod.presence_reference(grids, fs_ref, scale_mode="loo")
+    thr = k * ref["dev_scale"]
+    profiles = ref["profiles"]
+
+    n = max(1, int(round(grid * fs)))
+    times, devs = [], []
+    for start in range(0, g.shape[0] - n + 1, n):
+        w = presence_mod.amplitude_profile(g[start:start + n])
+        near = [presence_mod.baseline_deviation(w, q) for q in profiles]
+        near = [v for v in near if np.isfinite(v)]
+        if not near:
+            continue
+        times.append(float(gtimes[0]) + (start + n / 2) / fs)
+        devs.append(min(near))
+    if not times:
+        raise ValueError("no window in this capture carries a CSI ratio")
+    state = np.interp(centres, np.asarray(times), np.asarray(devs),
+                      left=np.nan, right=np.nan) > thr
+    return state, float(thr), float(ref["dev_scale"])
+
+
+def _lg_state_on_grid(events: list[dict], centres: np.ndarray) -> np.ndarray:
+    """Its +/- events are a step function; sample it. It starts absent."""
+    state = np.zeros(centres.shape, dtype=bool)
+    current, idx = False, 0
+    for ev in sorted(events, key=lambda e: e.get("t", 0.0)):
+        while idx < centres.size and centres[idx] < ev.get("t", 0.0):
+            state[idx] = current
+            idx += 1
+        current = ev.get("kind") == "+"
+    state[idx:] = current
+    return state
+
+
+def _confusion(centres: np.ndarray, state: np.ndarray, truth: np.ndarray,
+               grid: float) -> dict:
+    """Counted only where the camera is unambiguous across the whole window."""
+    tp = fp = fn = tn = 0
+    for centre, predicted in zip(centres, state):
+        m = (truth[:, 0] >= centre - grid / 2) & (truth[:, 0] <= centre + grid / 2)
+        if not m.any():
+            continue
+        frac = float(truth[m, 1].mean())
+        if frac == 0.0:
+            fp, tn = (fp + 1, tn) if predicted else (fp, tn + 1)
+        elif frac > 0.5:
+            tp, fn = (tp + 1, fn) if predicted else (tp, fn + 1)
+    total = tp + fp + fn + tn
+    return {
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn, "total": total,
+        "accuracy": (tp + tn) / total if total else None,
+        "recall": tp / (tp + fn) if (tp + fn) else None,
+        "specificity": tn / (fp + tn) if (fp + tn) else None,
+        "precision": tp / (tp + fp) if (tp + fp) else None,
+    }
 
 
 @app.get("/api/lgparse")
