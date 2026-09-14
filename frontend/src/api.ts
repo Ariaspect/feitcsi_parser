@@ -675,6 +675,10 @@ export interface Phase1 {
   groundTruth: { timeS: number[]; present: boolean[] };
   calibrated: boolean;
   calibrationNote?: string;
+  /** Present when the reference pool sits further from the capture than the
+   *  default window allows. Nothing else detects a pool from a different room,
+   *  so a widened window is the one thing worth saying out loud. */
+  referenceWarning?: string;
   ours: {
     present: boolean[];
     threshold: number;

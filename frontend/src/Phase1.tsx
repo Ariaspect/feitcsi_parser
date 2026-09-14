@@ -249,6 +249,13 @@ export function Phase1({ path, dark }: { path: string; dark: boolean }) {
             </div>
           )}
 
+          {data.referenceWarning && (
+            <div className="text-[11px] leading-relaxed rounded border-l-2 border-amber-500 bg-amber-500/10 px-3 py-2">
+              <span className="font-medium">Do not trust these numbers.</span>{" "}
+              {data.referenceWarning}.
+            </div>
+          )}
+
           {data.ours && (
             <div className="text-[11px] text-muted-foreground leading-relaxed rounded border-l-2 border-muted px-3 py-2">
               <span className="font-medium text-foreground">

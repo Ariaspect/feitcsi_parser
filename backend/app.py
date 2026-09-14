@@ -34,6 +34,10 @@ DEFAULT_PATH = "captures/capture.dat"
 DEFAULT_WINDOW = 200
 
 CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
+# The default window a calibration reference may sit from the capture it
+# scores. Named rather than only defaulted, because /api/phase1 compares
+# against it to flag a caller that widened it.
+_DEFAULT_REF_AGE_H = 6.0
 # .dat = FeitCSI, .bin = MediaTek.
 CAPTURE_SUFFIXES = (".dat", ".bin")
 # Depth cap on the captures/ walk. Deep enough for any sane layout, and a
@@ -558,7 +562,7 @@ def phase1(
     k: float = Query(3.0, gt=0, le=100, description="Threshold as a multiple of the reference's dev_scale"),
     lg_threshold: float = Query(26.0, gt=0, le=200, description="LG's change-detection threshold in dB"),
     lg_absence: float = Query(10.0, gt=0, le=600, description="Seconds without movement before LG reports absence"),
-    ref_age_h: float = Query(6.0, gt=0, le=720, description="How far in time a calibration capture may sit from this one. LOAD-BEARING: the pool screen cannot replace it, see below"),
+    ref_age_h: float = Query(_DEFAULT_REF_AGE_H, gt=0, le=720, description="How far in time a calibration capture may sit from this one. LOAD-BEARING: the pool screen cannot replace it, see below"),
     pool: int = Query(5, ge=2, le=32, description="How many empty captures to calibrate against"),
 ) -> dict:
     """Both detectors on one grid, against the camera, honestly calibrated.
@@ -638,6 +642,19 @@ def phase1(
             out["calibrationNote"] = str(exc)
         else:
             out["calibrated"] = True
+            # ref_age_h is the only guard against a pool from another room, and
+            # it is the caller's to widen. Widening it leaves no other trace --
+            # 20260827 references against a 20260904 capture look healthy in
+            # every reported number (poolSpread 0.283, devScale 0.445) and score
+            # 0.006 specificity. So when the pool sits further out than the
+            # default allows, say so in the payload rather than relying on a
+            # reader to notice referenceAgeH is 197 instead of 6.
+            if ref_age > _DEFAULT_REF_AGE_H:
+                out["referenceWarning"] = (
+                    f"nearest reference is {ref_age:.1f} h away, past the "
+                    f"{_DEFAULT_REF_AGE_H:g} h default; nothing else here "
+                    f"detects a pool that describes a different room"
+                )
             out["ours"] = {
                 "present": [bool(v) for v in state],
                 "threshold": thr,
