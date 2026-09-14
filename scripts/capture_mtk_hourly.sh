@@ -54,6 +54,7 @@ Usage: capture_mtk_hourly.sh [OPTIONS]
   -m, --mode MODE       hourly  55 min every hour      (0 * * * *)
                         30min   29.5 min every half hour (0,30 * * * *)
                         10min   9.5 min every ten min  (*/10 * * * *)
+                        calib   5 min every half hour   (0,30 * * * *)
   -d, --duration SECS   override the mode's capture length
       --show-cron       print the crontab stanza for the mode and exit
   -h, --help            this message
@@ -79,7 +80,14 @@ case $MODE in
     hourly) MODE_DURATION=3300; MODE_SCHEDULE='0 * * * *' ;;
     30min)  MODE_DURATION=1770; MODE_SCHEDULE='0,30 * * * *' ;;
     10min)  MODE_DURATION=570;  MODE_SCHEDULE='*/10 * * * *' ;;
-    *) printf 'unknown mode: %s (expected hourly, 30min or 10min)\n' "$MODE" >&2; exit 2 ;;
+    # calib does the opposite of the others: it deliberately does NOT fill its
+    # interval. Its job is to leave candidate empty-room references lying around
+    # for offline calibration, and the 25 free minutes after each are what make
+    # room for manual experiments -- which take the same flock, so a long capture
+    # here would push them out. Five minutes also matches the experiment length,
+    # so a reference window and a test window are the same shape.
+    calib)  MODE_DURATION=300;  MODE_SCHEDULE='0,30 * * * *' ;;
+    *) printf 'unknown mode: %s (expected hourly, 30min, 10min or calib)\n' "$MODE" >&2; exit 2 ;;
 esac
 
 if [ -n "$DURATION_FLAG" ]; then

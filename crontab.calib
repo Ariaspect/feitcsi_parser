@@ -1,0 +1,11 @@
+# CSI empty-room calibration captures.
+# 5 min at xx:00-05 and xx:30-35, leaving 25 min free either side so a manual
+# experiment can take the flock. Purpose is a steady supply of candidate empty
+# references: the detector's threshold is a multiple of how far two EMPTY
+# captures sit apart, which needs several of them close in time, and the
+# September controlled sessions could not be calibrated at all for want of any.
+# Whether a given run was really empty is decided afterwards by the camera
+# labels, not assumed here.
+MAILTO=""
+RETAIN_DAYS=7
+0,30 * * * * /home/cyphy/feitcsi_parser/scripts/capture_mtk_hourly.sh --mode calib
