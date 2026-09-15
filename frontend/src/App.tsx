@@ -110,7 +110,15 @@ export function App() {
   const [mimo, setMimo] = useState<string>("all");
   // Which condition the capture picker groups by. A view over the listing's
   // metadata, not a directory layout -- see captureGroups below.
-  const [groupBy, setGroupBy] = useState<string>("room/config/scenario");
+  //
+  // Empty until the listing arrives, then set to whichever axis actually
+  // varies. Defaulting to room/config/scenario looked right and is the worst
+  // view of the data we have: room is recorded on one value ("lab_a") because
+  // there is one room, and configuration only on the handful of captures taken
+  // since the flag existed, so every group came out named
+  // "unspecified / unspecified / occupied" -- two thirds of the label constant,
+  // and the same partition scenario alone gives, spelled less readably.
+  const [groupBy, setGroupBy] = useState<string>("");
   // A default applies until the user overrides it. Without this, picking 'all'
   // deliberately and then loading another capture would snap the selection
   // back to 2x1 and quietly fight the user.
@@ -339,6 +347,28 @@ export function App() {
         })),
       }));
   })();
+
+  // Pick the finest grouping the data can actually support: the triple only if
+  // every part of it varies, else the single axis with the most distinct
+  // values. Runs once, and only until the user chooses for themselves.
+  useEffect(() => {
+    if (groupBy || !captures || captures.length === 0) return;
+    const distinct = (k: keyof CaptureFile) =>
+      new Set(
+        captures
+          .map((c) => c[k])
+          .filter((v) => v !== undefined && v !== null && v !== ""),
+      ).size;
+    const triple = ["room", "configuration", "scenario"] as const;
+    if (triple.every((k) => distinct(k) > 1)) {
+      setGroupBy("room/config/scenario");
+      return;
+    }
+    const best = (["scenario", "configuration", "activity", "subject", "room"] as const)
+      .map((k) => [k, distinct(k)] as const)
+      .sort((a, b) => b[1] - a[1])[0];
+    setGroupBy(best && best[1] > 1 ? best[0] : "none");
+  }, [captures, groupBy]);
 
   const groupByItems = [
     { label: "room / config / scenario", value: "room/config/scenario" },
