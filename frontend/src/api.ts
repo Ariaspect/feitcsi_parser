@@ -331,8 +331,8 @@ export async function fetchDoppler(
     // inexact case to report and nothing to anchor against another view.
     exact: true,
     anchored: true,
-    scaleMin: parseFloat(h.get("X-Doppler-ScaleMin") ?? "-60"),
-    scaleMax: parseFloat(h.get("X-Doppler-ScaleMax") ?? "-10"),
+    scaleMin: parseFloat(h.get("X-Doppler-ScaleMin") ?? "-55"),
+    scaleMax: parseFloat(h.get("X-Doppler-ScaleMax") ?? "-15"),
     // The Doppler path runs on the CSI ratio, which divides the gain out.
     agcCorrected: false,
     agcStates: 0,

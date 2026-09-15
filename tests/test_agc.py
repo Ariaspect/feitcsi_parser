@@ -327,7 +327,7 @@ def _bimodal_capture(n: int = 2000, seed: int = 3):
 def test_per_frame_separates_states_one_rssi_cannot():
     amp, rssi, shape, deep, shallow = _bimodal_capture()
     table = build_gain_table([(amp, rssi)])
-    assert table.shape is not None
+    assert table.basis is not None
 
     per_state = apply_gain_table(amp, rssi, table, contiguous=False)
     per_frame = apply_gain_table(amp, rssi, table, contiguous=True)
@@ -362,19 +362,45 @@ def test_dominant_frames_are_untouched_per_frame():
     assert np.array_equal(out[dom], amp[dom].astype(np.float32))
 
 
-def test_shape_is_unit_norm_and_zero_median():
+def test_the_basis_is_orthonormal_and_carries_no_level():
+    """Both properties are load-bearing, and one of them broke silently.
+
+    A plain dot product is only a projection against an ORTHONORMAL basis.
+    Re-centring each row on its own median makes each row level-free but
+    rotates them by different amounts, and two rows that started perpendicular
+    stop being so -- measured here at a correlation of 0.75, whose
+    coefficients then counted the same direction twice and over-subtracted by
+    1.8x. Orthogonality to the constant vector is what carries "no level"
+    instead, because unlike a median it survives being combined.
+    """
     amp, rssi, *_ = _bimodal_capture()
     table = build_gain_table([(amp, rssi)])
-    s = table.shape
-    assert abs(float(np.linalg.norm(s)) - 1.0) < 1e-9
-    assert abs(float(np.median(s[s != 0.0]))) < 1e-9
+    B = table.basis
+    assert B.ndim == 2
+    assert B.shape[0] <= agc.N_COMPONENTS
+    live = np.any(B != 0.0, axis=0)
+    gram = B[:, live] @ B[:, live].T
+    assert np.allclose(gram, np.eye(B.shape[0]), atol=1e-8), gram
+    for row in B:
+        assert abs(float(np.mean(row[live]))) < 1e-8
 
 
-def test_shape_matches_the_injected_direction():
+def test_a_correction_in_the_basis_span_has_no_level_term():
+    amp, rssi, *_ = _bimodal_capture()
+    table = build_gain_table([(amp, rssi)])
+    B = table.basis
+    live = np.any(B != 0.0, axis=0)
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        k = rng.normal(0, 50, B.shape[0])
+        assert abs(float(np.mean((k @ B)[live]))) < 1e-7
+
+
+def test_the_leading_direction_matches_the_injected_one():
     amp, rssi, shape, *_ = _bimodal_capture()
     table = build_gain_table([(amp, rssi)])
     # Sign is arbitrary in an SVD, so compare on absolute correlation.
-    c = abs(float(np.corrcoef(table.shape, shape)[0, 1]))
+    c = abs(float(np.corrcoef(table.basis[0], shape)[0, 1]))
     assert c > 0.99
 
 
@@ -404,7 +430,7 @@ def test_too_few_deltas_yields_no_shape():
     amp, rssi, _ = _capture(n=400, off_every=200)   # only a couple of off frames
     table = build_gain_table([(amp, rssi)])
     if table is not None:
-        assert table.shape is None or table.n_frames >= agc.MIN_SHAPE_FRAMES
+        assert table.basis is None or table.n_frames >= agc.MIN_SHAPE_FRAMES
 
 
 def test_scalar_projection_ignores_nan_bins():
