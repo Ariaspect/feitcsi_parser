@@ -118,6 +118,27 @@ NULL_PERCENTILE = 99.0
 # skipped in favour of the per-state offsets.
 MIN_SHAPE_FRAMES = 30
 
+# Directions removed per frame. One is not enough, and the reason it looked
+# like enough for a while is worth recording: judged by a frame's mean absolute
+# distance from its neighbours over the whole band, one direction already sat
+# at the floor. Judged by BAND REGION it does not. On 20260914_193002 a deviant
+# frame runs -4.9 dB at the low edge, +2.7 in the middle and -4.5 at the high
+# edge; one direction takes the edges to +0.5 and leaves +1.3 in the middle.
+# The edges are what made it read as a dark stripe, so removing only those
+# turns it into a BRIGHT one -- the artifact changes sign instead of going
+# away, which is worse than not correcting it.
+#
+# Three clears it: the same residual reads -0.01 to +0.02 across every region,
+# mean absolute 0.07 dB against 0.72 at one direction. Two does almost nothing
+# (0.70) -- it is the third that carries the middle. Five and beyond buy
+# nothing measurable.
+#
+# The cost is what a correction takes off a DOMINANT frame, where the true
+# answer is zero: 0.02, 0.05, 0.18 dB on three captures and 0.75 on the one
+# that is moving throughout. That last is bounded by the firing floor below,
+# which is measured from this same null and so rises with it.
+N_COMPONENTS = 3
+
 
 class GainTable(NamedTuple):
     """Per-gain-state amplitude shape offsets, in dB, for one capture.
@@ -135,10 +156,12 @@ class GainTable(NamedTuple):
     a few hundredths of a dB, since a median is not linear -- measured at
     +0.04 dB over 20260911_095127 -- but no level offset is ever applied.
 
-    ``shape`` is the single direction the distortions lie along, unit norm and
-    zero median, with 0 in bins no frame could measure. ``null_k`` is the
-    coefficient along it that the dominant state itself reaches 99% of the
-    time -- the floor a frame must clear before it is corrected at all.
+    ``basis`` holds the directions the distortions lie along, one per row:
+    orthonormal, each orthogonal to the constant vector so a correction in
+    their span carries no level term, and 0 in bins no frame could measure.
+    ``null_k`` is the length of the coefficient vector along them that the
+    dominant state itself reaches 99% of the time -- the floor a frame must
+    clear before it is corrected at all.
 
     ``offsets`` remains the fallback for views whose rows are not consecutive
     frames, where a frame has no neighbours to be measured against.
@@ -147,7 +170,7 @@ class GainTable(NamedTuple):
     offsets: dict[int, np.ndarray]
     dominant: int
     n_frames: int
-    shape: np.ndarray | None = None
+    basis: np.ndarray | None = None
     null_k: float = 0.0
 
     @property
@@ -258,20 +281,20 @@ def build_gain_table(
         if np.isfinite(off).any():
             offsets[state] = np.nan_to_num(off, nan=0.0, posinf=0.0, neginf=0.0)
 
-    shape, null_k = _shared_direction(prof_segs, deltas, dominant,
-                                      half_width=half_width, min_local=min_local)
-    if not offsets and shape is None:
+    basis, null_k = _shared_directions(prof_segs, deltas, dominant,
+                                       half_width=half_width, min_local=min_local)
+    if not offsets and basis is None:
         return None
     return GainTable(
         offsets=offsets,
         dominant=dominant,
         n_frames=int(sum(len(v) for v in deltas.values())),
-        shape=shape,
+        basis=basis,
         null_k=null_k,
     )
 
 
-def _shared_direction(
+def _shared_directions(
     prof_segs: Sequence[tuple[np.ndarray, np.ndarray]],
     deltas: dict[int, list[np.ndarray]],
     dominant: int,
@@ -279,18 +302,19 @@ def _shared_direction(
     half_width: int,
     min_local: int,
 ) -> tuple[np.ndarray | None, float]:
-    """The one direction the distortions lie along, and the floor to clear.
+    """The directions the distortions lie along, and the floor to clear.
 
-    The direction is the leading right singular vector of the pooled deltas --
-    90.9% of their variance on 20260911_095127, which is what makes a single
-    scalar per frame a sufficient description. It is re-centred to zero median
-    so a correction along it stays shape-only, exactly as the per-state
-    offsets are.
+    The leading right singular vectors of the pooled deltas, each re-centred
+    to zero median so a correction along them stays shape-only exactly as the
+    per-state offsets are. See ``N_COMPONENTS`` for why it is three and not
+    the one the variance share alone would suggest.
 
-    The floor is that same coefficient measured on DOMINANT-state frames,
-    where the true value is zero. It therefore measures the room's own
-    movement along this direction over the comparison window, which is the
-    thing a real correction has to stand out from.
+    The floor is the length of the coefficient vector measured on
+    DOMINANT-state frames, where the true value is zero. It therefore measures
+    the room's own movement in this subspace over the comparison window, which
+    is the thing a real correction has to stand out from -- and it grows with
+    the subspace, which is what keeps a wider correction from firing more
+    freely than a narrow one.
     """
     rows = [r for v in deltas.values() for r in v]
     if len(rows) < MIN_SHAPE_FRAMES:
@@ -302,20 +326,40 @@ def _shared_direction(
 
     M = D[:, usable]
     _, _, vt = np.linalg.svd(M - M.mean(axis=0), full_matrices=False)
-    direction = vt[0]
-    direction = direction - np.median(direction)
-    norm = float(np.linalg.norm(direction))
-    if not np.isfinite(norm) or norm <= 0:
-        return None, 0.0
-    direction /= norm
 
-    shape = np.zeros(D.shape[1], dtype=float)
-    shape[usable] = direction
+    # The basis has to stay ORTHONORMAL, and the obvious way to make each row
+    # level-free breaks that. Subtracting each row's own median re-centres it
+    # but rotates it by a different amount per row, so two rows that started
+    # perpendicular no longer are -- measured on a synthetic capture with one
+    # injected direction, rows 0 and 1 came out correlated at 0.75 and their
+    # coefficients (-90.0 and +69.6) then counted the same direction twice and
+    # over-subtracted by about 1.8x. A plain dot product is only a projection
+    # against an orthonormal basis.
+    #
+    # So the constant direction is projected out of the whole subspace first
+    # -- which is the linear version of "carry no level", and unlike a median
+    # it survives being combined -- and the result is re-orthonormalised.
+    const = np.ones(usable.sum(), dtype=float)
+    const /= np.linalg.norm(const)
+    kept: list[np.ndarray] = []
+    for direction in vt[: min(N_COMPONENTS, vt.shape[0])]:
+        d = direction - float(direction @ const) * const
+        for prev in kept:                       # Gram-Schmidt against the rest
+            d = d - float(d @ prev) * prev
+        norm = float(np.linalg.norm(d))
+        if not np.isfinite(norm) or norm <= 1e-9:
+            continue
+        kept.append(d / norm)
+    if not kept:
+        return None, 0.0
+    basis = np.zeros((len(kept), D.shape[1]), dtype=float)
+    for row, d in zip(basis, kept):
+        row[usable] = d
 
     # The null: the same coefficient on frames that should read zero.
     nulls: list[float] = []
     for prof, rssi in prof_segs:
-        y = _project(prof, shape)
+        y = _project(prof, basis)
         dom_idx = np.flatnonzero(rssi == dominant)
         if dom_idx.size < min_local + 1:
             continue
@@ -326,25 +370,28 @@ def _shared_direction(
             nb = nb[nb != i]          # never a frame's own reference
             if nb.size < min_local:
                 continue
-            nulls.append(abs(float(y[i] - np.median(y[nb]))))
+            nulls.append(
+                float(np.linalg.norm(y[i] - np.median(y[nb], axis=0)))
+            )
     if not nulls:
-        return shape, 0.0
-    return shape, float(np.percentile(nulls, NULL_PERCENTILE))
+        return basis, 0.0
+    return basis, float(np.percentile(nulls, NULL_PERCENTILE))
 
 
-def _project(profile: np.ndarray, shape: np.ndarray) -> np.ndarray:
-    """Per-frame coefficient along *shape*, NaN bins contributing nothing.
+def _project(profile: np.ndarray, basis: np.ndarray) -> np.ndarray:
+    """Per-frame coefficients along *basis*, NaN bins contributing nothing.
 
-    Done in the scalar domain rather than by taking a per-subcarrier median
-    first: the two agree to a correlation of 0.999949 (median disagreement
-    0.28 against a typical coefficient of 38.6) and this one is 13x cheaper,
-    which is what makes a per-frame correction affordable inside a decode.
+    Returns ``(n_frames, n_components)``. Done in the coefficient domain
+    rather than by taking a per-subcarrier median first: the two agree to a
+    correlation of 0.999949 (median disagreement 0.28 against a typical
+    coefficient of 38.6) and this one is 13x cheaper, which is what makes a
+    per-frame correction affordable inside a decode.
     """
-    good = shape != 0.0
+    good = np.any(basis != 0.0, axis=0)
     if not good.any():
-        return np.zeros(profile.shape[0], dtype=float)
+        return np.zeros((profile.shape[0], basis.shape[0]), dtype=float)
     block = np.where(np.isfinite(profile[:, good]), profile[:, good], 0.0)
-    return block @ shape[good]
+    return block @ basis[:, good].T
 
 
 def apply_gain_table(
@@ -361,7 +408,10 @@ def apply_gain_table(
     *contiguous* declares that consecutive rows really are consecutive frames,
     which is what lets each frame be measured against its own neighbours and
     corrected individually -- the mode that resolves the states RSSI cannot
-    separate. Without it only the per-state offsets apply, because a frame
+    separate. Each such frame is corrected along every direction in
+    ``basis``, not just the loudest: removing only the loudest takes the band
+    edges out and leaves the middle, which turns a dark stripe into a bright
+    one rather than into nothing. See ``N_COMPONENTS``. Without it only the per-state offsets apply, because a frame
     whose neighbours are seconds apart has nothing local to be judged against.
     That is the same distinction ``backend.ratio`` draws with ``native``.
 
@@ -385,13 +435,13 @@ def apply_gain_table(
     off_state = r != table.dominant
     handled = np.zeros(amp.shape[0], dtype=bool)
 
-    if contiguous and table.shape is not None and np.any(off_state):
-        shape32 = table.shape.astype(np.float32)
+    if contiguous and table.basis is not None and np.any(off_state):
+        basis32 = table.basis.astype(np.float32)
         with _quiet_all_nan(), np.errstate(invalid="ignore"):
             prof = np.asarray(amp, dtype=float) - np.nanmedian(
                 np.asarray(amp, dtype=float), axis=1, keepdims=True
             )
-        y = _project(prof, table.shape)
+        y = _project(prof, table.basis)
         dom_idx = np.flatnonzero(~off_state)
         if dom_idx.size >= min_local:
             for i in np.flatnonzero(off_state):
@@ -400,7 +450,7 @@ def apply_gain_table(
                 nb = dom_idx[lo:hi]
                 if nb.size < min_local:
                     continue
-                k = float(y[i] - np.median(y[nb]))
+                k = y[i] - np.median(y[nb], axis=0)
                 # Measured, not assumed: below the dominant state's own 99th
                 # percentile this frame's deviation is indistinguishable from
                 # the room, so the per-frame measurement is inconclusive and
@@ -410,8 +460,8 @@ def apply_gain_table(
                 # fallback from every frame the floor rejected, which on a
                 # capture where almost nothing clears it leaves the artifact
                 # whole.
-                if abs(k) > table.null_k:
-                    out[i] -= np.float32(k) * shape32
+                if float(np.linalg.norm(k)) > table.null_k:
+                    out[i] -= k.astype(np.float32) @ basis32
                     handled[i] = True
 
     # Anything the per-frame pass could not reach falls back to its state's
