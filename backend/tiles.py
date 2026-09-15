@@ -1147,19 +1147,27 @@ DOPPLER_DB_FLOOR = 1e-6
 # window length, so blue in one capture and blue in another are the same
 # modulation depth.
 #
-# Drawn from the measured distribution rather than picked. Over fourteen
-# September captures at the default window, once the static profile is divided
-# out, the complex panel runs -60.5 dB at its 0.1st percentile to -10.6 at its
-# 99.9th and the phase panel -61.3 to -5.4. This range holds 99.8% and 99.5%
-# of their cells respectively, clipping 0.2-0.4% at the bottom -- which is the
-# noise floor -- and under 0.2% at the top, where a motion event saturating
-# reads as "louder than the scale" rather than being compressed into it.
+# Drawn from the measured distribution rather than picked, and asymmetric on
+# purpose. Over fourteen September captures at the default window, once the
+# static profile is divided out, the complex panel's percentiles run p5 -54.5,
+# p50 -44.1, p95 -23.0, p99 -16.5, and the phase panel's p5 -55.3, p50 -44.5,
+# p95 -30.4, p99 -20.8.
 #
-# The ceiling is -10 rather than 0 because nothing reaches 0: 0 dB would be
-# 100% modulation of the static path, and the loudest cell measured is 40x
-# quieter than that. A range ending at 0 spends a fifth of the colour ramp on
-# values that never occur.
-DOPPLER_SCALE_DB: tuple[float, float] = (-60.0, -10.0)
+# The two ends are not worth the same. Everything below about the 5th
+# percentile is the noise floor, which carries nothing and only dilutes the
+# ramp, so clipping it to a uniform dark is a gain. The top is where the
+# motion events are, and saturating those costs the difference between
+# "moving" and "moving a lot". So the floor is set where it clips 4-6% and the
+# ceiling where it clips under 1%: 95.3% of the complex panel's cells and
+# 93.9% of the phase panel's land inside, against 99.8% and 99.4% for the
+# -60..-10 this replaced, for a ramp a fifth tighter.
+#
+# Tighter still was measured and rejected: -52 as a floor clips 11-13% and
+# -50 clips 18-21%, which starts swallowing real quiet structure rather than
+# noise. The ceiling stays well short of 0 because nothing reaches it -- 0 dB
+# would be 100% modulation of the static path, and the loudest cell measured
+# is over 20x quieter.
+DOPPLER_SCALE_DB: tuple[float, float] = (-55.0, -15.0)
 
 
 # Frames sampled to measure a capture's static profile, and how far it may
