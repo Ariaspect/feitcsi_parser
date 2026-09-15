@@ -144,6 +144,13 @@ export interface Tile {
   /** False when a correction metric had no absolute orientation to anchor
    *  to, so this tile's polarity is not comparable with another view's. */
   anchored: boolean;
+  /** True when the receiver's per-gain-state amplitude distortion was removed
+   *  from this tile. False means the values are exactly as decoded: the
+   *  toggle is off, the metric is one the correction does not touch, the
+   *  capture is not MediaTek, or its gain never stepped. */
+  agcCorrected: boolean;
+  /** How many gain states carried a correction. 0 when agcCorrected is false. */
+  agcStates: number;
   vmin: number;
   vmax: number;
   pLow: number; // 1st percentile of finite values — robust scale for amplitude
@@ -193,6 +200,7 @@ export async function fetchTile(
   mimo?: string | null,
   sourceMac?: string | null,
   interpolate?: boolean,
+  agc?: boolean,
 ): Promise<Tile> {
   const url =
     `/api/tile?path=${encodeURIComponent(path)}` +
@@ -201,7 +209,8 @@ export async function fetchTile(
     // Omit when true: that is the backend's own default, and every existing
     // caller that never heard of this parameter must keep building the same
     // URL it always has.
-    (interpolate === false ? "&interpolate=false" : "");
+    (interpolate === false ? "&interpolate=false" : "") +
+    (agc === false ? "&agc=false" : "");
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text();
@@ -229,6 +238,10 @@ export async function fetchTile(
     exact: h.get("X-Tile-Exact") === "1",
     // Absent header means an older backend that always anchored implicitly.
     anchored: h.get("X-Tile-Anchored") !== "0",
+    // Absent header means a backend older than the correction, which never
+    // applied one -- so "not corrected" is the honest reading, not "unknown".
+    agcCorrected: h.get("X-Tile-Agc") === "1",
+    agcStates: parseInt(h.get("X-Tile-AgcStates") ?? "0", 10),
     vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
     vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
     pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),
@@ -310,6 +323,9 @@ export async function fetchDoppler(
     // inexact case to report and nothing to anchor against another view.
     exact: true,
     anchored: true,
+    // The Doppler path runs on the CSI ratio, which divides the gain out.
+    agcCorrected: false,
+    agcStates: 0,
     vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
     vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
     pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),

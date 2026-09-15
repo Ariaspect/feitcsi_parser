@@ -308,6 +308,15 @@ def tile(
         "nulls (pilots, DC/guard band) along subcarrier, and sampling gaps "
         "along time. False leaves both as NaN, as decoded on the wire.",
     ),
+    agc: bool = Query(
+        True,
+        description="Remove the receiver's own per-gain-state amplitude "
+        "distortion. The NIC's AGC holds the level flat but each gain state "
+        "has its own frequency response, so gain steps show as single-frame "
+        "vertical stripes in the amplitude view that are the radio, not the "
+        "room. Affects amplitude and the CIR built on it; the CSI ratio "
+        "divides the gain out and is left alone. MediaTek captures only.",
+    ),
 ) -> Response:
     """Pre-aggregated grid at display resolution, as raw little-endian float32.
 
@@ -338,6 +347,7 @@ def tile(
     grid, meta = compute_tile(
         p, t0, t1, width, metric,
         mimo=mimo_filter, source_mac=mac_filter, interpolate=interpolate,
+        agc_correct=agc,
     )
 
     body = grid.astype("<f4", copy=False).tobytes()
@@ -366,6 +376,12 @@ def tile(
             # 0 when a correction metric had no absolute orientation to
             # anchor to, so its polarity is not comparable with another view.
             "X-Tile-Anchored": "1" if meta["anchored"] else "0",
+            # 1 when the AGC correction actually applied. 0 means the values
+            # are exactly as decoded -- the toggle is off, the metric is one
+            # the table does not touch, the capture is not MediaTek, or it
+            # never changed gain state.
+            "X-Tile-Agc": "1" if meta["agc_corrected"] else "0",
+            "X-Tile-AgcStates": str(meta["agc_states"]),
             "X-Tile-VMin": str(meta["vmin"]),
             "X-Tile-VMax": str(meta["vmax"]),
             "X-Tile-PLow": str(meta["p_low"]),

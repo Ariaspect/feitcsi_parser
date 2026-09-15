@@ -75,6 +75,13 @@ interface HeatmapProps {
    * shows the data as decoded off the wire, NaN gaps and all. Defaults to
    * true, matching the backend's own default. */
   interpolate?: boolean;
+  /** Remove the receiver's own per-gain-state amplitude distortion. The AGC
+   * holds the level flat but each gain state has its own frequency response,
+   * so gain steps show as single-frame vertical stripes that are the radio
+   * rather than the room. Only reaches metrics built on amplitude; the
+   * backend ignores it for the rest. Defaults to true, matching the
+   * backend's own default. */
+  agc?: boolean;
   /** Dark mode: canvas text/axes/crosshair colors adapt. */
   dark?: boolean;
 }
@@ -137,6 +144,7 @@ interface PropsMirror {
   mimo?: string | null;
   sourceMac?: string | null;
   interpolate: boolean;
+  agc: boolean;
   dark?: boolean;
 }
 
@@ -150,6 +158,7 @@ interface FetchKey {
   mimo?: string | null;
   sourceMac?: string | null;
   interpolate: boolean;
+  agc: boolean;
 }
 
 export function Heatmap({
@@ -172,6 +181,7 @@ export function Heatmap({
   mimo,
   sourceMac,
   interpolate = true,
+  agc = true,
   dark,
 }: HeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -245,6 +255,7 @@ export function Heatmap({
     mimo,
     sourceMac,
     interpolate,
+    agc,
     dark,
   };
 
@@ -789,6 +800,7 @@ export function Heatmap({
           mimo: props.mimo,
           sourceMac: props.sourceMac,
           interpolate: props.interpolate,
+          agc: props.agc,
         };
       },
       // A subcarrier-only change (shift+wheel, shift+drag) reaches the
@@ -802,7 +814,8 @@ export function Heatmap({
         a.width === b.width &&
         a.mimo === b.mimo &&
         a.sourceMac === b.sourceMac &&
-        a.interpolate === b.interpolate,
+        a.interpolate === b.interpolate &&
+        a.agc === b.agc,
       run: (key, signal) => {
         const props = propsRef.current;
         if (props?.source) {
@@ -818,6 +831,7 @@ export function Heatmap({
           key.mimo,
           key.sourceMac,
           key.interpolate,
+          key.agc,
         );
       },
       deliver: (_key, tile) => {

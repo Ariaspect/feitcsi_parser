@@ -29,7 +29,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon } from "lucide-react";
+import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon, SlidersHorizontalIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -122,6 +122,15 @@ export function App() {
   // the wire, NaN gaps included -- useful for judging what interpolation is
   // actually doing to a given capture.
   const [interpolate, setInterpolate] = useState<boolean>(true);
+  // Removal of the receiver's own per-gain-state amplitude distortion. The
+  // NIC's AGC holds the digital level flat but each gain state has its own
+  // frequency response, so a gain step lands in the amplitude view as an
+  // isolated single-frame vertical stripe that is the radio, not the room --
+  // 7.8-72% of frames sit in a non-dominant state across the September
+  // captures, at a median shape error of 3.88 dB. On by default to match the
+  // backend. Off shows the amplitude exactly as decoded, which is what to use
+  // when judging the correction itself.
+  const [agc, setAgc] = useState<boolean>(true);
   // STFT window, in seconds rather than frames: frame rate runs 5-18 Hz across
   // captures, so a fixed frame count would mean a different physical window on
   // every file. Longer window = finer frequency resolution, fewer columns.
@@ -533,6 +542,17 @@ export function App() {
           </Button>
 
           <Button
+            variant={agc ? "default" : "outline"}
+            size="sm"
+            onClick={() => setAgc((v) => !v)}
+            className="h-8"
+            title="Remove the receiver's per-gain-state amplitude distortion. Its AGC holds the level flat but each gain state has its own frequency response, so gain steps show as single-frame vertical stripes that are the radio rather than the room. Affects the amplitude and CIR panels; the CSI ratio divides the gain out and is untouched. MediaTek captures only."
+          >
+            <SlidersHorizontalIcon data-icon="inline-start" />
+            AGC Correction {agc ? "On" : "Off"}
+          </Button>
+
+          <Button
             variant={swapActive ? "default" : "outline"}
             size="sm"
             onClick={() => setSwapCorrected((v) => !v)}
@@ -613,6 +633,7 @@ export function App() {
               mimo={mimo}
               sourceMac={sourceMac}
               interpolate={interpolate}
+              agc={agc}
               dark={dark}
             />
             <PresenceBar
@@ -747,6 +768,7 @@ export function App() {
               mimo={mimo}
               sourceMac={sourceMac}
               interpolate={interpolate}
+              agc={agc}
               dark={dark}
             />
               </div>
