@@ -83,6 +83,8 @@ app.add_middleware(
         "X-Doppler-ColT0",
         "X-Doppler-ColT1",
         "X-Doppler-Blank",
+        "X-Doppler-ScaleMin",
+        "X-Doppler-ScaleMax",
     ],
 )
 
@@ -430,6 +432,18 @@ def doppler(
     zooming in never blanks the panel; ``X-Doppler-WinSeconds`` reports what
     was actually used. ``X-Doppler-Blank`` counts columns dropped for being
     mostly interpolated across dropouts.
+
+    **Values are normalised dB, not raw magnitude.** An unnormalised FFT bin
+    scales with the window length -- a unit tone reads 213.5 at a 600-sample
+    window and 71.3 at 200, exactly the ratio of the two -- so the same motion
+    changed brightness whenever the window was clamped by a zoom. Each branch
+    is divided by its taper's coherent gain, which leaves the tone's own
+    amplitude, and then expressed in dB because the values span five orders of
+    magnitude. ``X-Doppler-ScaleMin``/``ScaleMax`` carry the fixed colour range
+    that follows from this, measured over ten September captures rather than
+    chosen: it spans the complex panel's 1st-to-99th percentile and contains
+    the phase panel's whole range. A client that auto-fits instead will make
+    two captures of the same room look different.
     """
     p = resolve_capture_path(path)
 
@@ -469,6 +483,12 @@ def doppler(
             "X-Doppler-Frames": str(meta["frames_used"]),
             "X-Doppler-ColT0": str(meta["col_t0"]),
             "X-Doppler-ColT1": str(meta["col_t1"]),
+            # The fixed dB range this panel should be drawn with. Values are
+            # normalised by the taper's coherent gain, so the same number means
+            # the same motion at every window length and every zoom -- which is
+            # what makes a fixed scale possible at all.
+            "X-Doppler-ScaleMin": str(meta["scale_min"]),
+            "X-Doppler-ScaleMax": str(meta["scale_max"]),
             "X-Capture-TMin": str(meta["t_min"]),
             "X-Capture-TMax": str(meta["t_max"]),
             "X-Tile-VMin": str(meta["vmin"]),

@@ -276,6 +276,14 @@ export interface DopplerTile extends Tile {
   win: number;
   hop: number;
   winSeconds: number;
+  /** The fixed colour range this panel should use, in dB. Doppler values are
+   *  normalised by the taper's coherent gain and served in dB, so the same
+   *  number means the same motion in every capture. Auto-fitting instead is
+   *  what made two captures of the same room look different: one spanning
+   *  0..0.2 in raw magnitude and another 0..7.0, both stretched across the
+   *  whole ramp. */
+  scaleMin: number;
+  scaleMax: number;
 }
 
 export async function fetchDoppler(
@@ -323,6 +331,8 @@ export async function fetchDoppler(
     // inexact case to report and nothing to anchor against another view.
     exact: true,
     anchored: true,
+    scaleMin: parseFloat(h.get("X-Doppler-ScaleMin") ?? "-60"),
+    scaleMax: parseFloat(h.get("X-Doppler-ScaleMax") ?? "-10"),
     // The Doppler path runs on the CSI ratio, which divides the gain out.
     agcCorrected: false,
     agcStates: 0,

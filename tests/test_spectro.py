@@ -210,3 +210,34 @@ def test_a_real_peak_on_top_of_a_slope_is_still_found() -> None:
 
     assert found["found"]
     assert found["hz"] == pytest.approx(0.25, abs=0.02)
+
+
+def test_coherent_gain_takes_the_window_length_out_of_a_tone() -> None:
+    """The normalisation a fixed Doppler colour range rests on.
+
+    An unnormalised bin scales with the window; divided by the taper's
+    coherent gain it reports the tone's own amplitude instead.
+    """
+    from backend.spectro import coherent_gain, stft_complex
+
+    fs = 20.0
+    t = np.arange(8000) / fs
+    sig = np.exp(2j * np.pi * 0.4 * t)[:, None] * np.ones((1, 8))
+    seen = []
+    for win in (600, 400, 200, 100):
+        spec, _, _ = stft_complex(sig, fs, win, win // 2, zero_pad=512)
+        seen.append(float(np.sqrt(spec).max()) / coherent_gain("blackmanharris", win))
+    assert all(abs(v - 1.0) < 0.02 for v in seen), seen
+    # Without it the same tone spans a factor of six across those windows.
+    raw = []
+    for win in (600, 100):
+        spec, _, _ = stft_complex(sig, fs, win, win // 2, zero_pad=512)
+        raw.append(float(np.sqrt(spec).max()))
+    assert raw[0] / raw[1] > 5.0
+
+
+def test_coherent_gain_rejects_an_unknown_taper() -> None:
+    from backend.spectro import coherent_gain
+
+    with pytest.raises(ValueError, match="taper must be one of"):
+        coherent_gain("gaussian", 64)

@@ -170,6 +170,22 @@ def _taper(name: str, win: int) -> np.ndarray:
     )
 
 
+def coherent_gain(name: str, win: int) -> float:
+    """Sum of the taper's samples -- what a unit tone's bin magnitude comes to.
+
+    An unnormalised FFT bin scales with the window length, so the same motion
+    reads 3x larger in a 30 s window than in a 10 s one. Measured on a unit
+    tone: peak 213.5 at win=600 against 71.3 at win=200, exactly the ratio of
+    the windows. Dividing by this returns the tone's own amplitude instead,
+    which is what makes a colour scale mean the same thing at every zoom --
+    the same tone then reads 0.99 at every window from 100 samples up.
+
+    A real series wants half of this, because a real cosine of amplitude A
+    splits its energy between +f and -f and each side carries A/2.
+    """
+    return float(_taper(name, win).sum())
+
+
 def stft_complex(
     sig: np.ndarray,
     fs: float,

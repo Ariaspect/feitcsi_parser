@@ -96,6 +96,10 @@ interface DopplerGeom {
   rows: number;
   fMin: number;
   fMax: number;
+  /** Fixed colour bounds in dB, from the backend so the number and the
+   *  measurement behind it stay in one place. */
+  scaleMin: number;
+  scaleMax: number;
 }
 
 export function App() {
@@ -238,8 +242,10 @@ export function App() {
       .then(([cx, ph]) => {
         if (dopplerGeomKeyRef.current === key) {
           setDopplerGeom({
-            complex: { rows: cx.height, fMin: cx.fMin, fMax: cx.fMax },
-            phase: { rows: ph.height, fMin: ph.fMin, fMax: ph.fMax },
+            complex: { rows: cx.height, fMin: cx.fMin, fMax: cx.fMax,
+                       scaleMin: cx.scaleMin, scaleMax: cx.scaleMax },
+            phase: { rows: ph.height, fMin: ph.fMin, fMax: ph.fMax,
+                     scaleMin: ph.scaleMin, scaleMax: ph.scaleMax },
           });
         }
       })
@@ -811,7 +817,9 @@ export function App() {
                       captureTMin={meta.t_min}
                       captureTMax={meta.t_max}
                       title="Doppler — complex ratio (signed)"
-                      colorLabel="Magnitude"
+                      colorLabel="Magnitude (dB)"
+                      minValue={dopplerGeom.complex.scaleMin}
+                      maxValue={dopplerGeom.complex.scaleMax}
                       axisLabel="Doppler (Hz)"
                       yDomain={[dopplerGeom.complex.fMin, dopplerGeom.complex.fMax]}
                       source={dopplerSource("csi_ratio_complex")}
@@ -831,7 +839,9 @@ export function App() {
                       captureTMin={meta.t_min}
                       captureTMax={meta.t_max}
                       title="Doppler — time-unwrapped ratio phase"
-                      colorLabel="Magnitude"
+                      colorLabel="Magnitude (dB)"
+                      minValue={dopplerGeom.phase.scaleMin}
+                      maxValue={dopplerGeom.phase.scaleMax}
                       axisLabel="Doppler (Hz)"
                       yDomain={[dopplerGeom.phase.fMin, dopplerGeom.phase.fMax]}
                       source={dopplerSource("csi_ratio_phase_time_unwrapped")}
