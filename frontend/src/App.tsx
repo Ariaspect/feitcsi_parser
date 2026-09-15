@@ -17,6 +17,7 @@ import {
   SelectContent,
   SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -107,6 +108,9 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
+  // Which condition the capture picker groups by. A view over the listing's
+  // metadata, not a directory layout -- see captureGroups below.
+  const [groupBy, setGroupBy] = useState<string>("room/config/scenario");
   // A default applies until the user overrides it. Without this, picking 'all'
   // deliberately and then loading another capture would snap the selection
   // back to 2x1 and quietly fight the user.
@@ -294,13 +298,57 @@ export function App() {
     });
   };
 
-  const captureItems = (captures ?? []).map((c) => ({
-    // The list gets far more room than the trigger (the popup sizes to its
-    // content below), so it shows the size too and only elides a name long
-    // enough to beat even that.
-    label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
-    value: c.path,
-  }));
+  // Grouping is done here, over what the listing reports, rather than by
+  // pointing the API at a directory tree: build_dataset_tree.py can arrange
+  // the same captures along any axes, a capture belongs to several groupings
+  // at once, and a second on-disk copy inside captures/ would be listed twice
+  // and picked twice as a calibration reference.
+  const captureGroups = (() => {
+    const key = (c: CaptureFile) =>
+      groupBy === "none"
+        ? ""
+        : groupBy === "room/config/scenario"
+          ? [c.room, c.configuration, c.scenario].map((v) => v ?? "unspecified").join(" / ")
+          : ((c as unknown as Record<string, unknown>)[groupBy] as
+              | string
+              | undefined) ?? "unspecified";
+
+    const byKey = new Map<string, CaptureFile[]>();
+    for (const c of captures ?? []) {
+      const k = key(c);
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k)!.push(c);
+    }
+    // Everything unknown sinks to the bottom; the rest sorts by name, so the
+    // ordering does not move around as captures arrive.
+    const unknown = (k: string) => k === "" || k.includes("unspecified");
+    return [...byKey.entries()]
+      .sort((a, b) =>
+        unknown(a[0]) !== unknown(b[0])
+          ? Number(unknown(a[0])) - Number(unknown(b[0]))
+          : a[0].localeCompare(b[0]),
+      )
+      .map(([label, items]) => ({
+        label,
+        items: items.map((c) => ({
+          // The list gets far more room than the trigger (the popup sizes to
+          // its content below), so it shows the size too and only elides a
+          // name long enough to beat even that.
+          label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
+          value: c.path,
+        })),
+      }));
+  })();
+
+  const groupByItems = [
+    { label: "room / config / scenario", value: "room/config/scenario" },
+    { label: "room", value: "room" },
+    { label: "configuration", value: "configuration" },
+    { label: "scenario", value: "scenario" },
+    { label: "subject", value: "subject" },
+    { label: "activity", value: "activity" },
+    { label: "no grouping", value: "none" },
+  ];
 
   const mimoItems = [
     { label: "all", value: "all" },
@@ -322,7 +370,7 @@ export function App() {
             <Select
               value={path}
               onValueChange={(v) => v && setPath(v)}
-              items={captureItems}
+              items={captureGroups.flatMap((g) => g.items)}
             >
               <SelectTrigger id="path" className="w-72 h-8" size="sm">
                 {/* The trigger formats the selection itself rather than taking
@@ -353,13 +401,42 @@ export function App() {
                   maxWidth: "min(34rem, calc(100vw - 2rem))",
                 }}
               >
-                <SelectGroup>
-                  {captureItems.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
+                {captureGroups.map((group) => (
+                  <SelectGroup key={group.label || "all"}>
+                    {group.label && (
+                      <SelectLabel className="text-[10px] uppercase tracking-wide">
+                        {group.label}  ({group.items.length})
+                      </SelectLabel>
+                    )}
+                    {group.items.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-0.5">
+            <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">
+              Group by
+            </Label>
+            <Select
+              value={groupBy}
+              onValueChange={(v) => v && setGroupBy(v)}
+              items={groupByItems}
+            >
+              <SelectTrigger className="w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {groupByItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

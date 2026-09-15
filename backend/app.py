@@ -1135,6 +1135,39 @@ def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
             yield entry
 
 
+def _capture_conditions(capture: Path) -> dict:
+    """room/configuration/scenario for a capture, as far as they are recorded.
+
+    ``scenario`` falls back to what the camera saw, so the unattended runs sort
+    into empty/partial/occupied instead of piling up as unknown. Absent rather
+    than null when nothing is known, so a client can tell "not recorded" from
+    a recorded blank.
+    """
+    out: dict = {}
+    meta_path = capture.with_name(f"{capture.stem}_meta.json")
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        for key in ("room", "configuration", "scenario", "subject",
+                    "activity", "facing", "distance_m"):
+            if meta.get(key) not in (None, ""):
+                out[key] = meta[key]
+    if "scenario" not in out:
+        cv_path = capture.with_name(f"{capture.stem}_cv.json")
+        if cv_path.is_file():
+            try:
+                frac = json.loads(cv_path.read_text())["summary"]["fraction_occupied"]
+            except (OSError, json.JSONDecodeError, KeyError):
+                frac = None
+            if frac is not None:
+                out["scenario"] = ("empty" if frac == 0.0
+                                   else "occupied" if frac > 0.5 else "partial")
+                out["occupancy"] = float(frac)
+    return out
+
+
 @app.get("/api/captures")
 def list_captures() -> list[dict]:
     """List capture files under the captures/ directory, recursively.
@@ -1166,6 +1199,14 @@ def list_captures() -> list[dict]:
             "path": str(entry),
             "size_bytes": st.st_size,
             "mtime": st.st_mtime,
+            # The conditions a capture was recorded under, for grouping the
+            # picker. Read from the sidecar rather than from a directory
+            # layout: scripts/build_dataset_tree.py can arrange the same
+            # captures by any axes, and a capture belongs to several groupings
+            # at once. Filing them on disk instead would also put a second copy
+            # of every capture inside captures/, where the walk above would
+            # list it twice and the reference pooling would pick it twice.
+            **_capture_conditions(entry),
         })
 
     files.sort(key=lambda f: f["mtime"], reverse=True)

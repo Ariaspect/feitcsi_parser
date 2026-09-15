@@ -20,6 +20,20 @@ export interface CaptureFile {
   path: string;
   size_bytes: number;
   mtime: number;
+  /** Conditions the capture was recorded under, as far as they were recorded.
+   *  Absent rather than null when unknown, so "not recorded" is distinguishable
+   *  from a recorded blank. `scenario` falls back to what the camera saw
+   *  (empty / partial / occupied) when nothing was declared. */
+  room?: string;
+  configuration?: string;
+  scenario?: string;
+  subject?: string;
+  activity?: string;
+  facing?: string;
+  distance_m?: number;
+  /** Camera-measured occupied fraction, present only with the scenario
+   *  fallback above. */
+  occupancy?: number;
 }
 
 export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {

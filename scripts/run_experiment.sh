@@ -40,6 +40,16 @@ FACING=${FACING:-}
 ACTIVITY=${ACTIVITY:-}
 OPERATOR_AT=${OPERATOR_AT:-}
 
+# The three axes a dataset gets sliced along: which room, how it was arranged,
+# and what the subject did. They are recorded here rather than inferred later
+# because only the first is ever recoverable from the data -- and only roughly,
+# via the empty-room profile. Kept flat as strings so a value can be invented
+# on the spot; scripts/build_dataset_tree.py is what turns them into folders,
+# and it treats an unset field as "unspecified" rather than guessing.
+ROOM=${ROOM:-}
+CONFIGURATION=${CONFIGURATION:-}
+SCENARIO=${SCENARIO:-}
+
 while [ $# -gt 0 ]; do
     case $1 in
         --distance)   DISTANCE_M=${2:-}; shift 2 ;;
@@ -50,6 +60,12 @@ while [ $# -gt 0 ]; do
         --activity=*) ACTIVITY=${1#*=}; shift ;;
         --operator-at)   OPERATOR_AT=${2:-}; shift 2 ;;
         --operator-at=*) OPERATOR_AT=${1#*=}; shift ;;
+        --room)       ROOM=${2:-}; shift 2 ;;
+        --room=*)     ROOM=${1#*=}; shift ;;
+        --config)     CONFIGURATION=${2:-}; shift 2 ;;
+        --config=*)   CONFIGURATION=${1#*=}; shift ;;
+        --scenario)   SCENARIO=${2:-}; shift 2 ;;
+        --scenario=*) SCENARIO=${1#*=}; shift ;;
         --)           shift; break ;;
         *)            break ;;
     esac
@@ -58,7 +74,8 @@ done
 POSITION=${1:-}
 [ -n "$POSITION" ] || {
     echo "usage: run_experiment.sh [--distance M] [--facing F] [--activity A]" >&2
-    echo "                            [--operator-at WHERE] POSITION [NOTE...]" >&2; exit 2; }
+    echo "                            [--operator-at WHERE] [--room R] [--config C]" >&2
+    echo "                            [--scenario S] POSITION [NOTE...]" >&2; exit 2; }
 shift
 NOTE="$*"
 
@@ -103,6 +120,7 @@ cat <<BANNER
 
   position : $POSITION
   distance : ${DISTANCE_M:-not recorded}${DISTANCE_M:+ m from $DISTANCE_REF}
+  dataset  : room ${ROOM:-?} / config ${CONFIGURATION:-?} / scenario ${SCENARIO:-?}
   subject  : facing ${FACING:-?} / ${ACTIVITY:-?}
   operator : waits at ${OPERATOR_AT:-?}
   protocol : 0-${PHASE1_END}s EMPTY | ${PHASE1_END}-${PHASE2_END}s SITTING | ${PHASE2_END}-${DURATION}s EMPTY
@@ -157,6 +175,7 @@ done
 STAMP="$STAMP" POSITION="$POSITION" SAFE_POSITION="$SAFE_POSITION" NOTE="$NOTE" \
 DISTANCE_M="$DISTANCE_M" DISTANCE_REF="$DISTANCE_REF" \
 FACING="$FACING" ACTIVITY="$ACTIVITY" OPERATOR_AT="$OPERATOR_AT" \
+ROOM="$ROOM" CONFIGURATION="$CONFIGURATION" SCENARIO="$SCENARIO" \
 DURATION="$DURATION" PHASE1_END="$PHASE1_END" PHASE2_END="$PHASE2_END" \
 START_EPOCH="$START_EPOCH" OFFSET="$OFFSET" FRAMES="$FRAMES" LEAD_IN="$LEAD_IN" \
 python3 - "$META" <<'PY'
@@ -206,7 +225,8 @@ if os.environ.get("DISTANCE_M"):
     meta["distance_ref"] = os.environ.get("DISTANCE_REF") or "nic"
     meta["distance_source"] = "measured"
 
-for key in ("facing", "activity", "operator_at"):
+for key in ("facing", "activity", "operator_at",
+            "room", "configuration", "scenario"):
     value = os.environ.get(key.upper())
     if value:
         meta[key] = value
