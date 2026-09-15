@@ -3,7 +3,7 @@ import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, trun
 import { TWILIGHT } from "./colormap";
 import { Heatmap } from "./Heatmap";
 import { LgDetector } from "./LgDetector";
-import { LgParser } from "./LgParser";
+import { Phase1 } from "./Phase1";
 import { PresenceBar } from "./PresenceBar";
 import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
@@ -17,6 +17,7 @@ import {
   SelectContent,
   SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -28,7 +29,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon } from "lucide-react";
+import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon, SlidersHorizontalIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
 const DEFAULT_REFRESH_MS = 300;
@@ -68,13 +69,15 @@ function FoldedPanel({
   title,
   hint,
   children,
+  defaultOpen = false,
 }: {
   title: string;
   hint: string;
   children: React.ReactNode;
+  defaultOpen?: boolean;
 }) {
   return (
-    <Collapsible>
+    <Collapsible defaultOpen={defaultOpen}>
       <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[panel-open]:rotate-90" />
         <span className="text-sm font-medium">{title}</span>
@@ -93,6 +96,10 @@ interface DopplerGeom {
   rows: number;
   fMin: number;
   fMax: number;
+  /** Fixed colour bounds in dB, from the backend so the number and the
+   *  measurement behind it stay in one place. */
+  scaleMin: number;
+  scaleMax: number;
 }
 
 export function App() {
@@ -105,6 +112,9 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
+  // Which condition the capture picker groups by. A view over the listing's
+  // metadata, not a directory layout -- see captureGroups below.
+  const [groupBy, setGroupBy] = useState<string>("room/config/scenario");
   // A default applies until the user overrides it. Without this, picking 'all'
   // deliberately and then loading another capture would snap the selection
   // back to 2x1 and quietly fight the user.
@@ -116,6 +126,15 @@ export function App() {
   // the wire, NaN gaps included -- useful for judging what interpolation is
   // actually doing to a given capture.
   const [interpolate, setInterpolate] = useState<boolean>(true);
+  // Removal of the receiver's own per-gain-state amplitude distortion. The
+  // NIC's AGC holds the digital level flat but each gain state has its own
+  // frequency response, so a gain step lands in the amplitude view as an
+  // isolated single-frame vertical stripe that is the radio, not the room --
+  // 7.8-72% of frames sit in a non-dominant state across the September
+  // captures, at a median shape error of 3.88 dB. On by default to match the
+  // backend. Off shows the amplitude exactly as decoded, which is what to use
+  // when judging the correction itself.
+  const [agc, setAgc] = useState<boolean>(true);
   // STFT window, in seconds rather than frames: frame rate runs 5-18 Hz across
   // captures, so a fixed frame count would mean a different physical window on
   // every file. Longer window = finer frequency resolution, fewer columns.
@@ -223,8 +242,10 @@ export function App() {
       .then(([cx, ph]) => {
         if (dopplerGeomKeyRef.current === key) {
           setDopplerGeom({
-            complex: { rows: cx.height, fMin: cx.fMin, fMax: cx.fMax },
-            phase: { rows: ph.height, fMin: ph.fMin, fMax: ph.fMax },
+            complex: { rows: cx.height, fMin: cx.fMin, fMax: cx.fMax,
+                       scaleMin: cx.scaleMin, scaleMax: cx.scaleMax },
+            phase: { rows: ph.height, fMin: ph.fMin, fMax: ph.fMax,
+                     scaleMin: ph.scaleMin, scaleMax: ph.scaleMax },
           });
         }
       })
@@ -292,13 +313,57 @@ export function App() {
     });
   };
 
-  const captureItems = (captures ?? []).map((c) => ({
-    // The list gets far more room than the trigger (the popup sizes to its
-    // content below), so it shows the size too and only elides a name long
-    // enough to beat even that.
-    label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
-    value: c.path,
-  }));
+  // Grouping is done here, over what the listing reports, rather than by
+  // pointing the API at a directory tree: build_dataset_tree.py can arrange
+  // the same captures along any axes, a capture belongs to several groupings
+  // at once, and a second on-disk copy inside captures/ would be listed twice
+  // and picked twice as a calibration reference.
+  const captureGroups = (() => {
+    const key = (c: CaptureFile) =>
+      groupBy === "none"
+        ? ""
+        : groupBy === "room/config/scenario"
+          ? [c.room, c.configuration, c.scenario].map((v) => v ?? "unspecified").join(" / ")
+          : ((c as unknown as Record<string, unknown>)[groupBy] as
+              | string
+              | undefined) ?? "unspecified";
+
+    const byKey = new Map<string, CaptureFile[]>();
+    for (const c of captures ?? []) {
+      const k = key(c);
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k)!.push(c);
+    }
+    // Everything unknown sinks to the bottom; the rest sorts by name, so the
+    // ordering does not move around as captures arrive.
+    const unknown = (k: string) => k === "" || k.includes("unspecified");
+    return [...byKey.entries()]
+      .sort((a, b) =>
+        unknown(a[0]) !== unknown(b[0])
+          ? Number(unknown(a[0])) - Number(unknown(b[0]))
+          : a[0].localeCompare(b[0]),
+      )
+      .map(([label, items]) => ({
+        label,
+        items: items.map((c) => ({
+          // The list gets far more room than the trigger (the popup sizes to
+          // its content below), so it shows the size too and only elides a
+          // name long enough to beat even that.
+          label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
+          value: c.path,
+        })),
+      }));
+  })();
+
+  const groupByItems = [
+    { label: "room / config / scenario", value: "room/config/scenario" },
+    { label: "room", value: "room" },
+    { label: "configuration", value: "configuration" },
+    { label: "scenario", value: "scenario" },
+    { label: "subject", value: "subject" },
+    { label: "activity", value: "activity" },
+    { label: "no grouping", value: "none" },
+  ];
 
   const mimoItems = [
     { label: "all", value: "all" },
@@ -320,7 +385,7 @@ export function App() {
             <Select
               value={path}
               onValueChange={(v) => v && setPath(v)}
-              items={captureItems}
+              items={captureGroups.flatMap((g) => g.items)}
             >
               <SelectTrigger id="path" className="w-72 h-8" size="sm">
                 {/* The trigger formats the selection itself rather than taking
@@ -351,13 +416,42 @@ export function App() {
                   maxWidth: "min(34rem, calc(100vw - 2rem))",
                 }}
               >
-                <SelectGroup>
-                  {captureItems.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
+                {captureGroups.map((group) => (
+                  <SelectGroup key={group.label || "all"}>
+                    {group.label && (
+                      <SelectLabel className="text-[10px] uppercase tracking-wide">
+                        {group.label}  ({group.items.length})
+                      </SelectLabel>
+                    )}
+                    {group.items.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-0.5">
+            <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">
+              Group by
+            </Label>
+            <Select
+              value={groupBy}
+              onValueChange={(v) => v && setGroupBy(v)}
+              items={groupByItems}
+            >
+              <SelectTrigger className="w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {groupByItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
@@ -454,6 +548,17 @@ export function App() {
           </Button>
 
           <Button
+            variant={agc ? "default" : "outline"}
+            size="sm"
+            onClick={() => setAgc((v) => !v)}
+            className="h-8"
+            title="Remove the receiver's per-gain-state amplitude distortion. Its AGC holds the level flat but each gain state has its own frequency response, so gain steps show as single-frame vertical stripes that are the radio rather than the room. Affects the amplitude and CIR panels; the CSI ratio divides the gain out and is untouched. MediaTek captures only."
+          >
+            <SlidersHorizontalIcon data-icon="inline-start" />
+            AGC Correction {agc ? "On" : "Off"}
+          </Button>
+
+          <Button
             variant={swapActive ? "default" : "outline"}
             size="sm"
             onClick={() => setSwapCorrected((v) => !v)}
@@ -515,8 +620,7 @@ export function App() {
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
-              <TabsTrigger value="lgparse">LG parser</TabsTrigger>
-              <TabsTrigger value="lgdetect">LG detector</TabsTrigger>
+              <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -535,6 +639,7 @@ export function App() {
               mimo={mimo}
               sourceMac={sourceMac}
               interpolate={interpolate}
+              agc={agc}
               dark={dark}
             />
             <PresenceBar
@@ -669,6 +774,7 @@ export function App() {
               mimo={mimo}
               sourceMac={sourceMac}
               interpolate={interpolate}
+              agc={agc}
               dark={dark}
             />
               </div>
@@ -711,7 +817,9 @@ export function App() {
                       captureTMin={meta.t_min}
                       captureTMax={meta.t_max}
                       title="Doppler — complex ratio (signed)"
-                      colorLabel="Magnitude"
+                      colorLabel="Magnitude (dB)"
+                      minValue={dopplerGeom.complex.scaleMin}
+                      maxValue={dopplerGeom.complex.scaleMax}
                       axisLabel="Doppler (Hz)"
                       yDomain={[dopplerGeom.complex.fMin, dopplerGeom.complex.fMax]}
                       source={dopplerSource("csi_ratio_complex")}
@@ -731,7 +839,9 @@ export function App() {
                       captureTMin={meta.t_min}
                       captureTMax={meta.t_max}
                       title="Doppler — time-unwrapped ratio phase"
-                      colorLabel="Magnitude"
+                      colorLabel="Magnitude (dB)"
+                      minValue={dopplerGeom.phase.scaleMin}
+                      maxValue={dopplerGeom.phase.scaleMax}
                       axisLabel="Doppler (Hz)"
                       yDomain={[dopplerGeom.phase.fMin, dopplerGeom.phase.fMax]}
                       source={dopplerSource("csi_ratio_phase_time_unwrapped")}
@@ -776,120 +886,51 @@ export function App() {
               </div>
             </TabsContent>
 
-            <TabsContent value="lgparse">
-              <div className="space-y-4">
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  The vendored MT7921 parser&apos;s own view of this capture.
-                  Its arithmetic over this project&apos;s reader: the planes
-                  below are produced by its functions — RSSI-based AGC
-                  restoration, its occupancy rule for which bins are real, and
-                  its conjugate-across-receive-paths phase feature — and
-                  rendered through the same tile path as every other heatmap,
-                  so they pan and zoom with the Channel tab.
-                </p>
-
-                <Heatmap
-                  path={path}
-                  metric="lg_amplitude"
-                  filename={meta.filename}
-                  numSubcarriers={meta.num_subcarriers}
-                  captureTMin={meta.t_min}
-                  captureTMax={meta.t_max}
-                  title="Amplitude, AGC-restored"
-                  colorLabel="Amplitude (dBm, absolute)"
-                  height={320}
-                  timeLink={timeLink}
-                  mimo={mimo}
-                  sourceMac={sourceMac}
-                  interpolate={interpolate}
-                  dark={dark}
-                />
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  The chip strips its own AGC, so its amplitude is relative.
-                  This restores an absolute dBm scale from RSSI. Bins their
-                  occupancy rule rejects are blank rather than plotted — a
-                  guard band drawn as a measurement would dominate the colour
-                  scale, which is what the rule exists to prevent.
-                </p>
-
-                <FoldedPanel
-                  title="Phase, conjugated across rx"
-                  hint="their feature_conj — the phase feature this project does not adopt"
-                >
-                  <Heatmap
-                    path={path}
-                    metric="lg_conj_phase"
-                    filename={meta.filename}
-                    numSubcarriers={meta.num_subcarriers}
-                    captureTMin={meta.t_min}
-                    captureTMax={meta.t_max}
-                    minValue={-Math.PI}
-                    maxValue={Math.PI}
-                    title="feature_conj phase"
-                    colorLabel="Phase (rad)"
-                    height={280}
-                    palette={TWILIGHT}
-                    timeLink={timeLink}
-                    mimo={mimo}
-                    sourceMac={sourceMac}
-                    interpolate={interpolate}
-                    dark={dark}
-                  />
-                </FoldedPanel>
-
-                <FoldedPanel
-                  title="Magnitude of the conjugate product"
-                  hint="|H_rx0 · conj(H_rx1)| — their amplitude feature"
-                >
-                  <Heatmap
-                    path={path}
-                    metric="lg_conj_amplitude"
-                    filename={meta.filename}
-                    numSubcarriers={meta.num_subcarriers}
-                    captureTMin={meta.t_min}
-                    captureTMax={meta.t_max}
-                    title="feature_conj magnitude"
-                    colorLabel="Magnitude (dB)"
-                    height={280}
-                    timeLink={timeLink}
-                    mimo={mimo}
-                    sourceMac={sourceMac}
-                    interpolate={interpolate}
-                    dark={dark}
-                  />
-                </FoldedPanel>
-
-                <FoldedPanel
-                  title="Parser comparison"
-                  hint="how their reading differs from ours, in numbers"
-                >
-                  <LgParser path={path} dark={dark} />
-                </FoldedPanel>
-              </div>
-            </TabsContent>
 
             <TabsContent value="lgdetect">
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  The LG on-board presence detector, replayed over this
-                  capture. Its own <code>mtk_read_bf_csi</code> and{" "}
-                  <code>process_csi_data</code> decide — nothing here
-                  reimplements them. It runs under a NumPy 1.x interpreter
-                  matching the board, because its TLV length arithmetic shifts
-                  a <code>uint8</code> left by 8: NumPy 2 keeps that as
-                  <code>uint8</code>, evaluates it to 0, and the walk
-                  desynchronises at the first CSI field — silently, yielding
-                  frames with zeroed imaginary parts rather than an error.
-                  Replayed on the project venv it would be measuring the NumPy
-                  version rather than the detector.
+                  Both detectors against the camera, on one grid. Ours compares
+                  a window to an empty-room reference; LG&apos;s compares each
+                  frame to the one before, so it answers &ldquo;is something
+                  changing&rdquo; and cannot see a motionless occupant at all.
+                  The reference for our side is drawn only from OTHER captures
+                  the camera labelled empty — never this one&apos;s own empty
+                  stretches, which would be knowing the answer in advance.
                 </p>
-                <LgDetector
-                  path={path}
-                  captureTMin={meta.t_min}
-                  captureTMax={meta.t_max}
-                  timeLink={timeLink}
-                  dark={dark}
-                />
+
+                <FoldedPanel
+                  title="Verdicts and confusion matrices"
+                  hint="ground truth, ours, theirs — same grid, same windows"
+                  defaultOpen
+                >
+                  <Phase1 path={path} dark={dark} />
+                </FoldedPanel>
+
+                <FoldedPanel
+                  title="LG detector in detail"
+                  hint="its raw +/- events and per-threshold behaviour"
+                >
+                  <div className="space-y-3">
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      Its own <code>mtk_read_bf_csi</code> and{" "}
+                      <code>process_csi_data</code> decide — nothing here
+                      reimplements them. It runs under a NumPy 1.x interpreter
+                      matching the board, because its TLV length arithmetic
+                      shifts a <code>uint8</code> left by 8: NumPy 2 keeps that
+                      as <code>uint8</code>, evaluates it to 0, and the walk
+                      desynchronises at the first CSI field — silently, yielding
+                      frames with zeroed imaginary parts rather than an error.
+                    </p>
+                    <LgDetector
+                      path={path}
+                      captureTMin={meta.t_min}
+                      captureTMax={meta.t_max}
+                      timeLink={timeLink}
+                      dark={dark}
+                    />
+                  </div>
+                </FoldedPanel>
               </div>
             </TabsContent>
 

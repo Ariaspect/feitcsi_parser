@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from backend import presence as presence_mod
+
 from backend.presence import (
     STATE_EMPTY,
     STATE_MOVING,
@@ -413,7 +415,7 @@ def test_a_nan_motion_level_is_unknown_not_empty() -> None:
 def test_a_reference_summarises_the_room_it_was_measured_in() -> None:
     """The reference is three numbers, and each one has a job downstream.
 
-    ``profile`` is what a window is compared against, ``dev_p95`` is how much
+    ``profile`` is what a window is compared against, ``dev_scale`` is how much
     the empty room wanders on its own -- the unit the presence threshold is
     expressed in -- and ``motion_floor`` is the fractional-motion noise floor
     of this radio in this room, which is not zero.
@@ -422,7 +424,8 @@ def test_a_reference_summarises_the_room_it_was_measured_in() -> None:
 
     assert ref["profile"].shape == (8,)
     assert np.isfinite(ref["profile"]).all()
-    assert ref["dev_p95"] > 0.0, "an empty room is never perfectly still"
+    assert ref["dev_scale"] > 0.0, "an empty room is never perfectly still"
+    assert ref["dev_p95"] >= ref["dev_scale"] * 0.5
     assert ref["motion_floor"] > 0.0, "fractional motion has a noise floor"
     assert ref["n_windows"] > 0
 
@@ -440,7 +443,7 @@ def test_baseline_deviation_is_zero_against_the_room_it_came_from() -> None:
     ratio = _synthetic_ratio(None, noise=0.002)
     ref = presence_reference(ratio, FS)
 
-    assert baseline_deviation(amplitude_profile(ratio), ref["profile"]) < ref["dev_p95"]
+    assert baseline_deviation(amplitude_profile(ratio), ref["profile"]) < ref["dev_scale"]
 
 
 def test_a_displaced_channel_reads_as_present_without_any_periodicity() -> None:
@@ -459,7 +462,7 @@ def test_a_displaced_channel_reads_as_present_without_any_periodicity() -> None:
 
     result = presence_windows(occupied, FS, reference=ref)
 
-    assert np.nanmedian(result["baseline_dev"]) > ref["dev_p95"] * 3.0
+    assert np.nanmedian(result["baseline_dev"]) > ref["dev_scale"] * 3.0
     assert set(result["state"]) == {STATE_PRESENT}
     assert np.nanmax(result["score"]) < 0.25, "no periodicity was involved"
 
@@ -572,18 +575,15 @@ def test_in_band_weighting_prefers_a_tone_over_a_drifting_subcarrier() -> None:
 
 
 def test_several_empty_ranges_are_scored_against_the_nearest_one() -> None:
-    """A room empty in two different ways is empty in both.
+    """A window matching any pooled empty state scores near zero against it.
 
-    Averaging the two states would give a profile matching neither, and the
-    spread around it would measure the distance between them rather than the
-    wander within them -- which a k-multiple threshold reads as noise and
-    inflates out of usefulness. Distance to the nearest state is what a verdict
-    needs, so a window matching either stretch must score near zero against the
-    pooled reference.
+    Averaging the states would give a profile matching neither, so the pool
+    keeps one profile per range and a verdict takes the distance to the
+    NEAREST -- which is what lets a window that matches either stretch read as
+    empty.
     """
     rng = np.random.default_rng(11)
     n_sc, n = 48, 600
-    # Two genuinely different empty rooms, far apart compared to their own wander.
     a = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
     b = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0
     ref = presence_reference(
@@ -593,17 +593,64 @@ def test_several_empty_ranges_are_scored_against_the_nearest_one() -> None:
     assert ref["n_ranges"] == 2
     assert len(ref["profiles"]) == 2
 
+    # The pool does NOT average: each stretch sits on top of its own profile.
     near_a = baseline_deviation(
         amplitude_profile(a.astype(complex)), ref["profiles"][0]
     )
     near_b = baseline_deviation(
         amplitude_profile(b.astype(complex)), ref["profiles"][1]
     )
-    # Each stretch sits on top of its own profile...
     assert near_a < 0.1 and near_b < 0.1
-    # ...and dev_p95 stays a measure of within-room wander, not of the gap
-    # between the two rooms, which here is several dB.
-    assert ref["dev_p95"] < 0.5
+
+
+def test_dev_scale_is_leave_one_out_across_ranges() -> None:
+    """The threshold's unit is the cross-range distance, not within-range wander.
+
+    A verdict scores a window from the analysed capture -- which is never one
+    of the reference ranges -- against the nearest reference profile. So the
+    scale has to be built the same way: each range's windows scored against the
+    OTHER ranges, never their own. Two SIMILAR empty rooms validate each other
+    and the scale stays small; two DISSIMILAR rooms are the honest warning that
+    this pool cannot tell a third empty room from an occupant, and the scale
+    grows to say so. Until 20260914 the scale was within-range wander (~0.04 dB
+    overnight) while the verdict compared cross-capture gaps (~0.2 dB), and a
+    perfectly empty room read as occupied 79% of the time.
+    """
+    rng = np.random.default_rng(11)
+    n_sc, n = 48, 600
+    a = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    a2 = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0  # same room, second look
+    far = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0  # a different room
+
+    similar = presence_reference(
+        [a.astype(complex), a2.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0, scale_mode="loo",
+    )
+    dissimilar = presence_reference(
+        [a.astype(complex), far.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0, scale_mode="loo",
+    )
+    # Similar rooms: leave-one-out distance is small, ~their shared wander.
+    assert similar["dev_scale"] < 0.5
+    # Dissimilar rooms: leave-one-out surfaces the several-dB gap between them.
+    assert dissimilar["dev_scale"] > 2.0
+
+    # The default mode is within-range: even dissimilar rooms score against
+    # their own profile, so the scale stays small. This is the bracketed
+    # single-capture path the UI uses, and scoring lead against trail (loo)
+    # there inflated the threshold and took recall to 4%.
+    within = presence_reference(
+        [a.astype(complex), far.astype(complex)], 20.0,
+        window_seconds=5.0, hop_seconds=1.0,
+    )
+    assert within["dev_scale"] < 0.5
+
+    # A single range has no "other": loo falls back to within-range.
+    solo = presence_reference(
+        [a.astype(complex)], 20.0, window_seconds=5.0, hop_seconds=1.0,
+        scale_mode="loo",
+    )
+    assert solo["dev_scale"] < 0.5
 
 
 def test_one_empty_range_still_behaves_as_before() -> None:
@@ -612,3 +659,37 @@ def test_one_empty_range_still_behaves_as_before() -> None:
     ref = presence_reference(a, 20.0, window_seconds=5.0, hop_seconds=1.0)
     assert ref["n_ranges"] == 1
     assert ref["profile"].shape == (48,)
+
+
+def test_reference_pool_screening_rejects_two_different_rooms() -> None:
+    """A pool has to be one room seen twice, not two rooms averaged.
+
+    dev_scale under scale_mode="loo" is the distance between pooled captures,
+    which is the right unit only while they describe the same room. Let a pool
+    span two states and that distance becomes the threshold, and the threshold
+    becomes unreachable: on 20260914 two camera-empty captures six hours apart
+    sat 10.6 dB apart, gave dev_scale 21.1 against 0.05 for either alone, and a
+    63 dB threshold the detector never once crossed over a capture with 122 s of
+    occupancy. Screening has to catch that before a verdict is offered.
+    """
+    rng = np.random.default_rng(5)
+    n_sc, n = 48, 400
+    room_a1 = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    room_a2 = rng.normal(0.0, 0.02, size=(n, n_sc)) + 1.0
+    room_b = rng.normal(0.0, 0.02, size=(n, n_sc)) + 4.0
+
+    prof = [amplitude_profile(x.astype(complex)) for x in (room_a1, room_a2, room_b)]
+    keep, spread = presence_mod.screen_reference_pool(prof)
+
+    # The two views of one room survive; the third is a different room.
+    assert keep == [0, 1]
+    # The spread reported is the WHOLE pool's, so the disagreement is visible
+    # rather than hidden by reporting only the surviving group.
+    assert spread > 2.0
+
+    # A pool that is two different rooms and nothing else leaves no usable
+    # subset, which is what makes a caller report "uncalibrated" instead of
+    # emitting a threshold nothing can reach.
+    keep2, spread2 = presence_mod.screen_reference_pool([prof[0], prof[2]])
+    assert len(keep2) < 2
+    assert spread2 > 2.0

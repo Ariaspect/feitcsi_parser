@@ -42,7 +42,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import mtk, presence
+from . import agc, mtk, presence
 from . import lgproc
 from .batch import decode_frames as _decode_feitcsi
 from .cir import csi_to_cir_centred
@@ -56,7 +56,7 @@ from .doppler import (
     uniform_grid,
 )
 from .phase import detrend_subcarrier, unwrap_subcarrier, unwrap_time
-from .spectro import stft_complex
+from .spectro import coherent_gain, stft_complex
 from .ratio import (
     CONTEXT_FRAMES,
     Reference,
@@ -181,6 +181,28 @@ def _needs_reference(metric: str) -> bool:
     if derived is None:
         return False
     return derived.needs_reference or any(_needs_reference(m) for m in derived.bases)
+
+
+# Base metrics the AGC gain table touches. Only ``amplitude``: the CSI ratio
+# divides the common gain out and is 17x less affected, and the effect of a
+# gain step on phase has not been measured -- see ``backend.agc``.
+AGC_BASE_METRICS = ("amplitude",)
+
+
+def _agc_affected(metric: str) -> bool:
+    """True if *metric* or anything it is derived from carries the correction.
+
+    Recursive for the same reason ``_needs_reference`` is: ``csi_cir`` is
+    built on ``amplitude``, so a corrected amplitude changes it, and it has to
+    be keyed on the table it was built under without anyone wiring it by hand.
+    """
+    if metric in AGC_BASE_METRICS:
+        return True
+    derived = DERIVED_METRICS.get(metric)
+    if derived is None:
+        return False
+    return any(_agc_affected(m) for m in derived.bases)
+
 
 # Metrics aggregated by max-hold within a display column. Everything else is
 # nearest-frame: a maximum over angles is meaningless, and that holds for the
@@ -582,6 +604,118 @@ def get_reference(
     return ref
 
 
+# Frames the gain table is measured over: GAIN_CHUNKS stretches of
+# GAIN_CHUNK_FRAMES CONSECUTIVE frames, spread evenly across the capture.
+# Consecutive because every comparison in backend.agc is against a frame's own
+# neighbours; spread because a gain state that only appears in one minute of
+# the capture still has to be seen. 16 x 512 covers 8192 frames, which on a
+# 5-minute capture at ~19 Hz is most of it and on an hour-long one is a
+# representative sample at a bounded cost.
+GAIN_CHUNKS = 16
+GAIN_CHUNK_FRAMES = 512
+
+# How far a capture may grow before the table is measured again. Keyed on a
+# coarsened frame count rather than on the file size, for the reason
+# ``_scale_source`` does the same: a live capture polled once a second would
+# otherwise re-measure 8192 frames on every poll, and the gain states of a
+# radio do not change between two polls.
+GAIN_REFRESH_FRAMES = 4096
+
+_gain_cache: dict[tuple, "agc.GainTable | None"] = {}
+_gain_lock = threading.Lock()
+
+
+def get_gain_table(
+    path: Path,
+    index: FrameIndex | mtk.MTKIndex,
+    file_size: int = 0,
+    *,
+    interpolate: bool = True,
+) -> "agc.GainTable | None":
+    """Return the cached AGC gain table for this capture, or ``None``.
+
+    Measured on the DOMINANT PEER's full-width frames only, and deliberately
+    not on whatever the caller is currently filtering to. Two reasons, and
+    both are the same reason ``get_reference`` is per transmitter:
+
+    * A frame from another sender differs from its neighbours by the channel
+      to that sender, not by the gain step. Pooling senders would book that
+      difference as a gain-state offset and then subtract it from every frame
+      in that state.
+    * A narrow-band frame is centred and NaN-padded into the full-width row
+      (see ``mtk.decode_frames``), so its profile differs from a full-width
+      one everywhere. It would read as a phantom gain state worth several dB.
+
+    Restricted to MediaTek captures because that is where the effect was
+    measured -- 36 September captures, see ``backend.agc``. The mechanism is
+    not MediaTek-specific and an Intel capture may well show it, but running
+    an unmeasured correction on one would be guessing, so those are left
+    alone and the table comes back ``None``.
+
+    *file_size* is accepted for symmetry with ``get_reference`` and ignored:
+    this cache is keyed on a coarsened frame count instead, so a growing
+    capture re-measures every ``GAIN_REFRESH_FRAMES`` frames rather than on
+    every poll.
+    """
+    if not isinstance(index, mtk.MTKIndex):
+        return None
+
+    key = (str(path), index.count // GAIN_REFRESH_FRAMES, interpolate)
+    with _gain_lock:
+        if key in _gain_cache:
+            return _gain_cache[key]
+
+    ids = np.flatnonzero(
+        index.filter_mask(mimo=None, source_mac=index.dominant_peer())
+    )
+    bins = getattr(index, "_bins", None)
+    if bins is not None and ids.size:
+        ids = ids[np.asarray(bins)[ids] == index.num_subcarriers]
+
+    table = None
+    if ids.size:
+        # Evenly spaced STARTS, each taking a consecutive run. Clipped so two
+        # starts near the end cannot overlap into one another's run and
+        # present the same frames twice.
+        n_chunks = max(1, min(GAIN_CHUNKS, ids.size // GAIN_CHUNK_FRAMES or 1))
+        starts = np.unique(
+            np.linspace(0, max(0, ids.size - GAIN_CHUNK_FRAMES), n_chunks).astype(int)
+        )
+        segments = []
+        for s in starts:
+            run = ids[s : s + GAIN_CHUNK_FRAMES]
+            if run.size < agc.MIN_LOCAL_FRAMES:
+                continue
+            # Only consecutive frames are neighbours. The filter above can
+            # leave holes, so a run is split wherever the frame ids jump.
+            for piece in np.split(run, np.flatnonzero(np.diff(run) != 1) + 1):
+                if piece.size < agc.MIN_LOCAL_FRAMES:
+                    continue
+                amp, *_ = decode_frames(path, index, piece, interpolate=interpolate)
+                segments.append((amp, index.rssi_1[piece]))
+        if segments:
+            table = agc.build_gain_table(segments)
+
+    with _gain_lock:
+        _gain_cache[key] = table
+    return table
+
+
+def _gain_tag(table: "agc.GainTable | None") -> int | None:
+    """Identity of a ``GainTable``, for cache keying.
+
+    Same job as ``_reference_tag``: a block corrected against one table must
+    not be served once the table has changed, and a growing capture
+    re-measures it. Keyed on the contents rather than on the file size, so a
+    poll that leaves the table identical keeps every corrected block.
+    """
+    if table is None:
+        return None
+    return hash(
+        (table.dominant, tuple(sorted((s, o.tobytes()) for s, o in table.offsets.items())))
+    )
+
+
 def decode_frames(path, index, frame_ids, **kwargs):
     """Decode via whichever reader owns *index*.
 
@@ -624,6 +758,10 @@ def reset_tile_caches() -> None:
         _index_cache.clear()
     with _ref_lock:
         _ref_cache.clear()
+    with _gain_lock:
+        _gain_cache.clear()
+    with _static_lock:
+        _static_cache.clear()
     with _stats_lock:
         _stats_cache.clear()
     _block_cache.clear()
@@ -653,6 +791,7 @@ def _decode_block_cached(
     metric: str,
     reference: Reference | None = None,
     interpolate: bool = True,
+    gain: "agc.GainTable | None" = None,
 ) -> np.ndarray:
     """Return the decoded block for one metric, from cache or by decoding.
 
@@ -670,6 +809,13 @@ def _decode_block_cached(
     against its neighbours, and without the margin the frames at a block
     boundary would be decided on half of them — visible as a speckled seam
     every BLOCK_SIZE frames.
+
+    *gain* is the capture's AGC table. It is applied to ``amplitude`` as it
+    comes out of the decode, so every view built on it — the panel, the CIR,
+    the scale samples — sees one corrected array rather than each correcting
+    its own copy. Only the keys of metrics the table actually touches carry
+    its tag (see ``_agc_affected``), so toggling the correction does not
+    discard the ratio blocks it cannot change.
     """
     # One observation of index.count for the whole call. A growing capture is
     # extended in place by other requests, so reading it again below could size
@@ -679,7 +825,8 @@ def _decode_block_cached(
     total = index.count
     n_block = max(0, min(BLOCK_SIZE, total - block_idx * BLOCK_SIZE))
 
-    key = (str(path), metric, block_idx, n_block, interpolate)
+    gain_tag = _gain_tag(gain) if _agc_affected(metric) else None
+    key = (str(path), metric, block_idx, n_block, interpolate, gain_tag)
     cached = _block_cache.get(key)
     if cached is not None:
         return cached
@@ -694,7 +841,7 @@ def _decode_block_cached(
             bases = [
                 _base_with_context(
                     path, index, block_idx, m, lead, trail, reference,
-                    interpolate=interpolate,
+                    interpolate=interpolate, gain=gain,
                 )
                 for m in derived.bases
             ]
@@ -707,7 +854,7 @@ def _decode_block_cached(
             bases = [
                 _decode_block_cached(
                     path, index, block_idx, m, reference,
-                    interpolate=interpolate,
+                    interpolate=interpolate, gain=gain,
                 )
                 for m in derived.bases
             ]
@@ -725,7 +872,9 @@ def _decode_block_cached(
     if metric in LG_METRICS:
         planes = lgproc.decode_block(path, index, block_ids, interpolate=interpolate)
         for m, arr in planes.items():
-            _block_cache.put((str(path), m, block_idx, n_block, interpolate), arr)
+            _block_cache.put(
+                (str(path), m, block_idx, n_block, interpolate, None), arr
+            )
         with _block_cache._lock:
             _block_cache.frames_decoded += len(block_ids)
         return planes[metric]
@@ -733,6 +882,13 @@ def _decode_block_cached(
     amp, phase, ratio_amp, ratio_phase = decode_frames(
         path, index, block_ids, interpolate=interpolate
     )
+
+    if gain is not None and len(block_ids):
+        # A block is a contiguous unfiltered run of frames, so each one has
+        # its real neighbours here and can be corrected individually.
+        amp = agc.apply_gain_table(
+            amp, index.rssi_1[block_ids], gain, contiguous=True
+        )
 
     _metrics = {
         "amplitude": amp,
@@ -742,8 +898,16 @@ def _decode_block_cached(
     }
     for m, arr in _metrics.items():
         # Same n_block the key above was built from, so what the key promises
-        # and what the array holds cannot diverge.
-        _block_cache.put((str(path), m, block_idx, n_block, interpolate), arr)
+        # and what the array holds cannot diverge. The tag goes on the metrics
+        # the table touched and nothing else, so a toggle costs one re-decode
+        # of the amplitude and keeps the three it cannot change.
+        _block_cache.put(
+            (
+                str(path), m, block_idx, n_block, interpolate,
+                _gain_tag(gain) if _agc_affected(m) else None,
+            ),
+            arr,
+        )
     with _block_cache._lock:
         _block_cache.frames_decoded += len(block_ids)
 
@@ -760,6 +924,7 @@ def _base_with_context(
     reference: Reference | None,
     *,
     interpolate: bool = True,
+    gain: "agc.GainTable | None" = None,
 ) -> np.ndarray:
     """One block of *metric* with *lead*/*trail* frames of its neighbours.
 
@@ -771,19 +936,19 @@ def _base_with_context(
     if lead:
         prev = _decode_block_cached(
             path, index, block_idx - 1, metric, reference,
-            interpolate=interpolate,
+            interpolate=interpolate, gain=gain,
         )
         parts.append(prev[len(prev) - lead :])
     parts.append(
         _decode_block_cached(
             path, index, block_idx, metric, reference,
-            interpolate=interpolate,
+            interpolate=interpolate, gain=gain,
         )
     )
     if trail:
         nxt = _decode_block_cached(
             path, index, block_idx + 1, metric, reference,
-            interpolate=interpolate,
+            interpolate=interpolate, gain=gain,
         )
         parts.append(nxt[:trail])
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
@@ -827,6 +992,7 @@ def _decode_via_blocks(
     reference: Reference | None = None,
     *,
     interpolate: bool = True,
+    gain: "agc.GainTable | None" = None,
 ) -> np.ndarray:
     """Decode a contiguous range of frames through the block cache.
 
@@ -846,7 +1012,7 @@ def _decode_via_blocks(
 
         block = _decode_block_cached(
             path, index, block_idx, metric, reference,
-            interpolate=interpolate,
+            interpolate=interpolate, gain=gain,
         )
 
         # How many of our frame_ids fall in this block? Bounded by what the
@@ -961,6 +1127,134 @@ DOPPLER_METRICS: tuple[str, ...] = (
 # Floor on a clamped window. Below this a spectrogram column is too few samples
 # to carry a meaningful spectrum, and the honest answer is an error.
 MIN_DOPPLER_WIN = 8
+
+# The taper each branch uses, named here so the normalisation below cannot
+# drift from the transform it is normalising. stft_complex defaults to
+# Blackman-Harris; stft_average applies a Hann window internally.
+DOPPLER_COMPLEX_TAPER = "blackmanharris"
+DOPPLER_REAL_TAPER = "hann"
+
+# Doppler spectrograms are served in dB, for the same reason every other
+# amplitude panel is: the values span five orders of magnitude. Measured over
+# ten September captures, the complex panel runs -63.7 dB at its 0.1st
+# percentile to +8.5 dB at its largest, with a median of -35.4. On a linear
+# 0..1 scale that median would sit at 1.7% of the ramp and the panel would be
+# black. A fixed colour range is only usable in dB.
+DOPPLER_DB_FLOOR = 1e-6
+
+# The fixed colour range, which is the point of normalising at all: the same
+# number means the same motion in every capture, at every zoom, at every
+# window length, so blue in one capture and blue in another are the same
+# modulation depth.
+#
+# Drawn from the measured distribution rather than picked. Over fourteen
+# September captures at the default window, once the static profile is divided
+# out, the complex panel runs -60.5 dB at its 0.1st percentile to -10.6 at its
+# 99.9th and the phase panel -61.3 to -5.4. This range holds 99.8% and 99.5%
+# of their cells respectively, clipping 0.2-0.4% at the bottom -- which is the
+# noise floor -- and under 0.2% at the top, where a motion event saturating
+# reads as "louder than the scale" rather than being compressed into it.
+#
+# The ceiling is -10 rather than 0 because nothing reaches 0: 0 dB would be
+# 100% modulation of the static path, and the loudest cell measured is 40x
+# quieter than that. A range ending at 0 spends a fifth of the colour ramp on
+# values that never occur.
+DOPPLER_SCALE_DB: tuple[float, float] = (-60.0, -10.0)
+
+
+# Frames sampled to measure a capture's static profile, and how far it may
+# grow before that measurement is taken again. Spread across the whole
+# capture, never over the visible range: a profile taken from a 60 s slice of
+# 20260911_095127 differs from the whole capture's by up to 3.1 dB at its 95th
+# percentile, which would shift the colour every time the view zoomed.
+STATIC_PROFILE_SAMPLE = 4096
+STATIC_REFRESH_FRAMES = 4096
+
+_static_cache: dict[tuple, np.ndarray | None] = {}
+_static_lock = threading.Lock()
+
+
+def get_static_profile(
+    path: Path,
+    index: FrameIndex | mtk.MTKIndex,
+    *,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> np.ndarray | None:
+    """Per-subcarrier median ``|ratio|`` over the whole capture, or ``None``.
+
+    What the Doppler magnitude has to be divided by before two captures can be
+    compared by colour. The complex ratio's absolute scale is set by how the
+    two transmit chains happen to be gained, which is a property of the
+    hardware and the geometry rather than of anything moving: measured over
+    twelve September captures it spans 20.0 dB, from -12.8 to +7.2. The
+    Doppler magnitude carries that scale straight through -- the correlation
+    between a capture's median ``|ratio|`` and its Doppler median is +0.857 --
+    so without this, a quiet capture with a strong ratio outranks a busy one
+    with a weak ratio and the colour says the opposite of the truth.
+
+    Dividing by it leaves a dimensionless modulation DEPTH: how far the
+    channel moved as a fraction of where it sits. Measured across those same
+    twelve captures, it halves the spread of the panel's median (45.0 dB ->
+    26.3) and of its 99th percentile (39.4 -> 18.8). What remains is the
+    difference in how much actually moved, which is what the colour is for.
+
+    Only the complex panel needs it. A phase is scale-invariant, so the
+    time-unwrapped phase panel already carries no gain (its correlation with
+    ``|ratio|`` is +0.405 against the complex panel's +0.857), and the
+    amplitude metric is already logarithmic, where a gain change is an
+    additive offset the per-window detrend removes.
+    """
+    key = (str(path), index.count // STATIC_REFRESH_FRAMES, mimo, source_mac,
+           interpolate)
+    with _static_lock:
+        if key in _static_cache:
+            return _static_cache[key]
+
+    ids = np.flatnonzero(index.filter_mask(mimo=mimo, source_mac=source_mac))
+    profile: np.ndarray | None = None
+    if ids.size >= 2:
+        picks = np.unique(
+            np.linspace(0, ids.size - 1, min(STATIC_PROFILE_SAMPLE, ids.size))
+            .astype(np.int64)
+        )
+        chosen = ids[picks]
+        try:
+            ratio, _, _ = _complex_ratio_series(
+                path, index, chosen, index.times[chosen], interpolate,
+                mimo=mimo, source_mac=source_mac,
+            )
+        except ValueError:
+            ratio = None
+        if ratio is not None and ratio.size:
+            mag = np.abs(ratio)
+            with np.errstate(invalid="ignore"):
+                med = np.nanmedian(np.where(mag > 0.0, mag, np.nan), axis=0)
+            # A subcarrier that never carried a ratio divides nothing. Left as
+            # NaN so it stays out of the average rather than being scaled by
+            # an invented number.
+            profile = np.where(np.isfinite(med) & (med > 0.0), med, np.nan)
+            if not np.isfinite(profile).any():
+                profile = None
+
+    with _static_lock:
+        _static_cache[key] = profile
+    return profile
+
+
+def _to_db(spec: np.ndarray, gain: float) -> np.ndarray:
+    """Normalised magnitude in dB, preserving the blanked columns as NaN.
+
+    *gain* is the taper's coherent gain, which is what takes the window length
+    out of the number -- see ``spectro.coherent_gain``. NaN survives because a
+    blanked column means "this window was mostly invented", and a floor value
+    would draw it as a real, very quiet measurement instead.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scaled = np.asarray(spec, dtype=float) / max(gain, 1e-12)
+        db = 20.0 * np.log10(np.maximum(scaled, DOPPLER_DB_FLOOR))
+    return np.where(np.isfinite(spec), db, np.nan)
 
 
 def compute_doppler(
@@ -1077,6 +1371,9 @@ def compute_doppler(
             max_gap_fraction=max_gap_fraction,
             zero_pad=zero_pad,
         )
+        # Half the gain: a real cosine of amplitude A splits between +f and
+        # -f, so the one-sided bin this returns carries A/2.
+        spec = _to_db(spec, coherent_gain(DOPPLER_REAL_TAPER, win) / 2.0)
         f_min = 0.0
     else:
         # Resampled as two real planes, then recombined. Interpolating an
@@ -1088,19 +1385,29 @@ def compute_doppler(
         imag, _ = resample_uniform(
             times, ratio_series.imag, grid_times, gap_limit
         )
+        series = real + 1j * imag
+        # Divide out the ratio's own scale, per subcarrier, so what is left is
+        # a modulation depth two captures can be compared by. Measured on the
+        # whole capture rather than on this range -- see get_static_profile.
+        static = get_static_profile(
+            path, index, mimo=mimo, source_mac=source_mac, interpolate=interpolate
+        )
+        if static is not None and static.shape[0] == series.shape[1]:
+            series = series / static[None, :]
         spec, freqs, _ = stft_complex(
-            real + 1j * imag, fs, win, hop,
+            series, fs, win, hop,
             fabricated=fabricated,
             max_gap_fraction=max_gap_fraction,
             zero_pad=zero_pad,
         )
-        # stft_complex returns power and ascending frequencies. Both are
-        # converted to this endpoint's contract: magnitude, because every
-        # other panel is drawn in magnitude and a power axis would let DC
-        # leakage own the colormap; and row 0 = highest frequency, so the
-        # renderer's top-down row order puts +Nyquist at the top and the
-        # receding half below zero at the bottom.
-        spec = np.sqrt(spec)[::-1, :]
+        # stft_complex returns power and ascending frequencies. Three things
+        # are converted to this endpoint's contract. Magnitude, because a
+        # power axis would let DC leakage own the colormap. Normalised dB, so
+        # the number means the same thing whatever window produced it. And
+        # row 0 = highest frequency, so the renderer's top-down row order puts
+        # +Nyquist at the top and the receding half below zero at the bottom.
+        spec = _to_db(np.sqrt(spec), coherent_gain(DOPPLER_COMPLEX_TAPER, win))
+        spec = spec[::-1, :]
         f_min = float(freqs[0])
 
     finite = spec[np.isfinite(spec)]
@@ -1124,6 +1431,11 @@ def compute_doppler(
         "vmax": float(finite.max()) if finite.size else 1.0,
         "p_low": float(np.percentile(finite, 1)) if finite.size else 0.0,
         "p_high": float(np.percentile(finite, 99)) if finite.size else 1.0,
+        # The fixed range the panel should draw with, in dB. Served rather
+        # than hard-coded in the client so the number and the measurement
+        # that justifies it stay in one place.
+        "scale_min": DOPPLER_SCALE_DB[0],
+        "scale_max": DOPPLER_SCALE_DB[1],
     }
 
 
@@ -1501,6 +1813,7 @@ def _decode_selection(
     contiguous: bool,
     filtered: bool,
     interpolate: bool,
+    gain: "agc.GainTable | None" = None,
 ) -> np.ndarray:
     """Decode *frame_ids* into *metric*'s values, through the block cache when
     the selection allows it.
@@ -1515,7 +1828,8 @@ def _decode_selection(
         return np.empty((0, index.num_subcarriers), dtype=np.float32)
     if contiguous and not filtered:
         return _decode_via_blocks(
-            path, index, frame_ids, metric, reference, interpolate=interpolate
+            path, index, frame_ids, metric, reference, interpolate=interpolate,
+            gain=gain,
         )
     if metric in LG_METRICS:
         # The vendored parser's planes are not derived from ours, so a
@@ -1529,6 +1843,14 @@ def _decode_selection(
     amp, phase, ratio_amp, ratio_phase = decode_frames(
         path, index, frame_ids, interpolate=interpolate
     )
+    # The direct path carries the correction too, or a filtered/stride-sampled
+    # view would disagree with the block-cached one about the same frames. Its
+    # rows are only consecutive frames when the selection was contiguous and
+    # unfiltered, and the per-frame pass needs that to have neighbours at all.
+    if gain is not None and len(frame_ids):
+        amp = agc.apply_gain_table(
+            amp, index.rssi_1[frame_ids], gain, contiguous=contiguous and not filtered,
+        )
     available = {
         "amplitude": amp,
         "phase": phase,
@@ -1559,6 +1881,7 @@ def _compute_chunk(
     interpolate: bool,
     gap_limit: float,
     num_sc: int,
+    gain: "agc.GainTable | None" = None,
 ) -> _Chunk:
     """Build one ``CHUNK_COLUMNS``-wide run of lattice columns.
 
@@ -1629,6 +1952,7 @@ def _compute_chunk(
     data = _decode_selection(
         path, index, frame_ids, metric, reference,
         contiguous=decode_contiguous, filtered=filtered, interpolate=interpolate,
+        gain=gain,
     )
     data = data[keep]
     kept_ids = filtered_idxs[sel_ctx] if filtered else sel_ctx
@@ -1706,11 +2030,13 @@ def _chunk_for(
     interpolate: bool,
     gap_limit: float,
     num_sc: int,
+    gain: "agc.GainTable | None" = None,
 ) -> _Chunk:
     """Cached ``_compute_chunk``."""
     key = (
         str(path), metric, level, chunk_index,
         mimo, source_mac, interpolate, _reference_tag(reference),
+        _gain_tag(gain) if _agc_affected(metric) else None,
         _chunk_frame_count(filtered_times, level, chunk_index),
     )
     hit = _chunk_cache.get(key)
@@ -1720,6 +2046,7 @@ def _chunk_for(
         path, index, filtered_idxs, filtered_times, metric, level, chunk_index,
         reference=reference, correcting=correcting, filtered=filtered,
         interpolate=interpolate, gap_limit=gap_limit, num_sc=num_sc,
+        gain=gain,
     )
     _chunk_cache.put(key, chunk)
     return chunk
@@ -1741,6 +2068,7 @@ def _scale_source(
     reference: Reference | None,
     filtered: bool,
     interpolate: bool,
+    gain: "agc.GainTable | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """A width-independent sample of the capture's values, as (times, values).
 
@@ -1757,6 +2085,10 @@ def _scale_source(
     key = (
         str(path), metric, mimo, source_mac, interpolate,
         n // STATS_REFRESH_FRAMES, _reference_tag(reference),
+        # The scale is measured on the same values the grid is drawn from, so
+        # it is keyed on the same table. Without this the colour scale would
+        # stay on the uncorrected sample while the grid moved.
+        _gain_tag(gain) if _agc_affected(metric) else None,
     )
     with _stats_lock:
         hit = _stats_cache.get(key)
@@ -1777,6 +2109,7 @@ def _scale_source(
     values = _decode_selection(
         path, index, frame_ids, metric, reference,
         contiguous=contiguous, filtered=filtered, interpolate=interpolate,
+        gain=gain,
     )
     sample = (index.times[frame_ids], values)
     with _stats_lock:
@@ -1815,6 +2148,7 @@ def compute_tile(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
+    agc_correct: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Build a display-resolution grid covering the requested time range.
 
@@ -1880,6 +2214,8 @@ def compute_tile(
             "total_in_range": 0,
             "exact": True,
             "anchored": True,
+            "agc_corrected": False,
+            "agc_states": 0,
             "vmin": 0.0,
             "vmax": 0.0,
             "p_low": 0.0,
@@ -1917,6 +2253,15 @@ def compute_tile(
     )
     correcting = reference is not None
 
+    # The receiver's own per-gain-state amplitude distortion. Fetched for the
+    # capture rather than for this filter — it is a property of the radio, not
+    # of which transmitter is being looked at. See ``get_gain_table``.
+    gain = (
+        get_gain_table(path, index, path.stat().st_size, interpolate=interpolate)
+        if agc_correct and _agc_affected(metric)
+        else None
+    )
+
     gap_limit = _capture_gap_limit(filtered_times, dt)
 
     # --- Assemble from chunks ------------------------------------------ #
@@ -1928,6 +2273,7 @@ def compute_tile(
             mimo=mimo, source_mac=source_mac, reference=reference,
             correcting=correcting, filtered=bool(filtered),
             interpolate=interpolate, gap_limit=gap_limit, num_sc=num_sc,
+            gain=gain,
         )
         for k in range(k0, k1 + 1)
     ]
@@ -1953,7 +2299,7 @@ def compute_tile(
     stat_times, stat_values = _scale_source(
         path, index, filtered_idxs, metric,
         mimo=mimo, source_mac=source_mac, reference=reference,
-        filtered=bool(filtered), interpolate=interpolate,
+        filtered=bool(filtered), interpolate=interpolate, gain=gain,
     )
     in_range = (
         (stat_times >= t0) & (stat_times <= t1) if len(stat_times) else np.zeros(0, bool)
@@ -1974,7 +2320,7 @@ def compute_tile(
             _decode_selection(
                 path, index, frame_ids, metric, reference,
                 contiguous=contiguous, filtered=bool(filtered),
-                interpolate=interpolate,
+                interpolate=interpolate, gain=gain,
             )
         )
 
@@ -1992,6 +2338,13 @@ def compute_tile(
         # selected, most often — in which case the ratio is shown exactly as
         # decoded rather than corrected against a reference that isn't there.
         "anchored": correcting if needs_reference else True,
+        # Whether this tile's amplitude had the receiver's per-gain-state
+        # distortion removed, and how many states carried a correction. False
+        # on a metric the table does not touch, on a non-MediaTek capture, and
+        # whenever the capture never changed gain state -- in all three the
+        # values are exactly as decoded. See backend.agc.
+        "agc_corrected": gain is not None,
+        "agc_states": gain.n_states if gain is not None else 0,
         "vmin": vmin,
         "vmax": vmax,
         "p_low": p_low,

@@ -237,10 +237,13 @@ def test_a_reference_range_produces_a_threshold_and_a_deviation() -> None:
     body = _presence(capture, 0.0, 20.0, ref_t0=0.0, ref_t1=20.0)
 
     ref = body["reference"]
+    assert ref["dev_scale"] > 0.0
     assert ref["dev_p95"] > 0.0
     assert ref["motion_floor"] > 0.0
     assert ref["n_windows"] > 0
-    assert body["baseline_dev_threshold"] == pytest.approx(3.0 * ref["dev_p95"])
+    # The threshold is a multiple of dev_scale, not of dev_p95: a single
+    # unsettled window in the reference range must not be able to set it.
+    assert body["baseline_dev_threshold"] == pytest.approx(3.0 * ref["dev_scale"])
     assert any(v is not None for v in body["baseline_dev"])
 
 

@@ -392,7 +392,7 @@ describe("fetchPresence", () => {
     window_seconds: 30,
     rpm_floor_eff: 4,
     baseline_dev_threshold: 1.53,
-    reference: { dev_p95: 0.51, motion_floor: 0.069, n_windows: 167 },
+    reference: { dev_scale: 0.51, dev_p95: 0.62, motion_floor: 0.069, n_windows: 167 },
     frames_used: 11100,
     frames_without_ratio: 0,
     t_min: 0,
@@ -445,7 +445,8 @@ describe("fetchPresence", () => {
 
     expect(result.baselineDevThreshold).toBe(1.53);
     expect(result.reference).toEqual({
-      devP95: 0.51,
+      devScale: 0.51,
+      devP95: 0.62,
       motionFloor: 0.069,
       nWindows: 167,
     });

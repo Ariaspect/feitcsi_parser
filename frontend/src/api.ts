@@ -20,6 +20,20 @@ export interface CaptureFile {
   path: string;
   size_bytes: number;
   mtime: number;
+  /** Conditions the capture was recorded under, as far as they were recorded.
+   *  Absent rather than null when unknown, so "not recorded" is distinguishable
+   *  from a recorded blank. `scenario` falls back to what the camera saw
+   *  (empty / partial / occupied) when nothing was declared. */
+  room?: string;
+  configuration?: string;
+  scenario?: string;
+  subject?: string;
+  activity?: string;
+  facing?: string;
+  distance_m?: number;
+  /** Camera-measured occupied fraction, present only with the scenario
+   *  fallback above. */
+  occupancy?: number;
 }
 
 export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {
@@ -130,6 +144,13 @@ export interface Tile {
   /** False when a correction metric had no absolute orientation to anchor
    *  to, so this tile's polarity is not comparable with another view's. */
   anchored: boolean;
+  /** True when the receiver's per-gain-state amplitude distortion was removed
+   *  from this tile. False means the values are exactly as decoded: the
+   *  toggle is off, the metric is one the correction does not touch, the
+   *  capture is not MediaTek, or its gain never stepped. */
+  agcCorrected: boolean;
+  /** How many gain states carried a correction. 0 when agcCorrected is false. */
+  agcStates: number;
   vmin: number;
   vmax: number;
   pLow: number; // 1st percentile of finite values — robust scale for amplitude
@@ -179,6 +200,7 @@ export async function fetchTile(
   mimo?: string | null,
   sourceMac?: string | null,
   interpolate?: boolean,
+  agc?: boolean,
 ): Promise<Tile> {
   const url =
     `/api/tile?path=${encodeURIComponent(path)}` +
@@ -187,7 +209,8 @@ export async function fetchTile(
     // Omit when true: that is the backend's own default, and every existing
     // caller that never heard of this parameter must keep building the same
     // URL it always has.
-    (interpolate === false ? "&interpolate=false" : "");
+    (interpolate === false ? "&interpolate=false" : "") +
+    (agc === false ? "&agc=false" : "");
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const text = await res.text();
@@ -215,6 +238,10 @@ export async function fetchTile(
     exact: h.get("X-Tile-Exact") === "1",
     // Absent header means an older backend that always anchored implicitly.
     anchored: h.get("X-Tile-Anchored") !== "0",
+    // Absent header means a backend older than the correction, which never
+    // applied one -- so "not corrected" is the honest reading, not "unknown".
+    agcCorrected: h.get("X-Tile-Agc") === "1",
+    agcStates: parseInt(h.get("X-Tile-AgcStates") ?? "0", 10),
     vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
     vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
     pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),
@@ -249,6 +276,14 @@ export interface DopplerTile extends Tile {
   win: number;
   hop: number;
   winSeconds: number;
+  /** The fixed colour range this panel should use, in dB. Doppler values are
+   *  normalised by the taper's coherent gain and served in dB, so the same
+   *  number means the same motion in every capture. Auto-fitting instead is
+   *  what made two captures of the same room look different: one spanning
+   *  0..0.2 in raw magnitude and another 0..7.0, both stretched across the
+   *  whole ramp. */
+  scaleMin: number;
+  scaleMax: number;
 }
 
 export async function fetchDoppler(
@@ -296,6 +331,11 @@ export async function fetchDoppler(
     // inexact case to report and nothing to anchor against another view.
     exact: true,
     anchored: true,
+    scaleMin: parseFloat(h.get("X-Doppler-ScaleMin") ?? "-60"),
+    scaleMax: parseFloat(h.get("X-Doppler-ScaleMax") ?? "-10"),
+    // The Doppler path runs on the CSI ratio, which divides the gain out.
+    agcCorrected: false,
+    agcStates: 0,
     vmin: parseFloat(h.get("X-Tile-VMin") ?? "0"),
     vmax: parseFloat(h.get("X-Tile-VMax") ?? "0"),
     pLow: parseFloat(h.get("X-Tile-PLow") ?? "0"),
@@ -344,10 +384,13 @@ export interface PresenceParams {
 }
 
 /** What the empty-room reference range measured, or `null` when none was
- *  given. `devP95` is how far that room's own windows strayed from its
- *  profile — the unit `baselineDev` is judged in — and `motionFloor` is its
- *  fractional-motion noise floor, which is never zero. */
+ *  given. `devScale` is how far that room's own windows typically strayed from
+ *  its profile — the unit `baselineDev` is judged in — and `motionFloor` is its
+ *  fractional-motion noise floor, which is never zero. `devP95` is the same
+ *  quantity at the 95th percentile, which the threshold used until 20260914;
+ *  a `devP95` far above `devScale` means the reference range never settled. */
 export interface PresenceReference {
+  devScale: number;
   devP95: number;
   motionFloor: number;
   nWindows: number;
@@ -508,6 +551,7 @@ export async function fetchPresence(
     baselineDevThreshold: body.baseline_dev_threshold ?? null,
     reference: body.reference
       ? {
+          devScale: body.reference.dev_scale ?? body.reference.dev_p95,
           devP95: body.reference.dev_p95,
           motionFloor: body.reference.motion_floor,
           nWindows: body.reference.n_windows,
@@ -638,6 +682,87 @@ export async function fetchLgDetect(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail ?? `lgdetect: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** One cell-count set, plus the rates derived from it. Nulls where a rate has
+ *  no denominator — a capture with no empty window has no specificity, and
+ *  saying 0% would be a different claim from saying "not measured". */
+export interface Confusion {
+  tp: number;
+  fp: number;
+  fn: number;
+  tn: number;
+  total: number;
+  accuracy: number | null;
+  recall: number | null;
+  specificity: number | null;
+  precision: number | null;
+}
+
+/** Both detectors resampled onto one grid and scored against the camera.
+ *
+ *  `ours` is null when the capture could not be calibrated — the reference has
+ *  to come from other camera-empty captures, never this one's own stretches,
+ *  and there have to be at least two. `calibrationNote` says which condition
+ *  failed. `lg` is always present: it compares each frame to the one before and
+ *  so needs no reference at all, which is exactly the trade the two make. */
+export interface Phase1 {
+  path: string;
+  gridSeconds: number;
+  timeS: number[];
+  groundTruth: { timeS: number[]; present: boolean[] };
+  calibrated: boolean;
+  calibrationNote?: string;
+  /** Present when the reference pool sits further from the capture than the
+   *  default window allows. Nothing else detects a pool from a different room,
+   *  so a widened window is the one thing worth saying out loud. */
+  referenceWarning?: string;
+  ours: {
+    present: boolean[];
+    threshold: number;
+    devScale: number;
+    /** Median pairwise distance between the pooled references. Small means they
+     *  describe one room; large means the pool spans two and its scale would
+     *  measure the gap between them. */
+    poolSpread: number;
+    /** How far the capture's quietest window still sits from the pool. */
+    minDeviation: number;
+    /** That distance in thresholds. Diagnostic only: it does NOT separate a
+     *  usable calibration from a broken one. Measured over 22 working
+     *  calibrations it spans 0.09–5.65, while two known-broken ones read 4.94
+     *  and 5.20 — fully inside that range, because the numerator also carries
+     *  how occupied the capture is and the denominator how tight the pool is. */
+    applicability: number | null;
+    /** Hours between this capture and its nearest reference. This is the real
+     *  guard against a pool from a different room, so it is shown. */
+    referenceAgeH: number;
+    references: string[];
+    confusion: Confusion;
+  } | null;
+  lg: {
+    present: boolean[];
+    threshold: number;
+    absence: number;
+    events: number;
+    confusion: Confusion;
+  };
+}
+
+export async function fetchPhase1(
+  path: string,
+  opts: { grid?: number; k?: number; lgThreshold?: number; lgAbsence?: number } = {},
+  signal?: AbortSignal,
+): Promise<Phase1> {
+  const { grid = 1, k = 3, lgThreshold = 26, lgAbsence = 10 } = opts;
+  const url =
+    `/api/phase1?path=${encodeURIComponent(path)}` +
+    `&grid=${grid}&k=${k}&lg_threshold=${lgThreshold}&lg_absence=${lgAbsence}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `phase1: ${res.status}`);
   }
   return res.json();
 }

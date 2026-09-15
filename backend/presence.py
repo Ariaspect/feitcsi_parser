@@ -106,7 +106,7 @@ DEFAULT_PRESENT_THRESHOLD = 0.25
 
 # How far a window's channel state must sit from the empty-room reference
 # before a still occupant is claimed, in units of how much that same empty
-# room wandered on its own (``dev_p95``). Expressing it that way is what makes
+# room wandered on its own (``dev_scale``). Expressing it that way is what makes
 # one number work across radios: the absolute deviation that means "occupied"
 # is a property of the room and the hardware, the *ratio* to the room's own
 # variability is not. Measured on
@@ -115,6 +115,28 @@ DEFAULT_PRESENT_THRESHOLD = 0.25
 # reads 2.32 dB at the 5th percentile -- 3.75x -- so 3.0 separates them with
 # margin on both sides.
 DEFAULT_BASELINE_DEV_K = 3.0
+
+# The scale that k multiplies is the MEDIAN of the reference windows'
+# deviations, doubled to land it near where the 95th percentile used to sit.
+# Which deviation depends on presence_reference's scale_mode: within-range for
+# a bracketed single capture, leave-one-out for a pool of separate captures.
+# It was the 95th percentile until 20260914, and that is a breakable choice: a
+# reference range covers ~20 windows, so a single unsettled one sets the
+# threshold outright. The trailing empty stretch of a bracketed run is exactly
+# that -- the room does not snap back the instant the occupant leaves. On
+# 20260914_134409 the tail was still at 0.26-0.48 dB against 0.06 dB before
+# the occupant arrived, which put dev_p95 at 0.451 and the threshold at 1.35,
+# above the 1.10 dB the occupant themselves read: 6% recall on a person the
+# same detector found 100% of the time three minutes later, facing the other
+# way. A median needs half the windows contaminated before it moves.
+#
+# Scored over the 26 bracketed captures that carry camera ground truth
+# (20260904, 20260909, 20260911, 20260914): recall 85% -> 92% at an unchanged
+# 2% false-positive rate. The multiplier is an operating point on a slope, not
+# a plateau -- x4 reaches 98% recall but 7% false, x8 holds 2% false at 84%
+# recall -- so it wants re-measuring against the full labelled corpus rather
+# than trusting these 26.
+DEFAULT_DEV_SCALE_MULT = 2.0
 
 # Gross motion as a multiple of the room's own fractional-motion floor. The
 # absolute test alone cannot do this job: on the capture above the floor is
@@ -327,18 +349,78 @@ def in_band_weight(
     return _weight_from_power(power, freqs, band)
 
 
+# How far two profiles in a reference pool may sit apart before they are taken
+# to describe different rooms rather than one room twice. Measured on the
+# labelled corpus: consecutive empty captures of an undisturbed room sit 0.21 dB
+# apart (median over 162 pairs under 90 min), a moved NIC shows as 3-5 dB, and
+# the pair that provoked this check -- 20260914_131846 against 20260914_193002,
+# six hours apart -- sits 10.6 dB apart. 2.0 dB admits the first and rejects the
+# other two, which is the split that matters: a pool spanning two different
+# rooms makes dev_scale measure the gap between them rather than the wander
+# within either, and the threshold that follows is unreachable.
+DEFAULT_MAX_POOL_SPREAD_DB = 2.0
+
+
+def screen_reference_pool(
+    profiles: Sequence[np.ndarray],
+    max_spread_db: float = DEFAULT_MAX_POOL_SPREAD_DB,
+) -> tuple[list[int], float]:
+    """Which pooled references describe the same room, and how far they spread.
+
+    Returns the indices to keep and the median pairwise distance across the
+    WHOLE pool -- not the kept set, whose spread is small by construction and
+    would hide exactly the disagreement worth reporting. The kept set is the
+    largest group agreeing with one profile
+    within *max_spread_db*, chosen by trying each profile as the anchor -- a
+    plain "drop anything far from the median" rule fails when the pool splits
+    evenly, because then the median sits between the two groups and everything
+    looks equally far from it.
+
+    A caller that ends up with fewer than two profiles has no usable pool and
+    should say so rather than calibrate on one, which measures within-capture
+    wander instead of the between-capture distance a verdict compares against.
+    """
+    n = len(profiles)
+    if n == 0:
+        return [], float("nan")
+    if n == 1:
+        return [0], 0.0
+
+    dist = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = baseline_deviation(profiles[i], profiles[j])
+            dist[i, j] = dist[j, i] = d
+    np.fill_diagonal(dist, 0.0)
+
+    best: list[int] = []
+    for anchor in range(n):
+        group = [j for j in range(n)
+                 if np.isfinite(dist[anchor, j]) and dist[anchor, j] <= max_spread_db]
+        if len(group) > len(best):
+            best = group
+    if not best:
+        best = [0]
+
+    pairs = [dist[i, j] for i in range(n) for j in range(i + 1, n)
+             if np.isfinite(dist[i, j])]
+    spread = float(np.median(pairs)) if pairs else 0.0
+    return sorted(best), spread
+
+
 def presence_reference(
     ratio: np.ndarray | Sequence[np.ndarray],
     fs: float,
     *,
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     hop_seconds: float = DEFAULT_HOP_SECONDS,
+    scale_mode: str = "within",
 ) -> dict[str, Any]:
     """Reduce one or more stretches of known-empty capture to what a verdict needs.
 
     Three numbers, each with one job. ``profile`` is what a window's channel
-    state is compared against. ``dev_p95`` is how far the empty room's own
-    windows strayed from that profile, which is the unit the presence
+    state is compared against. ``dev_scale`` is how far the empty room's own
+    windows typically strayed from that profile, which is the unit the presence
     threshold is expressed in -- an absolute dB threshold would have to be
     re-tuned per radio and per room, a multiple of the room's own wander does
     not. ``motion_floor`` is the fractional-motion noise floor here, which is
@@ -408,19 +490,44 @@ def presence_reference(
     devs: list[float] = []
     levels: list[float] = []
     win = 0
-    for seg, own in zip(segments, profiles):
+    # Two ways to turn the reference windows into a scale, because there are
+    # two ways the ranges relate to the capture being judged, and they need
+    # opposite treatment:
+    #
+    # "within" (default) -- the ranges are the empty stretches of the SAME
+    #   capture under analysis (the bracketed lead/trail the UI passes). The
+    #   verdict scores that capture's occupied middle against those same
+    #   stretches, so the relevant baseline is how much THIS capture wanders
+    #   inside itself: score each range's windows against their own profile.
+    #   Measured over the 26 bracketed captures with camera truth, this holds
+    #   92% recall at 2% false. Leave-one-out here instead scores lead against
+    #   trail -- 1-2 dB apart within one capture -- and inflates the scale to
+    #   2-6 dB, which took recall to 4%.
+    #
+    # "loo" -- the ranges are a POOL of separate prior empty captures, and the
+    #   capture under analysis is NOT one of them. The verdict scores it
+    #   against the nearest pooled profile, so the scale must be that same
+    #   cross-capture distance: score each pooled range against the nearest of
+    #   the OTHERS (leave-one-out), each standing in for "a capture not in the
+    #   pool". Within-range here measures how one capture wanders inside itself
+    #   (~0.04 dB overnight) while the verdict compares whole captures (~0.2 dB
+    #   even 10 min apart) -- the threshold came out ~5x too low and a
+    #   perfectly empty room read as occupied 79% of the time (21%
+    #   specificity). Leave-one-out lifts that to ~91% at ~94% recall.
+    if scale_mode not in ("within", "loo"):
+        raise ValueError(f"scale_mode must be 'within' or 'loo', got {scale_mode!r}")
+    for i, (seg, own) in enumerate(zip(segments, profiles)):
         n_samples = seg.shape[0]
         win = min(max(MIN_WINDOW_SAMPLES, int(round(window_seconds * fs))), n_samples)
         frac_full = fractional_motion(seg)
+        if scale_mode == "loo":
+            others = [pr for j, pr in enumerate(profiles) if j != i]
+            refset = others if others else [own]
+        else:
+            refset = [own]
         for start in range(0, n_samples - win + 1, hop):
-            # Each range's windows are scored against their OWN profile, so
-            # dev_p95 stays a measure of how much one empty room wanders and
-            # not of how far two empty rooms sit apart.
-            devs.append(
-                baseline_deviation(
-                    amplitude_profile(seg[start : start + win]), own
-                )
-            )
+            w = amplitude_profile(seg[start : start + win])
+            devs.append(min(baseline_deviation(w, pr) for pr in refset))
             piece = frac_full[start : start + win - 1]
             if piece.size and np.isfinite(piece).any():
                 levels.append(float(np.nanmedian(piece)))
@@ -437,7 +544,22 @@ def presence_reference(
         "profiles": profiles,
         # A floor under both, so a pathologically quiet reference cannot make
         # every later window look like an occupant by dividing by nothing.
+        # dev_scale is what the verdict divides by; dev_p95 is kept beside it
+        # because it is what the panels have always displayed and because the
+        # gap between the two is the diagnostic for a reference range that did
+        # not settle.
+        "dev_scale": max(
+            float(np.median(finite_dev)) * DEFAULT_DEV_SCALE_MULT, 1e-3
+        ),
         "dev_p95": max(float(np.percentile(finite_dev, 95)), 1e-3),
+        # Median pairwise distance between the pooled profiles. Small means
+        # they describe one room; large means dev_scale above is measuring the
+        # gap between two different rooms and the threshold is not reachable.
+        "profile_spread": screen_reference_pool(profiles)[1],
+        # The raw per-window deviations, kept so a caller can ask what a
+        # different statistic would have said without decoding the range
+        # again. Nothing in the verdict path reads this.
+        "devs": finite_dev,
         "motion_floor": max(float(np.median(finite_lvl)), 1e-6),
         "n_windows": int(finite_dev.size),
         "n_ranges": len(segments),
@@ -870,7 +992,9 @@ def presence_windows(
         dev_threshold: float | None = None
     else:
         motion_ratio_a = motion_level_a / float(reference["motion_floor"])
-        dev_threshold = float(baseline_dev_k) * float(reference["dev_p95"])
+        dev_threshold = float(baseline_dev_k) * float(
+            reference.get("dev_scale", reference["dev_p95"])
+        )
 
     warnings: list[str] = []
     if reference is None:
@@ -920,6 +1044,7 @@ def presence_windows(
         "reference": None
         if reference is None
         else {
+            "dev_scale": float(reference.get("dev_scale", reference["dev_p95"])),
             "dev_p95": float(reference["dev_p95"]),
             "motion_floor": float(reference["motion_floor"]),
             "n_windows": int(reference["n_windows"]),

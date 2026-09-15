@@ -37,3 +37,6 @@ node_modules/
 
 # cached detector replays; deterministic, re-derivable
 .cache/
+
+# Symlink views over captures/, rebuilt by scripts/build_dataset_tree.py.
+datasets/

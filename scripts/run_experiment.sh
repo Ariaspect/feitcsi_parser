@@ -2,8 +2,15 @@
 #
 # One labelled presence run: empty -> sitting -> empty, 300s total.
 #
-#   scripts/run_experiment.sh POSITION [NOTE...]
+#   scripts/run_experiment.sh [--distance M] POSITION [NOTE...]
 #   scripts/run_experiment.sh chair_facing_tv "leaning back"
+#   scripts/run_experiment.sh --distance 2.0 dist_2m "distance calibration"
+#
+# --distance is the subject's distance from the NIC module in metres. It is the
+# one fact about a run that cannot be recovered afterwards -- the frames show
+# how large the person looked, not how far away they were -- so it is recorded
+# at capture time or not at all. KPI #1 is defined at a 3 m radius and cannot
+# be evaluated without it.
 #
 # The protocol is 90s empty / 120s sitting / 90s empty. The two empty stretches
 # bracket the sitting one deliberately: each run carries its own empty-room
@@ -22,10 +29,61 @@
 # offset is recorded per run for exactly that reason.
 set -uo pipefail
 
+DISTANCE_M=${DISTANCE_M:-}
+DISTANCE_REF=${DISTANCE_REF:-nic}
+# Which way the subject faced, what they were doing, and where the operator
+# waited out the empty phases. The last one is not bookkeeping: on 20260914 the
+# empty stretches of three runs sat at 0.25-0.57 dB against 0.03-0.05 dB in a
+# genuinely vacated room, which inflated dev_p95 enough that the detector
+# missed a person it had no trouble with three days earlier.
+FACING=${FACING:-}
+ACTIVITY=${ACTIVITY:-}
+OPERATOR_AT=${OPERATOR_AT:-}
+
+# The three axes a dataset gets sliced along: which room, how it was arranged,
+# and what the subject did. They are recorded here rather than inferred later
+# because only the first is ever recoverable from the data -- and only roughly,
+# via the empty-room profile. Kept flat as strings so a value can be invented
+# on the spot; scripts/build_dataset_tree.py is what turns them into folders,
+# and it treats an unset field as "unspecified" rather than guessing.
+ROOM=${ROOM:-}
+CONFIGURATION=${CONFIGURATION:-}
+SCENARIO=${SCENARIO:-}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --distance)   DISTANCE_M=${2:-}; shift 2 ;;
+        --distance=*) DISTANCE_M=${1#*=}; shift ;;
+        --facing)     FACING=${2:-}; shift 2 ;;
+        --facing=*)   FACING=${1#*=}; shift ;;
+        --activity)   ACTIVITY=${2:-}; shift 2 ;;
+        --activity=*) ACTIVITY=${1#*=}; shift ;;
+        --operator-at)   OPERATOR_AT=${2:-}; shift 2 ;;
+        --operator-at=*) OPERATOR_AT=${1#*=}; shift ;;
+        --room)       ROOM=${2:-}; shift 2 ;;
+        --room=*)     ROOM=${1#*=}; shift ;;
+        --config)     CONFIGURATION=${2:-}; shift 2 ;;
+        --config=*)   CONFIGURATION=${1#*=}; shift ;;
+        --scenario)   SCENARIO=${2:-}; shift 2 ;;
+        --scenario=*) SCENARIO=${1#*=}; shift ;;
+        --)           shift; break ;;
+        *)            break ;;
+    esac
+done
+
 POSITION=${1:-}
-[ -n "$POSITION" ] || { echo "usage: run_experiment.sh POSITION [NOTE...]" >&2; exit 2; }
+[ -n "$POSITION" ] || {
+    echo "usage: run_experiment.sh [--distance M] [--facing F] [--activity A]" >&2
+    echo "                            [--operator-at WHERE] [--room R] [--config C]" >&2
+    echo "                            [--scenario S] POSITION [NOTE...]" >&2; exit 2; }
 shift
 NOTE="$*"
+
+# A distance that silently parses as 0 is worse than no distance at all.
+if [ -n "$DISTANCE_M" ] && ! printf '%s' "$DISTANCE_M" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+    echo "--distance must be a number in metres, got '$DISTANCE_M'" >&2
+    exit 2
+fi
 
 # Filenames and JSON keys both get this, so keep it boring.
 SAFE_POSITION=$(printf '%s' "$POSITION" | tr -c '[:alnum:]_-' '_')
@@ -61,6 +119,10 @@ fi
 cat <<BANNER
 
   position : $POSITION
+  distance : ${DISTANCE_M:-not recorded}${DISTANCE_M:+ m from $DISTANCE_REF}
+  dataset  : room ${ROOM:-?} / config ${CONFIGURATION:-?} / scenario ${SCENARIO:-?}
+  subject  : facing ${FACING:-?} / ${ACTIVITY:-?}
+  operator : waits at ${OPERATOR_AT:-?}
   protocol : 0-${PHASE1_END}s EMPTY | ${PHASE1_END}-${PHASE2_END}s SITTING | ${PHASE2_END}-${DURATION}s EMPTY
   clock    : board-host offset ${OFFSET:-unknown}s
 
@@ -111,6 +173,9 @@ for ext in tar tar.zst; do
 done
 
 STAMP="$STAMP" POSITION="$POSITION" SAFE_POSITION="$SAFE_POSITION" NOTE="$NOTE" \
+DISTANCE_M="$DISTANCE_M" DISTANCE_REF="$DISTANCE_REF" \
+FACING="$FACING" ACTIVITY="$ACTIVITY" OPERATOR_AT="$OPERATOR_AT" \
+ROOM="$ROOM" CONFIGURATION="$CONFIGURATION" SCENARIO="$SCENARIO" \
 DURATION="$DURATION" PHASE1_END="$PHASE1_END" PHASE2_END="$PHASE2_END" \
 START_EPOCH="$START_EPOCH" OFFSET="$OFFSET" FRAMES="$FRAMES" LEAD_IN="$LEAD_IN" \
 python3 - "$META" <<'PY'
@@ -152,6 +217,20 @@ meta = {
     "frames_archived": int(os.environ["FRAMES"] or 0),
     "camera": os.environ.get("WEBCAM_DEV", "/dev/video2"),
 }
+
+# Absent rather than null when unrecorded: a later backfill through set_meta.py
+# should be able to tell "nobody measured this" from "measured as 0".
+if os.environ.get("DISTANCE_M"):
+    meta["distance_m"] = float(os.environ["DISTANCE_M"])
+    meta["distance_ref"] = os.environ.get("DISTANCE_REF") or "nic"
+    meta["distance_source"] = "measured"
+
+for key in ("facing", "activity", "operator_at",
+            "room", "configuration", "scenario"):
+    value = os.environ.get(key.upper())
+    if value:
+        meta[key] = value
+
 json.dump(meta, open(sys.argv[1], "w"), indent=2)
 print("sidecar:", sys.argv[1])
 PY
@@ -185,5 +264,6 @@ fi
 # archive may be .tar or .tar.zst.
 
 echo
-echo "  $STAMP  position=$POSITION  frames=$FRAMES"
+echo "  $STAMP  position=$POSITION${DISTANCE_M:+  distance=${DISTANCE_M}m}" \
+     "${FACING:+ facing=$FACING}${ACTIVITY:+ activity=$ACTIVITY}  frames=$FRAMES"
 echo "  review, then run the next position."
