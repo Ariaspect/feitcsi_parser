@@ -82,6 +82,8 @@ phase already had.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 
@@ -153,6 +155,31 @@ CIR_DB_FLOOR = 1e-6
 # it, including the per-gain-state distortion backend.agc corrects.
 CIR_SCALE_DB: tuple[float, float] = (-50.0, 0.0)
 
+# Metres of EXCESS path length per delay tap, at the 80 MHz these captures
+# use: c / bandwidth. One tap is 3.75 m, which is the resolution limit and no
+# amount of processing improves it.
+CIR_TAP_METRES = 3.75
+
+# Taps kept either side of the centre. The rest is not the room.
+#
+# A tap is 3.75 m of excess path. A 5x5 m room has a 7.07 m diagonal, so a
+# single-bounce echo can be at most about 14 m longer than the direct path --
+# under four taps. Serving all 256 drew 960 m of range for a room that can
+# fill four taps of it, and put the whole of the room inside two pixels at the
+# centre of a panel otherwise showing nothing.
+#
+# What the far taps do hold is not echoes. A ratio H1(f)/H0(f) is a division
+# in frequency, which is a deconvolution in time and not compactly supported,
+# so its transform spreads energy across the whole row as a matter of
+# arithmetic; the 22 zero-filled null bins leak into it as well. Measured on
+# 20260911_095127 the median tap 8 out (30 m of excess path, geometrically
+# impossible in this room) still reads -10.7 dB. Drawing it invites reading it
+# as an echo.
+#
+# Eight rather than four, to leave room to see that the spread is there rather
+# than cropping to the point where it cannot be judged.
+CIR_CROP_TAPS = 8
+
 
 def cir_relative_db(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarray:
     """Centred CIR as dB below each frame's own peak.
@@ -170,8 +197,29 @@ def cir_relative_db(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarray:
     across captures, and across any gain sitting in front of the receiver.
     """
     cir = csi_to_cir_centred(amplitude_db, phase)
+    # A frame with no channel at all is legitimately all-NaN here -- see the
+    # module docstring -- so the empty-slice warning says only that, and the
+    # NaN it returns is what the caller wants.
+    warnings.filterwarnings("ignore", r"All-NaN slice encountered", RuntimeWarning)
+    # Normalised against the WHOLE row's peak before cropping, so the 0 dB
+    # reference is the frame's strongest path wherever it landed -- cropping
+    # first would renormalise to whatever survived the crop.
     peak = np.nanmax(np.where(np.isfinite(cir), cir, np.nan), axis=1, keepdims=True)
     with np.errstate(divide="ignore", invalid="ignore"):
         rel = cir / np.where(np.isfinite(peak) & (peak > 0), peak, np.nan)
         out = 20.0 * np.log10(np.maximum(rel, CIR_DB_FLOOR))
-    return np.where(np.isfinite(cir) & np.isfinite(out), out, np.nan).astype(np.float32)
+    out = np.where(np.isfinite(cir) & np.isfinite(out), out, np.nan).astype(np.float32)
+
+    centre = cir.shape[1] // 2
+    lo = max(0, centre - CIR_CROP_TAPS)
+    hi = min(cir.shape[1], centre + CIR_CROP_TAPS + 1)
+    return out[:, lo:hi]
+
+
+def cir_rows() -> int:
+    """Rows ``cir_relative_db`` emits, for callers that must size a grid.
+
+    An empty chunk has no data to take its height from, so the tile pipeline
+    needs this before any frame is decoded.
+    """
+    return 2 * CIR_CROP_TAPS + 1

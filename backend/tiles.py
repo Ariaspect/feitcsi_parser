@@ -45,7 +45,7 @@ import numpy as np
 from . import agc, mtk, presence
 from . import lgproc
 from .batch import decode_frames as _decode_feitcsi
-from .cir import CIR_SCALE_DB, cir_relative_db
+from .cir import CIR_SCALE_DB, CIR_TAP_METRES, cir_relative_db, cir_rows
 from .index import FrameIndex
 from .doppler import (
     DEFAULT_MAX_GAP_FRACTION,
@@ -169,6 +169,21 @@ DERIVED_METRICS: dict[str, Derived] = {
 LG_METRICS = lgproc.LG_METRICS
 
 TILE_METRICS = BASE_METRICS + tuple(DERIVED_METRICS) + LG_METRICS
+
+
+def metric_rows(metric: str, index: FrameIndex | mtk.MTKIndex) -> int:
+    """How many rows *metric* emits.
+
+    Nearly always the subcarrier count, because nearly every metric keeps one
+    value per subcarrier. ``csi_cir`` does not: its rows are delay taps and it
+    is cropped to the span a room can actually fill. Two places need the
+    height before any frame is decoded -- an empty chunk, which has no data to
+    take it from, and the block path, which allocates its output up front --
+    and both silently assumed subcarriers.
+    """
+    if metric == "csi_cir":
+        return cir_rows()
+    return index.num_subcarriers
 
 
 def _needs_reference(metric: str) -> bool:
@@ -1005,7 +1020,7 @@ def _decode_via_blocks(
     frames are then sliced out.
     """
     n = len(frame_ids)
-    num_sc = index.num_subcarriers
+    num_sc = metric_rows(metric, index)
     out = np.empty((n, num_sc), dtype=np.float32)
 
     pos = 0
@@ -2201,7 +2216,7 @@ def compute_tile(
     """
     path = Path(path)
     index = get_index(path)
-    num_sc = index.num_subcarriers
+    num_sc = metric_rows(metric, index)
     times = index.times
 
     filtered = mimo is not None or (source_mac is not None and source_mac.strip())

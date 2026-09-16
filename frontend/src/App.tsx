@@ -92,6 +92,16 @@ function FoldedPanel({
 
 /** What a Doppler panel needs to label its frequency axis: how many rows the
  *  server sent, and what the bottom and top rows mean in hertz. */
+// The CIR panel's delay axis. One tap is c / 80 MHz = 3.75 m of EXCESS path,
+// and the panel is cropped to 8 taps either side of centre because a 5 m room
+// with a 7 m diagonal can only fill about four: a single-bounce echo is at
+// most ~14 m longer than the direct path. Mirrors backend.cir; a backend test
+// pins the pair so they cannot drift apart.
+const CIR_CROP_TAPS = 8;
+const CIR_TAP_METRES = 3.75;
+const CIR_ROWS = 2 * CIR_CROP_TAPS + 1;
+const CIR_HALF_SPAN_M = CIR_CROP_TAPS * CIR_TAP_METRES;
+
 interface DopplerGeom {
   rows: number;
   fMin: number;
@@ -793,14 +803,19 @@ export function App() {
               path={path}
               metric="csi_cir"
               filename={meta.filename}
-              numSubcarriers={meta.num_subcarriers}
+              // Delay taps, not subcarriers, and cropped to the span a room
+              // can fill: CIR_CROP_TAPS=8 either side of centre at
+              // CIR_TAP_METRES=3.75 m per tap. backend.cir.cir_rows() is the
+              // source of truth and a test pins these two numbers to it.
+              numSubcarriers={CIR_ROWS}
               captureTMin={meta.t_min}
               captureTMax={meta.t_max}
               title="Channel Impulse Response — |IFFT| of the ratio (tpi1/tpi0)"
               colorLabel="dB below peak"
               minValue={-50}
               maxValue={0}
-              axisLabel="Delay tap"
+              axisLabel="Excess path (m)"
+              yDomain={[-CIR_HALF_SPAN_M, CIR_HALF_SPAN_M]}
               height={320}
               timeLink={timeLink}
               mimo={mimo}

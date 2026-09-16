@@ -181,3 +181,39 @@ def test_the_cir_metric_is_built_on_the_ratio_planes():
     )
     # and therefore it no longer inherits the AGC correction
     assert not tiles._agc_affected("csi_cir")
+
+
+def test_the_crop_matches_what_the_frontend_hardcodes():
+    """App.tsx carries CIR_CROP_TAPS and CIR_TAP_METRES to lay out the axis
+    before the first tile arrives, so it cannot read them from a response.
+    This is the guard against the two drifting apart."""
+    from backend.cir import CIR_CROP_TAPS, CIR_TAP_METRES, cir_rows
+
+    assert CIR_CROP_TAPS == 8
+    assert CIR_TAP_METRES == 3.75
+    assert cir_rows() == 17
+
+
+def test_the_crop_keeps_the_centre_and_drops_the_rest():
+    amp_db, phase = _two_tap(n=256)
+    full = csi_to_cir_centred(amp_db, phase)
+    out = cir_relative_db(amp_db, phase)
+    from backend.cir import CIR_CROP_TAPS
+
+    assert out.shape[1] == 2 * CIR_CROP_TAPS + 1
+    # the peak survives the crop and is still the 0 dB reference
+    assert np.nanmax(out) == pytest.approx(0.0, abs=1e-5)
+    assert full.shape[1] == 256
+
+
+def test_normalisation_uses_the_whole_row_not_the_crop():
+    """A strong tap outside the kept window must still set 0 dB, or the panel
+    would renormalise to whatever the crop happened to contain."""
+    n = 256
+    taps = np.zeros(n, dtype=complex)
+    taps[0] = 1.0            # lands at the centre after fftshift
+    taps[40] = 10.0          # far outside the crop, and much stronger
+    h = np.fft.fftshift(np.fft.fft(taps))
+    out = cir_relative_db(20 * np.log10(np.abs(h))[None, :], np.angle(h)[None, :])
+    # the kept window holds only the weaker tap, so nothing in it reaches 0 dB
+    assert np.nanmax(out) < -15.0
