@@ -263,7 +263,6 @@ def test_a_capture_that_grew_keeps_the_columns_it_had() -> None:
     The live-follow case: a poll extends the capture, the window slides, and
     every column left of the new data has to come back unchanged.
     """
-    import shutil
 
     from backend.index import HEADER_BYTES
     from backend.tiles import get_index

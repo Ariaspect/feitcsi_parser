@@ -25,7 +25,6 @@ from backend.mtk import (
     MTKIndex,
     can_read,
     decode_frames,
-    estimate_csd_slope,
 )
 
 CAPTURES = Path(__file__).resolve().parent.parent / "captures"
