@@ -231,12 +231,17 @@ MAX_HOLD_METRICS = (
     "amplitude",
     "csi_ratio_amplitude",
     "csi_ratio_amplitude_corrected",
-    # A CIR magnitude is the same kind of quantity as an amplitude — real,
-    # non-negative, meaningfully peaked — so the same peak-preserving
-    # aggregation applies rather than nearest-frame, which would just pick
-    # one frame's echo pattern and discard the rest of a zoomed-out column.
-    "csi_cir",
 )
+
+# csi_cir is deliberately NOT max-held, though it was while it carried a raw
+# linear magnitude. It is now dB below each frame's OWN peak, so every frame
+# already sits at 0 at its strongest tap and a maximum over a column cannot
+# find anything above that -- it can only drag the other rows up. Measured
+# over ten captures, max-hold lifts the median from -11.2 to -9.8 dB and puts
+# 7.6% of cells at 0 dB against 5.9% for nearest-frame, and 5.9% is exactly
+# 1/17: one peak row per column, which is the structure rather than
+# saturation. Nearest-frame also shows a real frame instead of a synthetic
+# maximum assembled from several.
 
 # Metrics whose values are angles wrapped to (-pi, pi] — the ones the
 # frontend gives a fixed [-pi, pi] scale and the TWILIGHT palette. Averaging

@@ -217,3 +217,30 @@ def test_normalisation_uses_the_whole_row_not_the_crop():
     out = cir_relative_db(20 * np.log10(np.abs(h))[None, :], np.angle(h)[None, :])
     # the kept window holds only the weaker tap, so nothing in it reaches 0 dB
     assert np.nanmax(out) < -15.0
+
+
+def test_the_scale_matches_the_cropped_rows_not_the_full_row():
+    """The range must be measured on the rows the panel draws.
+
+    -50 was set from the uncropped 256-row tile, whose far taps sit near the
+    noise floor and pulled the median to -40.9 dB. Cropping kept the strong
+    rows near the peak and moved it to -11.3, so the old range left every cell
+    in the top 40% of the ramp as one flat wash.
+    """
+    from backend.cir import CIR_SCALE_DB
+
+    lo, hi = CIR_SCALE_DB
+    assert hi == 0.0
+    # The cropped median sits near -11 dB; a floor further down than about
+    # -35 spends most of the ramp on cells that do not occur.
+    assert -35.0 <= lo <= -25.0, lo
+
+
+def test_csi_cir_is_not_max_held():
+    """Every frame is already 0 dB at its own peak, so a maximum over a column
+    can only drag the other rows up -- measured at 7.6% of cells pinned to
+    0 dB against 5.9% for nearest-frame, where 5.9% is one peak row per
+    column and is the structure rather than saturation."""
+    from backend import tiles
+
+    assert "csi_cir" not in tiles.MAX_HOLD_METRICS
