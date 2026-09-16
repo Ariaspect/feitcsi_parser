@@ -796,8 +796,10 @@ export function App() {
               numSubcarriers={meta.num_subcarriers}
               captureTMin={meta.t_min}
               captureTMax={meta.t_max}
-              title="Channel Impulse Response — |IFFT| (rx0/tx0)"
-              colorLabel="CIR magnitude"
+              title="Channel Impulse Response — |IFFT| of the ratio (tpi1/tpi0)"
+              colorLabel="dB below peak"
+              minValue={-50}
+              maxValue={0}
               axisLabel="Delay tap"
               height={320}
               timeLink={timeLink}
