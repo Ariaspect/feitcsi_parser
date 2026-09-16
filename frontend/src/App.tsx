@@ -812,7 +812,7 @@ export function App() {
               captureTMax={meta.t_max}
               title="Channel Impulse Response — |IFFT| of the ratio (tpi1/tpi0)"
               colorLabel="dB below peak"
-              minValue={-50}
+              minValue={-30}
               maxValue={0}
               axisLabel="Excess path (m)"
               yDomain={[-CIR_HALF_SPAN_M, CIR_HALF_SPAN_M]}

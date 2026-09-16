@@ -134,26 +134,23 @@ def csi_to_cir_centred(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarra
 CIR_DB_FLOOR = 1e-6
 
 # The fixed colour range, in dB below each frame's own peak. Measured over
-# fourteen September captures, on the max-hold tiles the panel actually draws:
-# 2.07M cells: p5 -53.1, p25 -46.8, p50 -40.9, p75 -29.8, p95 -8.6. This range
-# holds 87.4% of them; the 12.6% it clips is all at the bottom, where the taps
-# carry nothing but noise and a uniform dark reads better than a ramp spread
-# across it. Nothing clips at the top -- 0 dB is each frame's own peak, so no
-# cell can exceed it by construction, which is what makes the ceiling exact
-# rather than chosen. -55 would hold 97.4% and -45 only 66.9%: the first
-# spends a fifth of the ramp on the noise floor, the second starts swallowing
-# real echo structure.
+# fourteen September captures on the CROPPED tiles the panel draws, 137k
+# cells: p5 -29.8, p25 -21.8, p50 -11.3, p75 -4.4, p95 0.0. This holds 95.3%
+# of them and spends 58% of the ramp on the interquartile range; the 4.7% it
+# clips is at the floor, where the taps are noise.
 #
-# An earlier draft of this constant said -40 on the strength of a measurement
-# taken over tiles that were almost entirely NaN -- 256 finite cells per
-# capture, one column's worth, read as if it were the whole panel. That would
-# have clipped 53% of the real distribution.
+# The number was -50 until the crop landed, and that was a real mistake worth
+# recording. -50 was measured on the UNCROPPED 256-row tile, where most rows
+# are far taps sitting near the noise floor and drag the median to -40.9. The
+# crop then removed exactly those rows and kept the strong ones near the peak,
+# which moved the median to -11.3 -- so the range was set from a distribution
+# the panel no longer draws, and everything landed in the top 40% of the ramp
+# as one yellow wash. Re-measure the scale whenever the rows change.
 #
-# Fixed for the same reason the Doppler panels are: auto-fitting per capture
-# made the same echo a different colour in every file. Relative to the peak
-# for a second reason -- it makes the panel immune to any gain in front of
-# it, including the per-gain-state distortion backend.agc corrects.
-CIR_SCALE_DB: tuple[float, float] = (-50.0, 0.0)
+# Nothing clips at the top: 0 dB is each frame's own peak, so no cell can
+# exceed it by construction. About 1 in 17 cells sits exactly at 0, which is
+# one peak row per column and is structural rather than saturation.
+CIR_SCALE_DB: tuple[float, float] = (-30.0, 0.0)
 
 # Metres of EXCESS path length per delay tap, at the 80 MHz these captures
 # use: c / bandwidth. One tap is 3.75 m, which is the resolution limit and no
