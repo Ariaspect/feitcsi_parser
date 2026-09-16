@@ -362,6 +362,59 @@ done
 
 ensure_wifi || die "wlan0 not associated -- capture would contain no CSI"
 
+# ------------------------------------------------------------- power save --
+# Held off on wlan0 for every capture, because a station in power save sleeps
+# between beacons and re-runs its AGC convergence on each wake -- and a gain
+# step is not free here. Each of the receiver's gain states has its own
+# frequency response, so a step lands in the amplitude heatmap as a
+# single-frame vertical stripe that is the radio rather than the room, worth
+# up to 4.6 dB of shape error at a 4 dB step. backend/agc.py corrects it after
+# the fact; not provoking it is better.
+#
+# Measured off already on 2026-09-16, so this is insurance rather than a fix,
+# and it is NOT the explanation for the 7 dB of RSSI swing a static room still
+# shows -- that one is still open and probably sits on the AP side. What it
+# does buy is that the setting cannot come back silently: a reboot resets it,
+# and so may the luna-send reconnect above, which would leave some captures in
+# the corpus taken under one setting and some under another. That is worse
+# than either setting consistently applied.
+#
+# Never fatal. A driver that does not support the call, or a board that
+# refuses it, is a reason to note the capture's conditions -- not a reason to
+# lose the capture.
+# The board answers with CRLF. A bare carriage return inside a log line sends
+# the cursor back to column 0 and overwrites the timestamp and tag that were
+# already written, so the line lands in the log as a fragment -- which is how
+# an unattended run loses the one message that would have explained it. It is
+# stripped at the read rather than at each use.
+_iw_power_save() {
+    ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+        'iw dev wlan0 get power_save 2>/dev/null' 2>>"$LOG" | tr -d '\r'
+}
+
+ensure_no_power_save() {
+    ps_state=$(_iw_power_save)
+    case $ps_state in
+        *"power save: off"*|*"Power save: off"*)
+            log "PSAVE wlan0 power save already off"
+            return 0 ;;
+    esac
+    log "PSAVE wlan0 reports '${ps_state:-unreadable}', turning power save off"
+    ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+        'iw dev wlan0 set power_save off' >/dev/null 2>>"$LOG" || {
+            log "PSAVE WARN could not set power save off -- capture continues"
+            return 0
+        }
+    ps_state=$(_iw_power_save)
+    case $ps_state in
+        *"power save: off"*|*"Power save: off"*)
+            log "PSAVE wlan0 power save now off" ;;
+        *)
+            log "PSAVE WARN wlan0 still reports '${ps_state:-unreadable}'" ;;
+    esac
+}
+ensure_no_power_save
+
 # ------------------------------------------------------- deploy board script --
 # Kept in sync by checksum so a board reboot, or an edit here, self-heals.
 read -r -d '' BOARD_SRC <<'BOARDEOF'
@@ -537,6 +590,15 @@ start=$SECONDS
 WEBCAM_PID=""
 if [ "$WEBCAM" = "1" ]; then
     if [ ! -e "$WEBCAM_DEV" ]; then
+        # Absent is not gentler than busy: both end in a capture with no
+        # labels. On 20260915 the camera dropped off the USB bus mid-run
+        # ("159 frames, 141 failures"), and once gone the node stays gone, so
+        # the next labelled run would have started on a WARN and produced
+        # 300s of unlabelled CSI. Same rule as busy, for the same reason.
+        if [ "$WEBCAM_REQUIRED" = "1" ]; then
+            log "ABORT $WEBCAM_DEV absent -- refusing to capture unlabelled"
+            exit 1
+        fi
         log "WARN  $WEBCAM_DEV absent, capturing CSI without frames"
     elif fuser "$WEBCAM_DEV" >/dev/null 2>&1; then
         holder=$(fuser -v "$WEBCAM_DEV" 2>&1 | tail -1 | awk '{print $NF}')
