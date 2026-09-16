@@ -1,30 +1,47 @@
-"""Raw CSI -> channel impulse response: IFFT along the subcarrier axis.
+"""CSI ratio -> channel impulse response: IFFT along the subcarrier axis.
 
-``amplitude``/``phase`` are a complex frequency response — rx0/tx0's
-measured channel, split into a dB magnitude and a phase, one value per
-subcarrier. An inverse FFT of that response gives the channel impulse
+``csi_ratio_amplitude``/``csi_ratio_phase`` are a complex frequency response
+— tpi1/tpi0's measured ratio, split into a dB magnitude and a phase, one
+value per subcarrier. An inverse FFT of that response gives the channel impulse
 response (CIR): a row per frame, delay tap along the columns instead of
 subcarrier. Echoes at increasing round-trip delay show up as separated
 peaks — a different read on the same data than anything the
 frequency-domain panels give, and one the frequency-axis unwrapping in
 ``backend.phase`` cannot answer.
 
-This is deliberately the *raw* channel, not the rx1/rx0 ratio ``backend.ratio``
-corrects: dividing two chains cancels the receiver's CFO/SFO and per-packet
-timing offset, which is exactly why the ratio's own IFFT (an earlier version
-of this module) came out so cleanly centred on zero delay. A single channel
-has none of that cancellation, so this CIR is not zero-referenced: it shows
-propagation delay plus whatever uncalibrated hardware/timing offset the
-receiver adds on top, and that combined offset moves a little from frame to
-frame as CFO/SFO drift. Measured on both captures on hand — 1500 frames of
-a single sender, no swap-correction applicable since there is no second
-chain to be swapped with — the peak sits at a roughly constant offset from
-centre (13 taps out of 256 on an MTK capture, 8 out of 242 on a FeitCSI one)
-with a few taps of frame-to-frame spread (std 3.1 and 1.7 taps
-respectively). Read *relative* delay between echoes off this panel — where
-the second bump sits relative to the main peak — not absolute time-of-flight
-from the row's centre; that is what the ratio-based CIR was for; a single
-channel's cancellation-free timing offset makes an absolute read unsound.
+**This runs on the ratio, and the raw single channel was tried and dropped.**
+An earlier version took the IFFT of rx0/tx0 — the honest channel impulse
+response, and the only form absolute path structure could be read from. It
+was removed because it answered no question this project actually has.
+
+It could not give absolute delay: a single channel has nothing to cancel the
+receiver's timing offset against, so the peak sat 14 taps off centre and
+wandered with a standard deviation of 1.4 taps (5.3 m) frame to frame, which
+is the receiver's clock rather than the room. And it could not give *change*
+either. Scored against a capture with a known walk at 72-80 s, each tap's
+deviation from its own long-run median came to 10.21 dB during the motion
+against 10.09 while quiet -- a ratio of 1.01, no separation at all. Smoothing
+from 1 to 190 frames took that noise from 10.2 dB down to 2.8 and never
+lifted the ratio above 1.0, which is the signature of no signal to find
+rather than of too much noise. The same per-packet timing jitter that moves
+the peak redistributes energy across every tap on every frame, and aligning
+on the peak corrects it only to the nearest whole tap -- 3.75 m at 80 MHz --
+leaving the sub-tap remainder to swamp the room.
+
+The ratio cancels that jitter exactly, because both transmit chains come out
+of one packet, one receive chain and one timing recovery. On the same test it
+separates 4.59 against 2.79, a ratio of 1.65.
+
+What that costs is the absolute read, and the cost is real: an IFFT of
+tpi1/tpi0 is the *difference* of two impulse responses rather than one
+channel's, so a peak here is a delay at which the two chains disagree. Read
+it as "something changed about 10 m further out than the direct path", never
+as "a reflector sits 10 m away".
+
+It is also weaker than what the frequency domain already gives --
+``presence.fractional_motion`` separates the same two windows 2.8x against
+this 1.65x. So this panel is for *where* in delay a change sits, not for
+whether one happened.
 
 Two things about the array must be respected before an IFFT means anything:
 
@@ -107,3 +124,54 @@ def csi_to_cir_centred(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarra
     on the frequency-domain panels.
     """
     return np.fft.fftshift(csi_to_cir(amplitude_db, phase), axes=1)
+
+
+# Floor under the relative response, so a tap with no energy becomes a very
+# quiet number rather than -inf. -120 dB is far below anything the fixed
+# range draws.
+CIR_DB_FLOOR = 1e-6
+
+# The fixed colour range, in dB below each frame's own peak. Measured over
+# fourteen September captures, on the max-hold tiles the panel actually draws:
+# 2.07M cells: p5 -53.1, p25 -46.8, p50 -40.9, p75 -29.8, p95 -8.6. This range
+# holds 87.4% of them; the 12.6% it clips is all at the bottom, where the taps
+# carry nothing but noise and a uniform dark reads better than a ramp spread
+# across it. Nothing clips at the top -- 0 dB is each frame's own peak, so no
+# cell can exceed it by construction, which is what makes the ceiling exact
+# rather than chosen. -55 would hold 97.4% and -45 only 66.9%: the first
+# spends a fifth of the ramp on the noise floor, the second starts swallowing
+# real echo structure.
+#
+# An earlier draft of this constant said -40 on the strength of a measurement
+# taken over tiles that were almost entirely NaN -- 256 finite cells per
+# capture, one column's worth, read as if it were the whole panel. That would
+# have clipped 53% of the real distribution.
+#
+# Fixed for the same reason the Doppler panels are: auto-fitting per capture
+# made the same echo a different colour in every file. Relative to the peak
+# for a second reason -- it makes the panel immune to any gain in front of
+# it, including the per-gain-state distortion backend.agc corrects.
+CIR_SCALE_DB: tuple[float, float] = (-50.0, 0.0)
+
+
+def cir_relative_db(amplitude_db: np.ndarray, phase: np.ndarray) -> np.ndarray:
+    """Centred CIR as dB below each frame's own peak.
+
+    Linear magnitude is what this module served until it was measured against
+    a real panel: a delay response spans three orders of magnitude, so a
+    linear scale saturates the direct path into one flat block and buries
+    every echo under it. The earlier docstring argued dB cannot show a
+    response that is genuinely zero between echoes, which is true and is what
+    ``CIR_DB_FLOOR`` answers -- an empty tap lands at the bottom of the ramp
+    rather than at negative infinity.
+
+    Normalised per frame rather than globally, so the number means "how far
+    below this frame's strongest path", which is comparable across frames,
+    across captures, and across any gain sitting in front of the receiver.
+    """
+    cir = csi_to_cir_centred(amplitude_db, phase)
+    peak = np.nanmax(np.where(np.isfinite(cir), cir, np.nan), axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rel = cir / np.where(np.isfinite(peak) & (peak > 0), peak, np.nan)
+        out = 20.0 * np.log10(np.maximum(rel, CIR_DB_FLOOR))
+    return np.where(np.isfinite(cir) & np.isfinite(out), out, np.nan).astype(np.float32)

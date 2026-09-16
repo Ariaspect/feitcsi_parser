@@ -45,7 +45,7 @@ import numpy as np
 from . import agc, mtk, presence
 from . import lgproc
 from .batch import decode_frames as _decode_feitcsi
-from .cir import csi_to_cir_centred
+from .cir import CIR_SCALE_DB, cir_relative_db
 from .index import FrameIndex
 from .doppler import (
     DEFAULT_MAX_GAP_FRACTION,
@@ -147,15 +147,19 @@ DERIVED_METRICS: dict[str, Derived] = {
     "csi_ratio_phase_time_unwrapped": Derived(
         ("csi_ratio_phase",), unwrap_time, needs_times=True
     ),
-    # Delay-domain view of the raw channel (rx0/tx0), not the ratio: no
-    # correction applies because there is no second chain to have been
-    # swapped with, so this is built straight on the base amplitude/phase
-    # and needs no Reference. See backend.cir for why this is deliberately
-    # the uncorrected channel rather than the ratio's own IFFT — the two
-    # answer different questions and are not interchangeable.
+    # Delay-domain view of the RATIO, not of the raw channel. The raw
+    # rx0/tx0 form was served here until it was scored against a capture with
+    # a known walk in it and separated motion from quiet 1.01 to 1 -- no
+    # separation at all, at any smoothing. The receiver's per-packet timing
+    # jitter redistributes energy across every tap on every frame, and the
+    # ratio is what cancels it. See backend.cir; the cost is that a peak here
+    # is a delay at which the two chains disagree, not a reflector's range.
+    #
+    # Built on the raw ratio rather than the swap-corrected one, like every
+    # other panel here, so it needs no Reference.
     "csi_cir": Derived(
-        ("amplitude", "phase"),
-        csi_to_cir_centred,
+        ("csi_ratio_amplitude", "csi_ratio_phase"),
+        cir_relative_db,
         preserves_coverage=False,
     ),
 }

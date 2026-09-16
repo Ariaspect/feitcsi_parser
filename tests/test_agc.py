@@ -273,8 +273,10 @@ def test_tile_amplitude_is_corrected_and_the_ratio_is_not(tmp_path: Path):
 
 def test_agc_affected_follows_the_derivation_graph():
     assert tiles._agc_affected("amplitude")
-    # csi_cir is built on amplitude, so it inherits the correction.
-    assert tiles._agc_affected("csi_cir")
+    # csi_cir moved onto the ratio planes, which divide the gain out, so it
+    # no longer inherits the correction -- and the recursion worked that out
+    # on its own when the metric's bases changed.
+    assert not tiles._agc_affected("csi_cir")
     assert not tiles._agc_affected("csi_ratio_amplitude")
     assert not tiles._agc_affected("phase")
     assert not tiles._agc_affected("csi_ratio_phase_corrected")

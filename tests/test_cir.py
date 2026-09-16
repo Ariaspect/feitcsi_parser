@@ -1,8 +1,9 @@
-"""backend.cir: IFFT of the raw CSI into a delay-domain impulse response."""
+"""backend.cir: IFFT of the CSI ratio into a delay-domain impulse response."""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from backend.cir import csi_to_cir, csi_to_cir_centred
 
@@ -98,3 +99,85 @@ def test_centred_moves_the_peak_to_the_middle_and_reunites_a_split() -> None:
     amp_db2, phase2 = _to_amp_phase(h_split)
     split_centred = csi_to_cir_centred(amp_db2, phase2)
     assert abs(int(np.argmax(split_centred[0])) - n // 2) <= 1
+
+
+# ---------------------------------------------------------------------- #
+#  Relative-dB form, which is what the panel serves                       #
+# ---------------------------------------------------------------------- #
+
+from backend.cir import CIR_DB_FLOOR, CIR_SCALE_DB, cir_relative_db  # noqa: E402
+
+
+def _two_tap(n: int = 64, second_db: float = -12.0, lead: float = 3.0):
+    """A response with a direct path and one echo at a known level."""
+    taps = np.zeros(n, dtype=complex)
+    taps[0] = lead
+    taps[5] = lead * 10 ** (second_db / 20.0)
+    h = np.fft.fftshift(np.fft.fft(taps))
+    amp_db = 20 * np.log10(np.abs(h))[None, :]
+    return amp_db, np.angle(h)[None, :]
+
+
+def test_every_frame_peaks_at_zero_db():
+    amp_db, phase = _two_tap()
+    out = cir_relative_db(amp_db, phase)
+    assert np.nanmax(out) == pytest.approx(0.0, abs=1e-5)
+
+
+def test_the_echo_lands_at_its_injected_level():
+    amp_db, phase = _two_tap(second_db=-12.0)
+    out = cir_relative_db(amp_db, phase)[0]
+    order = np.sort(out)[::-1]
+    assert order[0] == pytest.approx(0.0, abs=1e-5)
+    assert order[1] == pytest.approx(-12.0, abs=0.5)
+
+
+def test_relative_db_is_immune_to_gain():
+    """Normalising per frame is what makes the panel gain-proof.
+
+    Any gain in front of the receiver -- including the per-gain-state
+    distortion backend.agc corrects -- scales the whole response, and a
+    response expressed against its own peak does not move.
+    """
+    amp_db, phase = _two_tap()
+    base = cir_relative_db(amp_db, phase)
+    for gain_db in (-20.0, +17.0):
+        shifted = cir_relative_db(amp_db + gain_db, phase)
+        np.testing.assert_allclose(base, shifted, atol=1e-4)
+
+
+def test_a_frame_with_no_channel_stays_nan():
+    amp_db, phase = _two_tap()
+    amp_db = np.vstack([amp_db, np.full_like(amp_db, np.nan)])
+    phase = np.vstack([phase, np.full_like(phase, np.nan)])
+    out = cir_relative_db(amp_db, phase)
+    assert np.isfinite(out[0]).any()
+    assert np.isnan(out[1]).all()
+
+
+def test_an_empty_tap_lands_on_the_floor_not_at_minus_infinity():
+    """The objection to dB was that a delay response is genuinely zero
+    between echoes. The floor is what answers it."""
+    amp_db, phase = _two_tap()
+    out = cir_relative_db(amp_db, phase)
+    assert np.isfinite(out[np.isfinite(out)]).all()
+    # float32, so the floor lands within a rounding step of its exact value
+    assert out[np.isfinite(out)].min() >= 20 * np.log10(CIR_DB_FLOOR) - 1e-3
+
+
+def test_the_fixed_range_ceiling_is_the_peak():
+    lo, hi = CIR_SCALE_DB
+    assert hi == 0.0          # each frame's own peak; nothing can exceed it
+    assert lo < hi
+
+
+def test_the_cir_metric_is_built_on_the_ratio_planes():
+    """The raw rx0/tx0 form separated motion from quiet 1.01 to 1 -- see
+    backend.cir. The ratio is what cancels the per-packet timing jitter."""
+    from backend import tiles
+
+    assert tiles.DERIVED_METRICS["csi_cir"].bases == (
+        "csi_ratio_amplitude", "csi_ratio_phase",
+    )
+    # and therefore it no longer inherits the AGC correction
+    assert not tiles._agc_affected("csi_cir")
