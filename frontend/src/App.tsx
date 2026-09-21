@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
+import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
 import { LgDetector } from "./LgDetector";
 import { Phase1 } from "./Phase1";
@@ -660,6 +661,7 @@ export function App() {
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
+              <TabsTrigger value="farsense">FarSense</TabsTrigger>
               <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
             </TabsList>
 
@@ -979,6 +981,18 @@ export function App() {
                   </div>
                 </FoldedPanel>
               </div>
+            </TabsContent>
+
+            <TabsContent value="farsense">
+              <FarSense
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
             </TabsContent>
 
             <TabsContent value="presence">

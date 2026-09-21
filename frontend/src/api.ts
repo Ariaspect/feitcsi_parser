@@ -766,3 +766,204 @@ export async function fetchPhase1(
   }
   return res.json();
 }
+
+/** One window of the FarSense replay in full, for the detail panels. */
+export interface FarSenseDetail {
+  index: number;
+  startS: number;
+  tS: number[];
+  /** Subcarrier with the largest BNR in this window, in capture bin numbers. */
+  bestSc: number;
+  /** Its projection axis, radians from the real axis. */
+  bestTheta: number;
+  /** Its smoothed, mean-removed ratio over the window — the arc of Fig. 11. */
+  iq: [number, number][];
+  /** Its respiration pattern: the projection onto `bestTheta`. */
+  pattern: (number | null)[];
+  /** BNR-weighted sum of the selected subcarriers' autocorrelations, by lag. */
+  acf: (number | null)[];
+  lagLo: number;
+  lagHi: number;
+  /** Where the first in-band peak was read, or null when there was none. */
+  lag: number | null;
+  scIndex: number[];
+  bnr: (number | null)[];
+  theta: (number | null)[];
+  selected: boolean[];
+}
+
+export interface FarSenseParams {
+  window_seconds: number;
+  hop_seconds: number;
+  band_rpm: [number, number];
+  n_theta: number;
+  fft_size: number;
+  keep_fraction: number;
+  savgol_seconds: number;
+  savgol_order: number;
+  highpass_hz: number;
+  motion_frac_hi: number;
+  max_gap_fraction: number;
+  min_peak: number;
+}
+
+/** FarSense (Zeng et al. 2019) replayed over a range. Series are aligned
+ *  with `timeS`; `null` is a window with no answer. `rpm` is null wherever
+ *  the window was not stationary, had no in-band autocorrelation peak, or
+ *  the peak fell below `min_peak`. */
+export interface FarSense {
+  timeS: number[];
+  stationary: boolean[];
+  motionLevel: (number | null)[];
+  unknown: boolean[];
+  rpm: (number | null)[];
+  lag: (number | null)[];
+  /** Height of the first peak of the combined autocorrelation, in units of
+   *  summed BNR (the paper's Eq. 11, unnormalised). */
+  acfPeak: (number | null)[];
+  /** The same divided by the summed BNR: the weighted mean autocorrelation at
+   *  the peak lag, in -1..1. The number to judge a rate by. */
+  acfPeakNorm: (number | null)[];
+  bnrMax: (number | null)[];
+  nSelected: number[];
+  bestSc: number[];
+  bestTheta: (number | null)[];
+  /** Capture bin number of each row of `bnrMap`. */
+  scIndex: number[];
+  /** BNR per live subcarrier (rows) per window (columns). */
+  bnrMap: (number | null)[][];
+  /** Multiply a BNR by this to put it on 0..1, where 1 is a pure tone. */
+  bnrNormFactor: number;
+  /** The best subcarrier's respiration pattern, stitched across windows and
+   *  scaled to unit deviation, on the sample grid. */
+  patternT: number[];
+  pattern: (number | null)[];
+  detail: FarSenseDetail | null;
+  win: number;
+  hop: number;
+  windowSeconds: number;
+  fsHz: number;
+  lagLo: number;
+  lagHi: number;
+  params: FarSenseParams;
+  framesUsed: number;
+  framesWithoutRatio: number;
+  captureTMin: number;
+  captureTMax: number;
+}
+
+export interface FarSenseOptions {
+  windowSeconds?: number;
+  hopSeconds?: number;
+  rpmLo?: number;
+  rpmHi?: number;
+  nTheta?: number;
+  keepFraction?: number;
+  savgolSeconds?: number;
+  savgolOrder?: number;
+  /** Zero-phase high-pass before smoothing, Hz. 0 is the paper. */
+  highpassHz?: number;
+  motionFracHi?: number;
+  minPeak?: number;
+  /** A time in seconds; the window nearest it comes back under `detail`. */
+  detailT?: number | null;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchFarSense(
+  path: string,
+  t0: number,
+  t1: number,
+  options: FarSenseOptions = {},
+  signal?: AbortSignal,
+): Promise<FarSense> {
+  const {
+    windowSeconds = 12,
+    hopSeconds = 1,
+    rpmLo = 10,
+    rpmHi = 37,
+    nTheta = 100,
+    keepFraction = 0.7,
+    savgolSeconds = 0.5,
+    savgolOrder = 3,
+    highpassHz = 0,
+    motionFracHi = 0.25,
+    minPeak = 0,
+    detailT,
+    mimo,
+    sourceMac,
+    interpolate,
+  } = options;
+
+  const url =
+    `/api/farsense?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&window_seconds=${windowSeconds}&hop_seconds=${hopSeconds}` +
+    `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&n_theta=${nTheta}` +
+    `&keep_fraction=${keepFraction}` +
+    `&savgol_seconds=${savgolSeconds}&savgol_order=${savgolOrder}` +
+    `&highpass_hz=${highpassHz}` +
+    `&motion_frac_hi=${motionFracHi}&min_peak=${minPeak}` +
+    (detailT != null ? `&detail_t=${detailT}` : "") +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `farsense: ${res.status}`);
+  }
+  const body = await res.json();
+  const d = body.detail;
+  return {
+    timeS: body.time_s,
+    stationary: body.stationary,
+    motionLevel: body.motion_level,
+    unknown: body.unknown,
+    rpm: body.rpm,
+    lag: body.lag,
+    acfPeak: body.acf_peak,
+    acfPeakNorm: body.acf_peak_norm,
+    bnrMax: body.bnr_max,
+    nSelected: body.n_selected,
+    bestSc: body.best_sc,
+    bestTheta: body.best_theta,
+    scIndex: body.sc_index,
+    bnrMap: body.bnr_map,
+    bnrNormFactor: body.bnr_norm_factor,
+    patternT: body.pattern_t,
+    pattern: body.pattern,
+    detail: d
+      ? {
+          index: d.index,
+          startS: d.start_s,
+          tS: d.t_s,
+          bestSc: d.best_sc,
+          bestTheta: d.best_theta,
+          iq: d.iq,
+          pattern: d.pattern,
+          acf: d.acf,
+          lagLo: d.lag_lo,
+          lagHi: d.lag_hi,
+          lag: d.lag ?? null,
+          scIndex: d.sc_index,
+          bnr: d.bnr,
+          theta: d.theta,
+          selected: d.selected,
+        }
+      : null,
+    win: body.win,
+    hop: body.hop,
+    windowSeconds: body.window_seconds,
+    fsHz: body.fs_hz,
+    lagLo: body.lag_lo,
+    lagHi: body.lag_hi,
+    params: body.params,
+    framesUsed: body.frames_used,
+    framesWithoutRatio: body.frames_without_ratio,
+    captureTMin: body.t_min,
+    captureTMax: body.t_max,
+  };
+}

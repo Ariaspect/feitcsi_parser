@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import lgdetect, lgproc
+from . import farsense, lgdetect, lgproc
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1131,6 +1131,126 @@ def presence(
         "t_max": result["t_max"],
         "params": result["params"],
         "warnings": result["warnings"],
+    }
+
+
+def _nullable_rows(values: np.ndarray, decimals: int = 5) -> list[list[float | None]]:
+    """``_nullable`` over each row of a 2-D array, rounded to keep the JSON small."""
+    arr = np.round(np.asarray(values, dtype=float), decimals)
+    return [_nullable(row) for row in arr]
+
+
+@app.get("/api/farsense")
+def farsense_detector(   # not `farsense`: that name is the module this calls
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    window_seconds: float = Query(farsense.WINDOW_SECONDS, gt=0, le=120, description="Projection window; the paper uses 12 s"),
+    hop_seconds: float = Query(farsense.HOP_SECONDS, gt=0, le=60, description="Step between windows in seconds"),
+    rpm_lo: float = Query(farsense.RATE_BAND_RPM[0], gt=0, le=120, description="Slowest breathing rate considered; the paper uses 10"),
+    rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate considered; the paper uses 37"),
+    n_theta: int = Query(farsense.N_THETA, ge=2, le=720, description="Projection angles swept over 0..2pi; the paper uses 100"),
+    keep_fraction: float = Query(farsense.BNR_KEEP_FRACTION, ge=0, le=1, description="Subcarriers with BNR below this fraction of the best are excluded; the paper uses 0.7"),
+    savgol_seconds: float = Query(farsense.SAVGOL_SECONDS, ge=0, le=5, description="Savitzky-Golay window in seconds; 0 disables it"),
+    savgol_order: int = Query(farsense.SAVGOL_ORDER, ge=1, le=7, description="Savitzky-Golay polynomial order"),
+    highpass_hz: float = Query(0.0, ge=0, le=5, description="Zero-phase high-pass before smoothing, in Hz; 0 reproduces the paper"),
+    motion_frac_hi: float = Query(farsense.MOTION_FRAC_HI, gt=0, le=5, description="Median fractional channel change above which a window is non-stationary and reports no rate"),
+    min_peak: float = Query(0.0, ge=-1, le=1, description="Rates whose normalised autocorrelation peak is below this are blanked; 0 reproduces the paper"),
+    max_gap_fraction: float = Query(farsense.MAX_GAP_FRACTION, gt=0, le=1, description="A window more than this fraction interpolated across dropouts reports nothing"),
+    detail_t: float | None = Query(None, description="Return the window nearest this time in full: I/Q trajectory, patterns, autocorrelation"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """FarSense (Zeng et al. 2019) replayed over a capture range, as JSON.
+
+    One entry per 12 s window: whether the target was stationary, the rate
+    the paper's autocorrelation method reads, and the numbers it was read
+    from. ``pattern`` is the best subcarrier's respiration pattern stitched
+    across windows, on the sample grid, which is what the paper's GUI draws.
+    See ``backend.farsense`` for what is copied and what is not.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = farsense.compute_farsense(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            detail_t=detail_t,
+            window_seconds=window_seconds,
+            hop_seconds=hop_seconds,
+            band_rpm=(rpm_lo, rpm_hi),
+            n_theta=n_theta,
+            keep_fraction=keep_fraction,
+            savgol_seconds=savgol_seconds,
+            savgol_order=savgol_order,
+            highpass_hz=highpass_hz,
+            motion_frac_hi=motion_frac_hi,
+            min_peak=min_peak,
+            max_gap_fraction=max_gap_fraction,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    detail = result["detail"]
+    detail_out = None
+    if detail is not None:
+        detail_out = {
+            "index": detail["index"],
+            "start_s": detail["start_s"],
+            "t_s": [float(v) for v in detail["t_s"]],
+            "best_sc": detail["best_sc"],
+            "best_theta": detail["best_theta"],
+            "iq": [[float(a), float(b)] for a, b in np.nan_to_num(detail["iq"])],
+            "pattern": _nullable(detail["pattern"]),
+            "acf": _nullable(detail["acf"]),
+            "lag_lo": detail["lag_lo"],
+            "lag_hi": detail["lag_hi"],
+            "lag": float(detail["lag"]) if np.isfinite(detail["lag"]) else None,
+            "sc_index": [int(v) for v in detail["sc_index"]],
+            "bnr": _nullable(detail["bnr"]),
+            "theta": _nullable(detail["theta"]),
+            "selected": [bool(v) for v in detail["selected"]],
+        }
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "stationary": [bool(v) for v in result["stationary"]],
+        "motion_level": _nullable(result["motion_level"]),
+        "unknown": [bool(v) for v in result["unknown"]],
+        "rpm": _nullable(result["rpm"]),
+        "lag": _nullable(result["lag"]),
+        "acf_peak": _nullable(result["acf_peak"]),
+        "acf_peak_norm": _nullable(result["acf_peak_norm"]),
+        "bnr_max": _nullable(result["bnr_max"]),
+        "n_selected": [int(v) for v in result["n_selected"]],
+        "best_sc": [int(v) for v in result["best_sc"]],
+        "best_theta": _nullable(result["best_theta"]),
+        "sc_index": [int(v) for v in result["sc_index"]],
+        "bnr_map": _nullable_rows(result["bnr_map"]),
+        # A pure tone scores win / fft_size, so this factor puts BNR on a
+        # 0..1 scale that does not move with the sample rate.
+        "bnr_norm_factor": float(result["params"]["fft_size"]) / float(result["win"]),
+        "pattern_t": [float(v) for v in result["pattern_t"]],
+        "pattern": _nullable(np.round(result["pattern"], 4)),
+        "detail": detail_out,
+        "win": result["win"],
+        "hop": result["hop"],
+        "window_seconds": result["window_seconds"],
+        "fs_hz": result["fs_hz"],
+        "lag_lo": result["lag_lo"],
+        "lag_hi": result["lag_hi"],
+        "params": result["params"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
     }
 
 
