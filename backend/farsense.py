@@ -281,7 +281,11 @@ def combine_autocorrelations(
 
 
 def first_peak(
-    r: np.ndarray, fs: float, band_rpm: tuple[float, float] = RATE_BAND_RPM
+    r: np.ndarray,
+    fs: float,
+    band_rpm: tuple[float, float] = RATE_BAND_RPM,
+    *,
+    positive_only: bool = False,
 ) -> dict[str, float]:
     """Lag of the first local maximum of ``r`` inside the rate band.
 
@@ -289,6 +293,14 @@ def first_peak(
     search is confined to the lags the band allows, which is what keeps a
     wobble at lag 2 from being that peak. Returns NaNs when no local maximum
     exists in band -- a monotone autocorrelation has no period to report.
+
+    ``positive_only`` skips local maxima below zero. A negative "peak" is a
+    wiggle on the rising slope out of the half-period trough, not a period,
+    and on a seated occupant with finger movement it is what the literal
+    rule returns for a minute at a time (20260917_202029: reported 32-33 rpm
+    at the shortest lag while the spectrum held a steady 15-18 rpm line;
+    the first positive maximum reads +0.44 there and empties stay at 0.1).
+    The paper's rule is the default; the hybrid detector uses this one.
 
     ``lag_refined`` fits a parabola through the peak and its neighbours,
     after dividing the three by the biased estimator's ``1 - k/N`` envelope.
@@ -305,7 +317,7 @@ def first_peak(
     if lag_hi < lag_lo:
         return out
     for k in range(lag_lo, lag_hi + 1):
-        if r[k] > r[k - 1] and r[k] >= r[k + 1]:
+        if r[k] > r[k - 1] and r[k] >= r[k + 1] and (r[k] > 0 or not positive_only):
             env = 1.0 - np.arange(k - 1, k + 2) / n
             a, b, c = r[k - 1 : k + 2] / env
             denom = a - 2.0 * b + c
@@ -455,6 +467,7 @@ def window_step(
     motion_frac_hi: float = MOTION_FRAC_HI,
     max_gap_fraction: float = MAX_GAP_FRACTION,
     min_peak: float = 0.0,
+    positive_only: bool = False,
     detail: bool = False,
 ) -> dict[str, Any]:
     """Sec. 6.3 and 6.4 for window ``i`` of a prepared grid."""
@@ -495,7 +508,7 @@ def window_step(
     )
     bnr = ext["bnr"]
     r_msc, selected = combine_autocorrelations(ext["pattern"], bnr, keep_fraction=keep_fraction)
-    pk = first_peak(r_msc, fs, prep["band_rpm"])
+    pk = first_peak(r_msc, fs, prep["band_rpm"], positive_only=positive_only)
     b = int(np.argmax(np.nan_to_num(bnr)))
     # Eq. 11 sums BNR-weighted autocorrelations without renormalising, so the
     # peak's height scales with how many subcarriers made the cut. Divided by

@@ -219,3 +219,19 @@ def test_endpoint_without_a_sidecar_returns_no_confusion(tmp_path: Path) -> None
     body = TestClient(app).get("/api/hybrid", params={"path": str(p), "t0": 0.0, "t1": 200.0}).json()
     assert body["confusion"] is None and body["truth"] is None
     assert any(body["present"])
+
+
+def test_an_external_floor_lets_an_occupied_throughout_range_fire() -> None:
+    """A person fidgeting for the whole range IS the range's 20th percentile,
+    so the own-range threshold never trips; the link's quiet level from
+    outside the range does."""
+    rng = np.random.default_rng(11)
+    t = np.arange(int(120 * FS)) / FS
+    sig = np.ones((t.size, N_SC), dtype=complex)
+    sig += 0.15 * (rng.standard_normal(sig.shape) + 1j * rng.standard_normal(sig.shape))   # fidget-level all along
+    ev = hybrid.evidence_series(sig, FS)
+    own = hybrid.verdict(ev)
+    link = hybrid.verdict(ev, motion_floor=0.02)
+    assert not own["burst"].any()
+    assert link["burst"].mean() > 0.9
+    assert link["params"]["motion_floor"] == 0.02 and own["params"]["motion_floor"] is None

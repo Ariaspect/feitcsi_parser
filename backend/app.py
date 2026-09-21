@@ -1274,6 +1274,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
     breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=60, description="How far the rates in that run may differ, rpm"),
     breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
     breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
+    motion_floor: float | None = Query(None, ge=0, le=10, description="Quiet |dr|/|r| level measured outside this range (the link's, over the day); replaces the range's own 20th percentile, which an occupied-throughout range cannot supply"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
     source_mac: str | None = Query(None, description="Source MAC filter"),
@@ -1310,6 +1311,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
             breath_rate_tol=breath_rate_tol,
             breath_window_seconds=breath_window,
             breath_highpass_hz=breath_highpass,
+            motion_floor=motion_floor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

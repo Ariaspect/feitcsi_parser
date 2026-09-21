@@ -328,3 +328,16 @@ def test_a_detail_request_reuses_the_cached_sweep(tmp_path: Path) -> None:
 
     other = fz.compute_farsense(p, 0.0, 60.0, keep_fraction=0.5)
     assert other["params"]["keep_fraction"] == 0.5
+
+
+def test_positive_only_skips_a_negative_wiggle_on_the_rising_slope() -> None:
+    """A trough at the half period with a small bump on the way back up: the
+    literal first local maximum is that bump (negative); the first positive
+    one is the period."""
+    lags = np.arange(240)
+    r = np.cos(2 * np.pi * lags / 80)                 # 14.7 rpm at 19.61 Hz
+    r[45] += 0.05                                     # a wiggle at lag 45, where r < 0
+    literal = fz.first_peak(r, FS)
+    positive = fz.first_peak(r, FS, positive_only=True)
+    assert literal["lag"] == 45 and literal["height"] < 0
+    assert positive["lag"] == 80 and positive["height"] > 0.9

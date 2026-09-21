@@ -995,9 +995,11 @@ export interface HybridParams {
   breath_min_peak: number;
   breath_persist_seconds: number;
   breath_rate_tol: number;
+  breath_min_fraction: number;
   breath_window_seconds: number;
   breath_highpass_hz: number;
   max_gap_fraction: number;
+  motion_floor: number | null;
 }
 
 export interface HybridConfusion extends Confusion {
@@ -1051,6 +1053,10 @@ export interface HybridOptions {
   breathRateTol?: number;
   breathWindow?: number;
   breathHighpass?: number;
+  /** Quiet |Δr|/|r| level measured outside this range (the link over the
+   *  day); replaces the range's own floor, which an occupied-throughout
+   *  range cannot supply. Omit for the range's own. */
+  motionFloor?: number | null;
   marginS?: number;
   mimo?: string | null;
   sourceMac?: string | null;
@@ -1078,6 +1084,7 @@ export async function fetchHybrid(
     breathRateTol = 3,
     breathWindow = 30,
     breathHighpass = 0.1,
+    motionFloor,
     marginS = 5,
     mimo,
     sourceMac,
@@ -1093,6 +1100,7 @@ export async function fetchHybrid(
     `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
     `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
     `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
+    (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
 

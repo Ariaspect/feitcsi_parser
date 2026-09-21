@@ -39,12 +39,21 @@ own frame-to-frame variation), and a per-second median already ignores the
 single-frame impulse a gain step is. Amplitude sees shadowing; it is off by
 default until the corpus says it earns its false positives.
 
+The work is split in two. ``evidence_series`` is the expensive half -- the
+per-second motion levels and the FarSense sweep -- and depends only on the
+signal-shaping parameters; ``verdict`` is the cheap half that turns those
+series into bursts, breathing runs and the held state, and depends on the
+decision parameters. A tab that moves the hold or the peak threshold, or a
+sweep over them, re-runs only the second.
+
 Everything is scored on a 1 s grid against the camera through
 ``backend.truth``, margin and all.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -175,30 +184,23 @@ def consistent_breathing(
     return out
 
 
-def hybrid_seconds(
+# --------------------------------------------------------------------------- #
+#  Stage 1: the evidence series                                                #
+# --------------------------------------------------------------------------- #
+
+
+def evidence_series(
     grid: np.ndarray,
     fs: float,
     *,
     fabricated: np.ndarray | None = None,
     amp_diff: np.ndarray | None = None,
     amp_times: np.ndarray | None = None,
-    use_amplitude: bool = False,
-    hold_seconds: float = HOLD_SECONDS,
-    burst_seconds: float = BURST_SECONDS,
-    motion_rel: float = MOTION_REL,
-    motion_abs: float = MOTION_ABS,
-    amp_rel: float = AMP_REL,
-    amp_abs: float = AMP_ABS,
-    floor_percentile: float = FLOOR_PERCENTILE,
-    breath_min_peak: float = BREATH_MIN_PEAK,
-    breath_persist_seconds: float = BREATH_PERSIST_SECONDS,
-    breath_rate_tol: float = BREATH_RATE_TOL,
-    breath_min_fraction: float = BREATH_MIN_FRACTION,
     breath_window_seconds: float = BREATH_WINDOW_SECONDS,
     breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
     max_gap_fraction: float = MAX_GAP_FRACTION,
 ) -> dict[str, Any]:
-    """The detector over a uniform complex ratio grid, one verdict per second.
+    """Per-second motion levels and per-window breathing peaks, on one clock.
 
     ``grid`` is ``(n_samples, n_sc)`` at ``fs`` Hz from ``tiles._presence_grid``;
     times are relative to its first sample. ``amp_diff``/``amp_times`` are the
@@ -231,32 +233,19 @@ def hybrid_seconds(
         raise ValueError("no subcarrier in this range carries a CSI ratio")
     ratio = grid[:, live]
 
-    # -- motion, ratio channel ------------------------------------------
     frac = fractional_motion(ratio)
     motion_ratio = per_second(frac, sample_t[1:], seconds)
     unknown = per_second(fab.astype(float), sample_t, seconds)
     unknown = ~np.isfinite(unknown) | (unknown > max_gap_fraction)
     motion_ratio[unknown] = np.nan
-    ratio_floor = floor_level(motion_ratio, floor_percentile)
-    ratio_threshold = max(motion_rel * ratio_floor, motion_abs) if np.isfinite(ratio_floor) else motion_abs
-    burst = bursts(motion_ratio, ratio_threshold, max(1, int(round(burst_seconds))))
 
-    # -- motion, amplitude channel --------------------------------------
     motion_amp = np.full(n_sec, np.nan)
-    amp_floor = float("nan")
-    amp_threshold = float("nan")
     if amp_diff is not None and amp_times is not None and np.asarray(amp_diff).size:
         motion_amp = per_second(np.asarray(amp_diff), np.asarray(amp_times), seconds)
         motion_amp[unknown] = np.nan
-        amp_floor = floor_level(motion_amp, floor_percentile)
-        amp_threshold = max(amp_rel * amp_floor, amp_abs) if np.isfinite(amp_floor) else amp_abs
-        if use_amplitude:
-            burst = burst | bursts(motion_amp, amp_threshold, max(1, int(round(burst_seconds))))
 
-    # -- breathing --------------------------------------------------------
     breath_peak = np.full(n_sec, np.nan)
     breath_rpm = np.full(n_sec, np.nan)
-    breathing = np.zeros(n_sec, dtype=bool)
     breath_note = None
     try:
         prep = farsense.prepare(
@@ -266,31 +255,107 @@ def hybrid_seconds(
         )
         # The paper's absolute stationary gate is replaced by this module's
         # relative burst; every window gets its peak and rate.
+        # ``positive_only``: a negative "first peak" is a wiggle on the slope
+        # out of the trough, not a period -- see ``farsense.first_peak``.
         step = dict(
             n_theta=farsense.N_THETA, fft_size=farsense.FFT_SIZE,
             keep_fraction=farsense.BNR_KEEP_FRACTION, motion_frac_hi=1e9,
-            max_gap_fraction=max_gap_fraction, min_peak=-1.0,
+            max_gap_fraction=max_gap_fraction, min_peak=-1.0, positive_only=True,
         )
         fz = farsense._run(prep, step, None)
-        centres = fz["time_s"]
-        ok = ~fz["unknown"]
-        w_evidence = consistent_breathing(
-            np.where(ok, fz["acf_peak_norm"], np.nan), fz["rpm"],
-            min_peak=breath_min_peak, n_consistent=max(1, int(round(breath_persist_seconds))),
-            rate_tol=breath_rate_tol, min_fraction=breath_min_fraction,
-        )
-        cell = np.floor(centres).astype(int)
-        inside = (cell >= 0) & (cell < n_sec)
+        cell = np.floor(fz["time_s"]).astype(int)
+        inside = (cell >= 0) & (cell < n_sec) & ~fz["unknown"]
         breath_peak[cell[inside]] = fz["acf_peak_norm"][inside]
         breath_rpm[cell[inside]] = fz["rpm"][inside]
-        breathing[cell[inside]] = w_evidence[inside]
     except ValueError as exc:
         # A range shorter than one breathing window has no breathing channel;
         # the motion channel still runs, and the reason is reported.
         breath_note = str(exc)
+
+    return {
+        "time_s": seconds + 0.5,
+        "unknown": unknown,
+        "motion_ratio": motion_ratio,
+        "motion_amp": motion_amp,
+        "breath_peak": breath_peak,
+        "breath_rpm": breath_rpm,
+        "breath_note": breath_note,
+        "fs_hz": float(fs),
+        "evidence_params": {
+            "breath_window_seconds": float(breath_window_seconds),
+            "breath_highpass_hz": float(breath_highpass_hz),
+            "max_gap_fraction": float(max_gap_fraction),
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  Stage 2: the verdict                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def verdict(
+    ev: dict[str, Any],
+    *,
+    use_amplitude: bool = False,
+    hold_seconds: float = HOLD_SECONDS,
+    burst_seconds: float = BURST_SECONDS,
+    motion_rel: float = MOTION_REL,
+    motion_abs: float = MOTION_ABS,
+    amp_rel: float = AMP_REL,
+    amp_abs: float = AMP_ABS,
+    floor_percentile: float = FLOOR_PERCENTILE,
+    breath_min_peak: float = BREATH_MIN_PEAK,
+    breath_persist_seconds: float = BREATH_PERSIST_SECONDS,
+    breath_rate_tol: float = BREATH_RATE_TOL,
+    breath_min_fraction: float = BREATH_MIN_FRACTION,
+    motion_floor: float | None = None,
+) -> dict[str, Any]:
+    """Bursts, breathing runs and the held state from an evidence series.
+
+    ``motion_floor`` replaces the range's own quiet level with one measured
+    elsewhere -- the link's quiet level over the day, say. A range that is
+    occupied throughout has no quiet stretch: its own 20th percentile *is*
+    the occupant, and a threshold set from it can never fire. Measured on
+    the six 2026-09-21 evening captures, the per-second level sat at
+    0.15-0.18 for half an hour against the link's 0.019 when empty -- a body
+    attenuating the link raises the ratio's noise nine-fold, which is
+    evidence, and only a floor from outside the range can see it.
+    """
+    seconds = np.asarray(ev["time_s"], dtype=float) - 0.5
+    n_sec = seconds.size
+    unknown = np.asarray(ev["unknown"], dtype=bool)
+    motion_ratio = np.asarray(ev["motion_ratio"], dtype=float)
+    motion_amp = np.asarray(ev["motion_amp"], dtype=float)
+    min_run = max(1, int(round(burst_seconds)))
+
+    ratio_floor = (
+        float(motion_floor)
+        if motion_floor is not None and np.isfinite(motion_floor)
+        else floor_level(motion_ratio, floor_percentile)
+    )
+    ratio_threshold = (
+        max(motion_rel * ratio_floor, motion_abs) if np.isfinite(ratio_floor) else motion_abs
+    )
+    burst = bursts(motion_ratio, ratio_threshold, min_run)
+
+    amp_floor = float("nan")
+    amp_threshold = float("nan")
+    if np.isfinite(motion_amp).any():
+        amp_floor = floor_level(motion_amp, floor_percentile)
+        amp_threshold = max(amp_rel * amp_floor, amp_abs) if np.isfinite(amp_floor) else amp_abs
+        if use_amplitude:
+            burst = burst | bursts(motion_amp, amp_threshold, min_run)
+
+    breathing = consistent_breathing(
+        ev["breath_peak"], ev["breath_rpm"],
+        min_peak=breath_min_peak,
+        n_consistent=max(1, int(round(breath_persist_seconds))),
+        rate_tol=breath_rate_tol,
+        min_fraction=breath_min_fraction,
+    )
     breathing &= ~burst & ~unknown
 
-    # -- the state machine ------------------------------------------------
     present = np.zeros(n_sec, dtype=bool)
     state = np.full(n_sec, STATE_EMPTY, dtype=object)
     last_evidence = -np.inf
@@ -310,24 +375,18 @@ def hybrid_seconds(
         else:
             state[i] = STATE_EMPTY
 
-    return {
-        "time_s": seconds + 0.5,
-        "present": present,
-        "state": [str(s) for s in state],
-        "unknown": unknown,
-        "motion_ratio": motion_ratio,
-        "motion_amp": motion_amp,
-        "burst": burst,
-        "breathing": breathing,
-        "breath_peak": breath_peak,
-        "breath_rpm": breath_rpm,
-        "ratio_floor": ratio_floor,
-        "ratio_threshold": float(ratio_threshold),
-        "amp_floor": amp_floor,
-        "amp_threshold": float(amp_threshold),
-        "breath_note": breath_note,
-        "fs_hz": float(fs),
-        "params": {
+    out = dict(ev)
+    out.update(
+        present=present,
+        state=[str(s) for s in state],
+        burst=burst,
+        breathing=breathing,
+        ratio_floor=ratio_floor,
+        ratio_threshold=float(ratio_threshold),
+        amp_floor=amp_floor,
+        amp_threshold=float(amp_threshold),
+        params={
+            **ev["evidence_params"],
             "use_amplitude": bool(use_amplitude),
             "hold_seconds": float(hold_seconds),
             "burst_seconds": float(burst_seconds),
@@ -340,11 +399,37 @@ def hybrid_seconds(
             "breath_persist_seconds": float(breath_persist_seconds),
             "breath_rate_tol": float(breath_rate_tol),
             "breath_min_fraction": float(breath_min_fraction),
-            "breath_window_seconds": float(breath_window_seconds),
-            "breath_highpass_hz": float(breath_highpass_hz),
-            "max_gap_fraction": float(max_gap_fraction),
+            "motion_floor": None if motion_floor is None else float(motion_floor),
         },
-    }
+    )
+    out.pop("evidence_params", None)
+    return out
+
+
+def hybrid_seconds(
+    grid: np.ndarray,
+    fs: float,
+    *,
+    fabricated: np.ndarray | None = None,
+    amp_diff: np.ndarray | None = None,
+    amp_times: np.ndarray | None = None,
+    breath_window_seconds: float = BREATH_WINDOW_SECONDS,
+    breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+    **decision: Any,
+) -> dict[str, Any]:
+    """Both stages over a uniform complex ratio grid, one verdict per second."""
+    ev = evidence_series(
+        grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times,
+        breath_window_seconds=breath_window_seconds, breath_highpass_hz=breath_highpass_hz,
+        max_gap_fraction=max_gap_fraction,
+    )
+    return verdict(ev, **decision)
+
+
+# --------------------------------------------------------------------------- #
+#  Over a capture                                                              #
+# --------------------------------------------------------------------------- #
 
 
 def amplitude_diff(path, index, frame_ids: np.ndarray, *, interpolate: bool = True) -> np.ndarray:
@@ -367,6 +452,77 @@ def amplitude_diff(path, index, frame_ids: np.ndarray, *, interpolate: bool = Tr
     return out
 
 
+# The evidence for a (capture, range, shaping parameters) is kept for the
+# last few requests, so a change of hold or threshold on the tab -- or a sweep
+# over them -- costs the cheap stage only.
+_CACHE_SIZE = 6
+_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+_cache_lock = Lock()
+
+
+def reset_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def capture_evidence(
+    path,
+    t0: float,
+    t1: float,
+    *,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+    breath_window_seconds: float = BREATH_WINDOW_SECONDS,
+    breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+) -> dict[str, Any]:
+    """Decode a capture range and build its evidence series, cached; times on the capture's clock."""
+    from pathlib import Path
+
+    from backend.tiles import _presence_grid, get_index
+
+    path = Path(path)
+    st = path.stat()
+    key = (
+        str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
+        mimo, source_mac, bool(interpolate),
+        float(breath_window_seconds), float(breath_highpass_hz), float(max_gap_fraction),
+    )
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit
+
+    grid, fabricated, fs, grid_times, times, times_all, n_no_ratio = _presence_grid(
+        path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+    )
+    origin = float(grid_times[0])
+    index = get_index(path)
+    mask = index.filter_mask(mimo=mimo, source_mac=source_mac)
+    ids = np.flatnonzero(mask & (times_all >= t0) & (times_all <= t1))
+    amp_diff = amplitude_diff(path, index, ids, interpolate=interpolate) if ids.size >= 2 else None
+    amp_times = (times_all[ids][1:] - origin) if amp_diff is not None else None
+
+    ev = evidence_series(
+        grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times,
+        breath_window_seconds=breath_window_seconds, breath_highpass_hz=breath_highpass_hz,
+        max_gap_fraction=max_gap_fraction,
+    )
+    ev["time_s"] = origin + ev["time_s"]
+    ev["frames_used"] = int(times.size)
+    ev["frames_without_ratio"] = int(n_no_ratio)
+    ev["t_min"] = float(times_all[0]) if times_all.size else 0.0
+    ev["t_max"] = float(times_all[-1]) if times_all.size else 0.0
+
+    with _cache_lock:
+        _cache[key] = ev
+        while len(_cache) > _CACHE_SIZE:
+            _cache.popitem(last=False)
+    return ev
+
+
 def compute_hybrid(
     path,
     t0: float,
@@ -375,31 +531,22 @@ def compute_hybrid(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    **params: Any,
+    breath_window_seconds: float = BREATH_WINDOW_SECONDS,
+    breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+    **decision: Any,
 ) -> dict[str, Any]:
     """Decode a capture range and run the detector; times on the capture's clock."""
-    from pathlib import Path
-
-    from backend.tiles import _presence_grid, get_index
-
-    path = Path(path)
-    grid, fabricated, fs, grid_times, times, times_all, n_no_ratio = _presence_grid(
+    ev = capture_evidence(
         path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+        breath_window_seconds=breath_window_seconds, breath_highpass_hz=breath_highpass_hz,
+        max_gap_fraction=max_gap_fraction,
     )
-    origin = float(grid_times[0])
-
-    index = get_index(path)
-    mask = index.filter_mask(mimo=mimo, source_mac=source_mac)
-    ids = np.flatnonzero(mask & (times_all >= t0) & (times_all <= t1))
-    amp_diff = amplitude_diff(path, index, ids, interpolate=interpolate) if ids.size >= 2 else None
-    amp_times = (times_all[ids][1:] - origin) if amp_diff is not None else None
-
-    result = hybrid_seconds(
-        grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times, **params,
-    )
-    result["time_s"] = origin + result["time_s"]
-    result["frames_used"] = int(times.size)
-    result["frames_without_ratio"] = int(n_no_ratio)
-    result["t_min"] = float(times_all[0]) if times_all.size else 0.0
-    result["t_max"] = float(times_all[-1]) if times_all.size else 0.0
-    return result
+    # ``verdict`` works on times relative to the first second; the cached
+    # series is on the capture's clock, so shift in and back out.
+    origin = float(ev["time_s"][0]) - 0.5
+    local = dict(ev)
+    local["time_s"] = np.asarray(ev["time_s"], dtype=float) - origin
+    out = verdict(local, **decision)
+    out["time_s"] = np.asarray(out["time_s"], dtype=float) + origin
+    return out
