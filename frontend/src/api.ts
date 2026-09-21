@@ -1035,6 +1035,10 @@ export interface Hybrid {
   framesWithoutRatio: number;
   captureTMin: number;
   captureTMax: number;
+  /** Where the floor came from: 'recent', 'own', or 'explicit'. */
+  floorScope: string;
+  /** The captures pooled for a 'recent' floor, this one included. */
+  floorCaptures: string[];
   truth: { timeS: number[]; present: boolean[] } | null;
   confusion: HybridConfusion | null;
 }
@@ -1057,6 +1061,10 @@ export interface HybridOptions {
    *  day); replaces the range's own floor, which an occupied-throughout
    *  range cannot supply. Omit for the range's own. */
   motionFloor?: number | null;
+  /** 'recent' (default) pools the captures within `floorHours` of this one;
+   *  'own' uses this range's 20th percentile. */
+  floorScope?: "recent" | "own";
+  floorHours?: number;
   marginS?: number;
   mimo?: string | null;
   sourceMac?: string | null;
@@ -1085,6 +1093,8 @@ export async function fetchHybrid(
     breathWindow = 30,
     breathHighpass = 0.1,
     motionFloor,
+    floorScope = "recent",
+    floorHours = 2,
     marginS = 5,
     mimo,
     sourceMac,
@@ -1101,6 +1111,7 @@ export async function fetchHybrid(
     `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
     `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
     (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
+    `&floor_scope=${floorScope}&floor_hours=${floorHours}` +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
 
@@ -1133,6 +1144,8 @@ export async function fetchHybrid(
     framesWithoutRatio: body.frames_without_ratio,
     captureTMin: body.t_min,
     captureTMax: body.t_max,
+    floorScope: body.floor_scope ?? "own",
+    floorCaptures: body.floor_captures ?? [],
     truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
     confusion: c
       ? {

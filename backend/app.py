@@ -1274,7 +1274,9 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
     breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=60, description="How far the rates in that run may differ, rpm"),
     breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
     breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
-    motion_floor: float | None = Query(None, ge=0, le=10, description="Quiet |dr|/|r| level measured outside this range (the link's, over the day); replaces the range's own 20th percentile, which an occupied-throughout range cannot supply"),
+    floor_scope: str = Query("recent", description="Where the motion floor comes from: 'recent' pools the captures within floor_hours of this one (the link's quiet level; the default), 'own' uses this range's 20th percentile, which an occupied-throughout range cannot supply"),
+    floor_hours: float = Query(2.0, gt=0, le=48, description="Half-width of the 'recent' pool in hours"),
+    motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet |dr|/|r| level; overrides floor_scope when given"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
     source_mac: str | None = Query(None, description="Source MAC filter"),
@@ -1291,6 +1293,21 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         mimo_filter = parse_mimo_filter(mimo)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if floor_scope not in ("recent", "own"):
+        raise HTTPException(status_code=400, detail="floor_scope must be 'recent' or 'own'")
+
+    floor_captures: list[str] = []
+    if motion_floor is None and floor_scope == "recent":
+        pool = _neighbour_captures(p, floor_hours)
+        floor_captures = [q.name for q in pool]
+        try:
+            motion_floor = hybrid.pooled_floor(
+                pool, mimo=mimo_filter, source_mac=parse_mac_filter(source_mac), interpolate=interpolate,
+            )
+        except ValueError:
+            motion_floor = None
+        if motion_floor is not None and not np.isfinite(motion_floor):
+            motion_floor = None
 
     try:
         result = hybrid.compute_hybrid(
@@ -1358,9 +1375,42 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         "frames_without_ratio": result["frames_without_ratio"],
         "t_min": result["t_min"],
         "t_max": result["t_max"],
+        "floor_scope": "explicit" if floor_captures == [] and motion_floor is not None else floor_scope,
+        "floor_captures": floor_captures,
         "truth": truth_out,
         "confusion": confusion_out,
     }
+
+
+def _neighbour_captures(capture: Path, hours: float) -> list[Path]:
+    """This capture and every other one stamped within ``hours`` of it.
+
+    Same walk as ``_empty_reference_pool`` but without the camera filter:
+    the floor wants the link's quiet seconds wherever they fell, and a
+    capture with an occupant in it still holds its own quiet stretches.
+    """
+    from datetime import datetime
+
+    def stamp_of(q: Path) -> datetime | None:
+        try:
+            return datetime.strptime(q.stem[:15], "%Y%m%d_%H%M%S")
+        except ValueError:
+            return None
+
+    here = stamp_of(capture)
+    out = [capture]
+    if here is None:
+        return out
+    seen: set[Path] = set()
+    for root in capture_roots():
+        for cand in _walk_captures(root, MAX_CAPTURE_DEPTH, seen):
+            if cand.suffix not in CAPTURE_SUFFIXES or cand.resolve() == capture.resolve():
+                continue
+            when = stamp_of(cand)
+            if when is None or abs((here - when).total_seconds()) > hours * 3600:
+                continue
+            out.append(cand)
+    return out
 
 
 @app.get("/api/health")
