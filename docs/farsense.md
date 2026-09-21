@@ -150,4 +150,30 @@ Both are exposed on the tab and the API; §5 has the numbers when they exist.
 
 ## 5. Variants
 
-_(filled in from the corpus runs — see the commit that adds this table)_
+Same corpus, same scoring, four settings of the two knobs the paper did not
+need. "Rate stable" is the fraction of a capture's rated windows within
+±1 rpm of that capture's median rate, averaged over captures with ≥ 30
+stationary windows — a proxy for "is the number the same from window to
+window", since no belt exists to compare against.
+
+| window | high-pass | AUC peak | AUC BNR | AUC kept | best balanced acc. (peak >) | captures with median peak > 0.1 | rate stable, occupied | rate stable, empty |
+|---|---|---|---|---|---|---|---|---|
+| 12 s (paper) | off (paper) | 0.54 | 0.69 | 0.68 | 0.59 (0.18) | 7 / 29 | 0.28 | 0.19 |
+| 12 s | 0.1 Hz | 0.55 | 0.73 | 0.68 | 0.61 (0.18) | 7 / 29 | 0.30 | 0.18 |
+| 30 s | off | 0.56 | 0.73 | 0.61 | 0.62 (0.14) | 9 / 28 | 0.30 | 0.19 |
+| 30 s | 0.1 Hz | 0.54 | **0.78** | 0.66 | 0.63 (0.10) | 10 / 28 | 0.43 | 0.35 |
+
+Neither knob rescues the **rate**: the peak's AUC stays at 0.54–0.56 in
+every setting, and the longer window with the high-pass makes the rate more
+self-consistent in the *empty* room too (0.19 → 0.35), which is the
+signature of a filter shaping noise into a period rather than of a breath
+being found. What the knobs do improve is **BNR as a presence score**, from
+0.69 to 0.78 — still short of the amplitude-offset detector's in-capture
+result, and measured here without any calibration, which is the one thing
+in its favour.
+
+So, concretely: the paper's projection-with-maximal-periodicity is worth
+carrying into `backend.breathing` as the axis rule, and BNR / kept-count
+are worth reporting as calibration-free presence evidence; the paper's
+rate estimator, at this packet rate and window, is not a respiration
+monitor on this link.
