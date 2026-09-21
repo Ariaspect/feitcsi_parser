@@ -10,7 +10,8 @@ breathing. So neither channel decides on its own:
 * **Breathing** is the FarSense evidence (``backend.farsense``, 30 s window,
   0.1 Hz high-pass): the normalised autocorrelation peak above
   ``BREATH_MIN_PEAK`` through ``BREATH_PERSIST_SECONDS`` of consecutive windows
-  whose rates agree within ``BREATH_RATE_TOL`` rpm. It opens presence too -- a person
+  that mostly agree on the rate (``BREATH_RATE_TOL`` of the run's median,
+  ``BREATH_MIN_FRACTION`` of them). It opens presence too -- a person
   already seated when the range starts has no entry burst to be found -- and
   it is what keeps presence open while they sit.
 * Presence **holds** for ``HOLD_SECONDS`` after the last evidence and then
@@ -63,7 +64,9 @@ FLOOR_PERCENTILE = 20.0
 BREATH_MIN_PEAK = 0.15
 # Half a 30 s window at the 1 s hop: the run's ends see mostly different data.
 BREATH_PERSIST_SECONDS = 15.0
-BREATH_RATE_TOL = 3.0      # rpm
+BREATH_RATE_TOL = 3.0      # rpm, from the run's median
+# A run may carry a few windows that dip below the peak or stray in rate.
+BREATH_MIN_FRACTION = 0.8
 BREATH_WINDOW_SECONDS = 30.0
 BREATH_HIGHPASS_HZ = 0.1
 # A second is "unknown" when more than this fraction of its samples were
@@ -131,8 +134,9 @@ def consistent_breathing(
     min_peak: float = BREATH_MIN_PEAK,
     n_consistent: int = 15,
     rate_tol: float = BREATH_RATE_TOL,
+    min_fraction: float = BREATH_MIN_FRACTION,
 ) -> np.ndarray:
-    """Windows whose peak clears ``min_peak`` through a run of ``n_consistent`` that agree on the rate.
+    """Windows inside a run of ``n_consistent`` that mostly clear ``min_peak`` and mostly agree on the rate.
 
     Agreement is what separates a chest from a noise peak: an empty room's
     first-peak rates scatter across the band from one window to the next, a
@@ -140,8 +144,16 @@ def consistent_breathing(
     their samples, so two neighbours agreeing is no test at all -- the run
     has to be long enough that its ends see mostly different data, which is
     why the default is half a window (15 windows at a 1 s hop under a 30 s
-    window). Every window of a qualifying run is marked, so the evidence is
-    as long as the run, not one second per run.
+    window).
+
+    "Mostly", not "all": a run is accepted when at least ``min_fraction`` of
+    its windows clear the peak and, of those, at least ``min_fraction`` sit
+    within ``rate_tol`` of the run's median rate. Measured on
+    20260916_202702, 17 straight windows of real breathing (peaks 0.16-0.40,
+    rates 16.7-20.0) were rejected by an all-or-nothing rule twice over: one
+    window dipped to 0.142, and the max-min spread was 3.3 rpm against a
+    3 rpm tolerance. Every window of an accepted run is marked, so the
+    evidence is as long as the run.
     """
     peak = np.asarray(peak, dtype=float)
     rpm = np.asarray(rpm, dtype=float)
@@ -150,9 +162,15 @@ def consistent_breathing(
     out = np.zeros(n, dtype=bool)
     if n_consistent <= 1:
         return strong
+    need = max(1, int(np.ceil(min_fraction * n_consistent)))
     for i in range(n - n_consistent + 1):
         block = slice(i, i + n_consistent)
-        if strong[block].all() and (rpm[block].max() - rpm[block].min()) <= rate_tol:
+        q = strong[block]
+        if q.sum() < need:
+            continue
+        rates = rpm[block][q]
+        agree = np.abs(rates - np.median(rates)) <= rate_tol
+        if agree.sum() >= need:
             out[block] = True
     return out
 
@@ -175,6 +193,7 @@ def hybrid_seconds(
     breath_min_peak: float = BREATH_MIN_PEAK,
     breath_persist_seconds: float = BREATH_PERSIST_SECONDS,
     breath_rate_tol: float = BREATH_RATE_TOL,
+    breath_min_fraction: float = BREATH_MIN_FRACTION,
     breath_window_seconds: float = BREATH_WINDOW_SECONDS,
     breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
     max_gap_fraction: float = MAX_GAP_FRACTION,
@@ -258,7 +277,7 @@ def hybrid_seconds(
         w_evidence = consistent_breathing(
             np.where(ok, fz["acf_peak_norm"], np.nan), fz["rpm"],
             min_peak=breath_min_peak, n_consistent=max(1, int(round(breath_persist_seconds))),
-            rate_tol=breath_rate_tol,
+            rate_tol=breath_rate_tol, min_fraction=breath_min_fraction,
         )
         cell = np.floor(centres).astype(int)
         inside = (cell >= 0) & (cell < n_sec)
@@ -320,6 +339,7 @@ def hybrid_seconds(
             "breath_min_peak": float(breath_min_peak),
             "breath_persist_seconds": float(breath_persist_seconds),
             "breath_rate_tol": float(breath_rate_tol),
+            "breath_min_fraction": float(breath_min_fraction),
             "breath_window_seconds": float(breath_window_seconds),
             "breath_highpass_hz": float(breath_highpass_hz),
             "max_gap_fraction": float(max_gap_fraction),

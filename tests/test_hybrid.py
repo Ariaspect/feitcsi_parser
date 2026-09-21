@@ -74,14 +74,24 @@ def test_a_burst_needs_the_minimum_run() -> None:
     assert hybrid.bursts(level, 0.3, 1).sum() == 6
 
 
-def test_breathing_evidence_needs_persistence_and_rate_agreement() -> None:
+def test_breathing_evidence_needs_persistence_and_mostly_agreeing_rates() -> None:
     peak = np.full(30, 0.3)
     rpm = np.full(30, 15.0)
-    rpm[10] = 25.0                                # one window disagrees
+    # One straying window in thirty is what real breathing looks like; it
+    # must not break the run (measured: it did, on 20260916_202702).
+    rpm[10] = 25.0
+    peak[20] = 0.10
     ev = hybrid.consistent_breathing(peak, rpm, min_peak=0.15, n_consistent=15, rate_tol=3.0)
-    # Runs of 15 that avoid index 10: 11..25 onwards qualify, nothing before.
-    assert not ev[:11].any()
-    assert ev[11:].all()
+    assert ev.all()
+    # Four stray windows in a run of fifteen is more than a fifth: every run
+    # holding all four is rejected, and the first run that drops one passes.
+    rpm2 = np.full(30, 15.0)
+    rpm2[[3, 6, 9, 12]] = 25.0
+    ev2 = hybrid.consistent_breathing(np.full(30, 0.3), rpm2, min_peak=0.15, n_consistent=15, rate_tol=3.0)
+    assert not ev2[:4].any() and ev2[4:].all()
+    # Rates that wander steadily across the band never share a median.
+    drift = np.linspace(10.0, 37.0, 30)
+    assert not hybrid.consistent_breathing(np.full(30, 0.3), drift, min_peak=0.15, n_consistent=15, rate_tol=3.0).any()
     short = hybrid.consistent_breathing(peak[:14], rpm[:14], min_peak=0.15, n_consistent=15)
     assert not short.any()
 
