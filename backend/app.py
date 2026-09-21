@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import farsense, lgdetect, lgproc, truth as truthmod
+from . import farsense, hybrid, lgdetect, lgproc, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1253,6 +1253,111 @@ def farsense_detector(   # not `farsense`: that name is the module this calls
         "frames_without_ratio": result["frames_without_ratio"],
         "t_min": result["t_min"],
         "t_max": result["t_max"],
+    }
+
+
+@app.get("/api/hybrid")
+def hybrid_detector(   # not `hybrid`: that name is the module this calls
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    use_amplitude: bool = Query(False, description="Also count bursts on the raw amplitude frame-diff channel"),
+    hold_s: float = Query(hybrid.HOLD_SECONDS, ge=0, le=600, description="Seconds presence is held after the last evidence"),
+    burst_s: float = Query(hybrid.BURST_SECONDS, ge=1, le=60, description="Consecutive seconds above the motion threshold that make a burst"),
+    motion_rel: float = Query(hybrid.MOTION_REL, ge=1, le=100, description="Ratio-motion threshold as a multiple of the range's own floor"),
+    motion_abs: float = Query(hybrid.MOTION_ABS, ge=0, le=10, description="Ratio-motion threshold never below this |dr|/|r|"),
+    amp_rel: float = Query(hybrid.AMP_REL, ge=1, le=100, description="Amplitude-motion threshold as a multiple of its floor"),
+    amp_abs: float = Query(hybrid.AMP_ABS, ge=0, le=60, description="Amplitude-motion threshold never below this many dB"),
+    floor_pct: float = Query(hybrid.FLOOR_PERCENTILE, ge=0, le=100, description="Percentile of the per-second level taken as the range's quiet floor"),
+    breath_min_peak: float = Query(hybrid.BREATH_MIN_PEAK, ge=-1, le=1, description="Normalised FarSense peak a window needs to count as breathing"),
+    breath_persist_s: float = Query(hybrid.BREATH_PERSIST_SECONDS, ge=1, le=120, description="Seconds of consecutive qualifying windows that must agree on the rate"),
+    breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=60, description="How far the rates in that run may differ, rpm"),
+    breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
+    breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The calibration-free motion/breathing detector, one verdict per second.
+
+    See ``backend.hybrid``. Scored against the camera when the capture has a
+    sidecar, through ``backend.truth`` with the same margin the other
+    scorers use, and the confusion matrix travels with the series.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = hybrid.compute_hybrid(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            use_amplitude=use_amplitude,
+            hold_seconds=hold_s,
+            burst_seconds=burst_s,
+            motion_rel=motion_rel,
+            motion_abs=motion_abs,
+            amp_rel=amp_rel,
+            amp_abs=amp_abs,
+            floor_percentile=floor_pct,
+            breath_min_peak=breath_min_peak,
+            breath_persist_seconds=breath_persist_s,
+            breath_rate_tol=breath_rate_tol,
+            breath_window_seconds=breath_window,
+            breath_highpass_hz=breath_highpass,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    truth_out = None
+    confusion_out = None
+    cam = _camera_truth(p)
+    if cam is not None and cam.size:
+        cells, excluded = truthmod.cell_truth(
+            result["time_s"], cam[:, 0], cam[:, 1] > 0.5, 0.5, margin_s
+        )
+        c = truthmod.confusion(cells, result["present"], excluded)
+        scored = np.isfinite(cells)
+        c["base_rate"] = float(np.mean(cells[scored] > 0.5)) if scored.any() else None
+        c["margin_s"] = float(margin_s)
+        confusion_out = c
+        truth_out = {
+            "time_s": [float(v) for v in cam[:, 0]],
+            "present": [bool(v > 0.5) for v in cam[:, 1]],
+        }
+
+    def _nan(v: float) -> float | None:
+        return float(v) if np.isfinite(v) else None
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "present": [bool(v) for v in result["present"]],
+        "state": result["state"],
+        "unknown": [bool(v) for v in result["unknown"]],
+        "motion_ratio": _nullable(result["motion_ratio"]),
+        "motion_amp": _nullable(result["motion_amp"]),
+        "burst": [bool(v) for v in result["burst"]],
+        "breathing": [bool(v) for v in result["breathing"]],
+        "breath_peak": _nullable(result["breath_peak"]),
+        "breath_rpm": _nullable(result["breath_rpm"]),
+        "ratio_floor": _nan(result["ratio_floor"]),
+        "ratio_threshold": _nan(result["ratio_threshold"]),
+        "amp_floor": _nan(result["amp_floor"]),
+        "amp_threshold": _nan(result["amp_threshold"]),
+        "breath_note": result["breath_note"],
+        "fs_hz": result["fs_hz"],
+        "params": result["params"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
+        "truth": truth_out,
+        "confusion": confusion_out,
     }
 
 

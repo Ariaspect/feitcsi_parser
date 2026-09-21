@@ -3,6 +3,7 @@ import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, trun
 import { TWILIGHT } from "./colormap";
 import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
+import { Hybrid } from "./Hybrid";
 import { LgDetector } from "./LgDetector";
 import { Phase1 } from "./Phase1";
 import { PresenceBar } from "./PresenceBar";
@@ -662,6 +663,7 @@ export function App() {
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
               <TabsTrigger value="farsense">FarSense</TabsTrigger>
+              <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
               <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
             </TabsList>
 
@@ -985,6 +987,18 @@ export function App() {
 
             <TabsContent value="farsense">
               <FarSense
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </TabsContent>
+
+            <TabsContent value="hybrid">
+              <Hybrid
                 path={path}
                 meta={meta}
                 timeLink={timeLink}

@@ -977,3 +977,162 @@ export async function fetchFarSense(
     captureTMax: body.t_max,
   };
 }
+
+/** One second of the calibration-free detector. `moving` and `breathing`
+ *  are the evidence; `held` is presence kept alive by evidence within the
+ *  hold; `empty` is the room once nothing has happened for that long. */
+export type HybridState = "unknown" | "moving" | "breathing" | "held" | "empty";
+
+export interface HybridParams {
+  use_amplitude: boolean;
+  hold_seconds: number;
+  burst_seconds: number;
+  motion_rel: number;
+  motion_abs: number;
+  amp_rel: number;
+  amp_abs: number;
+  floor_percentile: number;
+  breath_min_peak: number;
+  breath_persist_seconds: number;
+  breath_rate_tol: number;
+  breath_window_seconds: number;
+  breath_highpass_hz: number;
+  max_gap_fraction: number;
+}
+
+export interface HybridConfusion extends Confusion {
+  /** Fraction of scored seconds the camera called occupied — what always
+   *  saying "present" would score. */
+  baseRate: number | null;
+  marginSeconds: number;
+}
+
+export interface Hybrid {
+  timeS: number[];
+  present: boolean[];
+  state: HybridState[];
+  unknown: boolean[];
+  /** Per-second median |Δr|/|r|; null where the second was a dropout. */
+  motionRatio: (number | null)[];
+  /** Per-second median |ΔA| in dB on the raw amplitude. */
+  motionAmp: (number | null)[];
+  burst: boolean[];
+  breathing: boolean[];
+  breathPeak: (number | null)[];
+  breathRpm: (number | null)[];
+  /** The range's own quiet level and the threshold derived from it. */
+  ratioFloor: number | null;
+  ratioThreshold: number | null;
+  ampFloor: number | null;
+  ampThreshold: number | null;
+  /** Why the breathing channel could not run, when it could not. */
+  breathNote: string | null;
+  fsHz: number;
+  params: HybridParams;
+  framesUsed: number;
+  framesWithoutRatio: number;
+  captureTMin: number;
+  captureTMax: number;
+  truth: { timeS: number[]; present: boolean[] } | null;
+  confusion: HybridConfusion | null;
+}
+
+export interface HybridOptions {
+  useAmplitude?: boolean;
+  holdS?: number;
+  burstS?: number;
+  motionRel?: number;
+  motionAbs?: number;
+  ampRel?: number;
+  ampAbs?: number;
+  floorPct?: number;
+  breathMinPeak?: number;
+  breathPersistS?: number;
+  breathRateTol?: number;
+  breathWindow?: number;
+  breathHighpass?: number;
+  marginS?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchHybrid(
+  path: string,
+  t0: number,
+  t1: number,
+  options: HybridOptions = {},
+  signal?: AbortSignal,
+): Promise<Hybrid> {
+  const {
+    useAmplitude = false,
+    holdS = 20,
+    burstS = 2,
+    motionRel = 2,
+    motionAbs = 0.1,
+    ampRel = 2,
+    ampAbs = 0.5,
+    floorPct = 20,
+    breathMinPeak = 0.15,
+    breathPersistS = 15,
+    breathRateTol = 3,
+    breathWindow = 30,
+    breathHighpass = 0.1,
+    marginS = 5,
+    mimo,
+    sourceMac,
+    interpolate,
+  } = options;
+
+  const url =
+    `/api/hybrid?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&use_amplitude=${useAmplitude}&hold_s=${holdS}&burst_s=${burstS}` +
+    `&motion_rel=${motionRel}&motion_abs=${motionAbs}` +
+    `&amp_rel=${ampRel}&amp_abs=${ampAbs}&floor_pct=${floorPct}` +
+    `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
+    `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
+    `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `hybrid: ${res.status}`);
+  }
+  const body = await res.json();
+  const c = body.confusion;
+  return {
+    timeS: body.time_s,
+    present: body.present,
+    state: body.state,
+    unknown: body.unknown,
+    motionRatio: body.motion_ratio,
+    motionAmp: body.motion_amp,
+    burst: body.burst,
+    breathing: body.breathing,
+    breathPeak: body.breath_peak,
+    breathRpm: body.breath_rpm,
+    ratioFloor: body.ratio_floor ?? null,
+    ratioThreshold: body.ratio_threshold ?? null,
+    ampFloor: body.amp_floor ?? null,
+    ampThreshold: body.amp_threshold ?? null,
+    breathNote: body.breath_note ?? null,
+    fsHz: body.fs_hz,
+    params: body.params,
+    framesUsed: body.frames_used,
+    framesWithoutRatio: body.frames_without_ratio,
+    captureTMin: body.t_min,
+    captureTMax: body.t_max,
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    confusion: c
+      ? {
+          tp: c.tp, fp: c.fp, fn: c.fn, tn: c.tn, total: c.total, excluded: c.excluded,
+          accuracy: c.accuracy, recall: c.recall, specificity: c.specificity, precision: c.precision,
+          baseRate: c.base_rate ?? null,
+          marginSeconds: c.margin_s,
+        }
+      : null,
+  };
+}
