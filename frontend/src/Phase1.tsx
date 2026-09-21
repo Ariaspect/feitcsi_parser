@@ -65,6 +65,7 @@ function Matrix({ title, c, accent }: { title: string; c: Confusion; accent: str
       <div className="text-[11px] text-muted-foreground tabular-nums">
         acc {rate(c.accuracy)} · recall {rate(c.recall)} · spec{" "}
         {rate(c.specificity)} · prec {rate(c.precision)}
+        {c.excluded > 0 && <> · {c.excluded} not scored</>}
       </div>
     </div>
   );
