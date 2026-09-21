@@ -414,23 +414,23 @@ export function FarSense({
     <div className="space-y-4" ref={holder}>
       <div className="flex flex-wrap items-center gap-3">
         <NumberField id="fs-win" label="Window (s)" value={windowSeconds} onChange={setWindowSeconds} min={4} max={120}
-          title="Sec. 5.2.2: the paper uses 12 s" />
+          title="Longer: a steady rhythm stands out more against noise and the rate is finer, but it assumes the rate holds for the whole window and a seated person shows only about half a window after sitting down. Shorter: reacts faster and tolerates a wandering rate, but peaks are noisier and the slow edge of the band fits only a breath or two." />
         <NumberField id="fs-lo" label="rpm" value={rpmLo} onChange={setRpmLo} min={1} max={119} width="w-16"
-          title="Sec. 5.2.2: 10–37 bpm" />
+          title="Narrower band: fewer chances for noise to pass as a peak and the empty room stops piling up at the band edge, but a real rate outside it is missed. Wider: catches unusual rates at the cost of more false peaks; the slow edge must still fit in the window or the tab refuses." />
         <span className="text-[11px] text-muted-foreground">–</span>
         <NumberField id="fs-hi" label="" value={rpmHi} onChange={setRpmHi} min={2} max={120} width="w-16" />
         <NumberField id="fs-keep" label="Keep ≥ ×best" value={keepFraction} onChange={setKeepFraction} min={0} max={1} step={0.05}
-          title="Sec. 6.4.2: subcarriers whose BNR is below this fraction of the best are dropped; the paper uses 0.7" />
+          title="Higher (towards 1): only the very best subcarriers vote — a sharper peak when a chest is there, jumpier from window to window. Lower (towards 0): every subcarrier votes and the ones that barely see the chest dilute the peak (measured: 0.215 → 0.119 at 0)." />
         <NumberField id="fs-theta" label="θ steps" value={nTheta} onChange={setNTheta} min={2} max={720} step={2}
-          title="Sec. 6.3: 100 candidates at π/50" />
+          title="More: a finer search for the direction the breath moves the ratio along; above ~50 nothing changes but the compute. Fewer: below ~10 the direction can be missed and the peak falls." />
         <NumberField id="fs-sg" label="S-G (s)" value={savgolSeconds} onChange={setSavgolSeconds} min={0} max={5} step={0.1}
-          title="Savitzky-Golay window; 0 disables. The paper names the filter but not its length" />
+          title="Longer: a smoother pattern with less per-packet jitter, but fast breaths start to flatten (1–1.5 s begins to eat 30 rpm). Shorter or 0: the raw packets — noisier pattern, nothing removed." />
         <NumberField id="fs-hp" label="High-pass (Hz)" value={highpassHz} onChange={setHighpassHz} min={0} max={2} step={0.05}
-          title="Not in the paper. 0 is the paper; 0.1 removes the drift this link carries" />
+          title="Higher: removes slower wander (drift, a person settling) so it cannot pass as a slow breath; above ~0.15 it starts eating 10 rpm breathing itself. 0: nothing removed — drift leaks into the slow edge of the band." />
         <NumberField id="fs-motion" label="Motion above" value={motionFracHi} onChange={setMotionFracHi} min={0.01} max={2} step={0.01}
-          title="A window whose median |Δr|/|r| is above this is non-stationary and reports no rate" />
+          title="Lower: stricter — fidgeting counts as motion, so fewer windows show a rate but those that do are cleaner. Higher: looser — walking can pass as stationary and produce junk rates." />
         <NumberField id="fs-peak" label="Min peak" value={minPeak} onChange={setMinPeak} min={-1} max={1} step={0.05}
-          title="Rates whose normalised autocorrelation peak is below this are blanked; 0 is the paper" />
+          title="Higher: only rates with a clear rhythm behind them are drawn (an empty room sits near 0 ± 0.1, an occupant 0.2–0.6), so fewer dots and fewer false ones. 0: a number whenever the window is stationary, empty room included." />
         {data && (
           <span className="text-[11px] text-muted-foreground">
             {data.fsHz.toFixed(1)} Hz · {data.timeS.length} windows · {data.windowSeconds.toFixed(1)} s each ·
