@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import farsense, lgdetect, lgproc
+from . import farsense, lgdetect, lgproc, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -514,6 +514,7 @@ def _nullable(values: np.ndarray) -> list[float | None]:
 @app.get("/api/lgdetect")
 def lg_detect(   # not `lgdetect`: that name is the module this calls
     path: str = Query(..., description="Path to the capture"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored; 0 trusts every frame"),
     threshold: float = Query(26.0, gt=0, le=200, description="Its change-detection threshold in dB; 26 is the value the script ships with"),
     absence: float = Query(10.0, gt=0, le=600, description="Seconds without movement before it reports absence"),
 ) -> dict:
@@ -570,21 +571,30 @@ def lg_detect(   # not `lgdetect`: that name is the module this calls
                     times.append(float(f["epoch"]) - float(base))
                     truth.append(bool(f.get("boxes")))
                 said = [any(a <= t < b for a, b in spans) for t in times]
-                tp = sum(1 for s, t in zip(said, truth) if s and t)
-                fp = sum(1 for s, t in zip(said, truth) if s and not t)
-                fn = sum(1 for s, t in zip(said, truth) if not s and t)
-                tn = sum(1 for s, t in zip(said, truth) if not s and not t)
-                n = max(len(times), 1)
+                # Empty frames within margin_s of a transition are the seconds
+                # the camera cannot vouch for -- see backend.truth -- and are
+                # scored in neither direction.
+                ambiguous = truthmod.ambiguous_frames(
+                    np.asarray(times), np.asarray(truth, dtype=bool), margin_s
+                )
+                scored = [(s, t) for s, t, a in zip(said, truth, ambiguous) if not a]
+                tp = sum(1 for s, t in scored if s and t)
+                fp = sum(1 for s, t in scored if s and not t)
+                fn = sum(1 for s, t in scored if not s and t)
+                tn = sum(1 for s, t in scored if not s and not t)
+                n = max(len(scored), 1)
                 out["truth"] = {
                     "timeS": times,
                     "present": truth,
                     "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+                    "excluded": int(ambiguous.sum()),
+                    "marginSeconds": float(margin_s),
                     "accuracy": (tp + tn) / n,
                     "precision": tp / max(tp + fp, 1),
                     "recall": tp / max(tp + fn, 1),
                     # What it would score by always saying "present": the bar
                     # any detector has to clear to have said anything.
-                    "baseRate": sum(truth) / n,
+                    "baseRate": sum(t for _, t in scored) / n,
                 }
         except (OSError, ValueError):
             out["truth"] = None
@@ -595,6 +605,7 @@ def lg_detect(   # not `lgdetect`: that name is the module this calls
 def phase1(
     path: str = Query(..., description="Path to the capture"),
     grid: float = Query(1.0, gt=0.05, le=60, description="Seconds per verdict; 1 s is the camera's own rate and there is no ground truth finer"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored -- the walk between door and chair, which the CSI sees and the camera's ROI does not; 0 trusts every frame"),
     k: float = Query(3.0, gt=0, le=100, description="Threshold as a multiple of the reference's dev_scale"),
     lg_threshold: float = Query(26.0, gt=0, le=200, description="LG's change-detection threshold in dB"),
     lg_absence: float = Query(10.0, gt=0, le=600, description="Seconds without movement before LG reports absence"),
@@ -643,7 +654,7 @@ def phase1(
     trade-off the two approaches make.
     """
     p = resolve_capture_path(path)
-    out: dict = {"path": str(p), "gridSeconds": grid}
+    out: dict = {"path": str(p), "gridSeconds": grid, "marginSeconds": margin_s}
 
     truth = _camera_truth(p)
     if truth is None:
@@ -717,7 +728,7 @@ def phase1(
                 # docstring.
                 "referenceAgeH": ref_age,
                 "references": [r.name for r in refs],
-                "confusion": _confusion(centres, state, truth, grid),
+                "confusion": _confusion(centres, state, truth, grid, margin_s),
             }
 
     # ---- theirs, which never needs one --------------------------------------
@@ -731,7 +742,7 @@ def phase1(
         "threshold": lg_threshold,
         "absence": lg_absence,
         "events": len(lg.get("events") or []),
-        "confusion": _confusion(centres, lg_state, truth, grid),
+        "confusion": _confusion(centres, lg_state, truth, grid, margin_s),
     }
     return out
 
@@ -884,26 +895,17 @@ def _lg_state_on_grid(events: list[dict], centres: np.ndarray) -> np.ndarray:
 
 
 def _confusion(centres: np.ndarray, state: np.ndarray, truth: np.ndarray,
-               grid: float) -> dict:
-    """Counted only where the camera is unambiguous across the whole window."""
-    tp = fp = fn = tn = 0
-    for centre, predicted in zip(centres, state):
-        m = (truth[:, 0] >= centre - grid / 2) & (truth[:, 0] <= centre + grid / 2)
-        if not m.any():
-            continue
-        frac = float(truth[m, 1].mean())
-        if frac == 0.0:
-            fp, tn = (fp + 1, tn) if predicted else (fp, tn + 1)
-        elif frac > 0.5:
-            tp, fn = (tp + 1, fn) if predicted else (tp, fn + 1)
-    total = tp + fp + fn + tn
-    return {
-        "tp": tp, "fp": fp, "fn": fn, "tn": tn, "total": total,
-        "accuracy": (tp + tn) / total if total else None,
-        "recall": tp / (tp + fn) if (tp + fn) else None,
-        "specificity": tn / (fp + tn) if (fp + tn) else None,
-        "precision": tp / (tp + fp) if (tp + fp) else None,
-    }
+               grid: float, margin_s: float = truthmod.DEFAULT_MARGIN_S) -> dict:
+    """Counted only where the camera is unambiguous across the whole cell.
+
+    ``margin_s`` removes the empty frames next to a transition before the
+    cell is judged -- see ``backend.truth`` for why those are the label's
+    error, not the detector's. What was removed comes back as ``excluded``.
+    """
+    cells, excluded = truthmod.cell_truth(
+        centres, truth[:, 0], truth[:, 1] > 0.5, grid / 2, margin_s
+    )
+    return truthmod.confusion(cells, np.asarray(state, dtype=bool), excluded)
 
 
 @app.get("/api/lgparse")

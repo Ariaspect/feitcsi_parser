@@ -661,6 +661,10 @@ export interface LgDetect {
     timeS: number[];
     present: boolean[];
     tp: number; fp: number; fn: number; tn: number;
+    /** Empty frames within `marginSeconds` of a transition, scored in
+     *  neither direction. */
+    excluded: number;
+    marginSeconds: number;
     accuracy: number;
     precision: number;
     recall: number;
@@ -695,6 +699,10 @@ export interface Confusion {
   fn: number;
   tn: number;
   total: number;
+  /** Cells the camera covered but could not vouch for: empty frames within
+   *  the margin of a transition, or a span neither empty nor occupied. Scored
+   *  in neither direction, and reported so the discard is visible. */
+  excluded: number;
   accuracy: number | null;
   recall: number | null;
   specificity: number | null;
@@ -711,6 +719,8 @@ export interface Confusion {
 export interface Phase1 {
   path: string;
   gridSeconds: number;
+  /** Seconds of the empty label next to each transition that were not scored. */
+  marginSeconds: number;
   timeS: number[];
   groundTruth: { timeS: number[]; present: boolean[] };
   calibrated: boolean;

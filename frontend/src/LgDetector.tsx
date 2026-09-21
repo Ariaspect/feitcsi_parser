@@ -254,6 +254,12 @@ export function LgDetector({
                 <span className="text-muted-foreground">
                   always-present baseline {t.baseRate.toFixed(2)}
                 </span>
+                {t.excluded > 0 && (
+                  <span className="text-muted-foreground">
+                    {t.excluded} frames not scored (empty, within {t.marginSeconds} s of a
+                    camera transition)
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-muted-foreground leading-relaxed">
                 The baseline is what always answering “present” would score, and
