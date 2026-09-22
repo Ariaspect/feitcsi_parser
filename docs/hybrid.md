@@ -402,6 +402,23 @@ C's remaining cost sits in three captures on the same noisy days:
 `20260917_195828` fp 19 → 189 s, `20260917_161300` 17 → 164 s,
 `20260916_151218` 132 → 177 s (their empty stretches sit at 0.13–0.17).
 
+C combined with the sparse rule (102 captures, `any` + lead on):
+
+| metric | own | C | C + sparse 0.3 | C + sparse 0.4 | C + sparse 0.5 |
+|---|---|---|---|---|---|
+| empty (19) specificity | 95.1 | 95.1 | 95.1 | 95.1 | 95.1 |
+| control accuracy / F1 | 84.5 / 84.3 | 82.0 / 82.3 | 78.4 / 79.5 | 81.7 / 82.0 | 82.0 / 82.3 |
+| seated fidgeting (13) recall | 16.8 | 81.2 | 85.6 | 82.3 | 81.2 |
+| still sitters (14) recall | 95.5 | 97.4 | 98.7 | 98.4 | 98.1 |
+| still sitters accuracy / F1 (whole) | 85.5 / 89.5 | 82.4 / 87.7 | 80.6 / 86.8 | 82.6 / 87.9 | 82.8 / 88.0 |
+| all 102 accuracy / F1 | 76.4 / 71.7 | 83.7 / 82.5 | 82.2 / 81.5 | 83.6 / 82.5 | 83.7 / 82.6 |
+
+The still sitters are already at 95–100 % recall on 11 of 14 under C; the
+sparse rule lifts the three below (`20260916_143259` 92 → 98,
+`20260916_145728` 90 → 97) and lowers the empty-stretch specificity of the
+control-shaped ones (`20260914_134409` 93 → 73, `20260915_152235` 31 → 5 at
+0.3). Nothing changes in the 19 empty captures.
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
