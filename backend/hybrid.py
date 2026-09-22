@@ -151,6 +151,27 @@ def hold_before(mask: np.ndarray, n: int) -> np.ndarray:
     return hold_after(np.asarray(mask, dtype=bool)[::-1], n)[::-1]
 
 
+def gaps_between_bursts_with(burst: np.ndarray, inside: np.ndarray) -> np.ndarray:
+    """Cells between two burst runs when any ``inside`` cell lies between them.
+
+    The heuristic: a person who moved, then moved again, and showed any
+    breathing in between never left -- fill the whole stretch.
+    """
+    burst = np.asarray(burst, dtype=bool)
+    inside = np.asarray(inside, dtype=bool)
+    out = np.zeros(burst.shape, dtype=bool)
+    idx = np.flatnonzero(burst)
+    if idx.size < 2:
+        return out
+    # ends of burst runs and starts of the next ones
+    breaks = np.flatnonzero(np.diff(idx) > 1)
+    for k in breaks:
+        a, b = idx[k], idx[k + 1]
+        if inside[a + 1 : b].any():
+            out[a + 1 : b] = True
+    return out
+
+
 def bridged_gaps(evidence: np.ndarray, covered: np.ndarray) -> np.ndarray:
     """Gaps between two evidence cells whose every cell a hold covers.
 
@@ -367,8 +388,14 @@ def verdict(
     breath_min_fraction: float = BREATH_MIN_FRACTION,
     motion_floor: float | None = None,
     lead_hold: bool = True,
+    bridge_bursts: str = "off",
 ) -> dict[str, Any]:
     """Bursts, breathing runs and the held state from an evidence series.
+
+    ``bridge_bursts``: ``"off"``; ``"run"`` fills the whole stretch between
+    two bursts when a breathing *run* (the persistence rule) lies between
+    them; ``"any"`` does so when any single window's peak clears
+    ``breath_min_peak`` there.
 
     Presence runs ``hold_seconds`` past any evidence. With ``lead_hold`` the
     breathing evidence also holds presence for ``hold_seconds`` *before* it
@@ -418,12 +445,22 @@ def verdict(
     )
     breathing &= ~burst & ~unknown
 
+    if bridge_bursts not in ("off", "run", "any"):
+        raise ValueError(f"bridge_bursts must be 'off', 'run' or 'any', got {bridge_bursts!r}")
     n_hold = max(0, int(round(hold_seconds)))
     evidence = burst | breathing
     trailing = hold_after(evidence, n_hold)
     leading = hold_before(breathing, n_hold) if lead_hold else np.zeros(n_sec, dtype=bool)
     covered = (trailing | leading) & ~evidence
     bridged = bridged_gaps(evidence, covered)
+    if bridge_bursts != "off":
+        peak_arr = np.asarray(ev["breath_peak"], dtype=float)
+        inside = breathing if bridge_bursts == "run" else (
+            np.isfinite(peak_arr) & (peak_arr >= breath_min_peak) & ~unknown & ~burst
+        )
+        filled = gaps_between_bursts_with(burst, inside) & ~evidence
+        bridged = bridged | filled
+        covered = covered | filled
     present = (evidence | covered) & ~unknown
 
     state = np.full(n_sec, STATE_EMPTY, dtype=object)
@@ -459,6 +496,7 @@ def verdict(
             "breath_min_fraction": float(breath_min_fraction),
             "motion_floor": None if motion_floor is None else float(motion_floor),
             "lead_hold": bool(lead_hold),
+            "bridge_bursts": str(bridge_bursts),
         },
     )
     out.pop("evidence_params", None)

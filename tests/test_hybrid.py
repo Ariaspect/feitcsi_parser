@@ -203,6 +203,25 @@ def test_the_farsense_knobs_reach_the_breathing_channel() -> None:
     assert not gated["breathing"][_between(gated, 80.0, 90.0)].any()
 
 
+def test_breathing_between_two_bursts_fills_the_stretch_when_asked() -> None:
+    """Walk, sit and breathe for a while, walk again: with bridge_bursts the
+    whole stretch between the two walks is present; without it the tail
+    between the last breathing hold and the second walk is empty."""
+    sig = _room(300.0, walk=(20.0, 25.0), chest=(60.0, 160.0))
+    sig[int(200.0 * FS):int(205.0 * FS)] *= np.exp(1j * np.cumsum(np.random.default_rng(5).uniform(-2.0, 2.0, (int(5.0 * FS), 1)), axis=0))
+    off = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0)
+    run = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, bridge_bursts="run")
+    anyw = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, bridge_bursts="any")
+    assert off["burst"][_between(off, 21.0, 24.0)].all() and off["burst"][_between(off, 201.0, 204.0)].all()
+    assert not off["present"][_between(off, 190.0, 199.0)].all()
+    assert run["present"][_between(run, 25.0, 200.0)].all()
+    assert "bridged" in run["state"]
+    assert anyw["present"].sum() >= run["present"].sum() >= off["present"].sum()
+    assert run["params"]["bridge_bursts"] == "run"
+    with pytest.raises(ValueError):
+        hybrid.hybrid_seconds(sig, FS, bridge_bursts="always")
+
+
 def test_the_verdict_does_not_depend_on_the_links_noise_scale() -> None:
     """Calibration-free means the same verdicts at five times the noise: the
     floor moves with the link and the threshold with it."""

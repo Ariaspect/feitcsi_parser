@@ -98,6 +98,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [motionAbs, setMotionAbs] = useState(0.1);
   const [useAmplitude, setUseAmplitude] = useState(false);
   const [leadHold, setLeadHold] = useState(true);
+  const [bridgeBursts, setBridgeBursts] = useState<"off" | "run" | "any">("off");
   const [breathMinPeak, setBreathMinPeak] = useState(0.2);
   const [breathPersistS, setBreathPersistS] = useState(10);
   const [breathRateTol, setBreathRateTol] = useState(3);
@@ -149,7 +150,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
     fetchHybrid(
       path, range[0], range[1],
       {
-        holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, breathMinPeak, breathPersistS,
+        holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, bridgeBursts, breathMinPeak, breathPersistS,
         breathRateTol, breathWindow, breathHighpass, rpmLo, rpmHi, keepFraction, nTheta, fftSize,
         savgolSeconds, savgolOrder, motionFracHi, positiveOnly, maxGapFraction,
         motionFloor, marginS, mimo, sourceMac, interpolate,
@@ -165,7 +166,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [
-    path, range, holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, breathMinPeak,
+    path, range, holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, bridgeBursts, breathMinPeak,
     breathPersistS, breathRateTol, breathWindow, breathHighpass, rpmLo, rpmHi, keepFraction, nTheta,
     fftSize, savgolSeconds, savgolOrder, motionFracHi, positiveOnly, maxGapFraction,
     motionFloor, marginS, mimo, sourceMac, interpolate,
@@ -263,6 +264,15 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
             onClick={() => setLeadHold((v) => !v)}
           >
             lead hold {leadHold ? "on" : "off"}
+          </Button>
+          <Button
+            variant={bridgeBursts === "off" ? "outline" : "default"}
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            title="Fill the whole stretch between two motion bursts as present when breathing lies between them. run: a breathing run (the persistence rule) must lie between; any: one window with a peak above the breath threshold is enough; off: only the holds bridge."
+            onClick={() => setBridgeBursts((v) => (v === "off" ? "run" : v === "run" ? "any" : "off"))}
+          >
+            bridge bursts: {bridgeBursts}
           </Button>
           <NumberField id="hy-peak" label="Breath peak ≥" value={breathMinPeak} onChange={setBreathMinPeak} min={-1} max={1} step={0.05}
             title="Normalised FarSense peak a window needs to count as breathing (an empty room sits near 0 ± 0.1, an occupant 0.2–0.6)" />

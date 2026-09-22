@@ -1286,6 +1286,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
     max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
     motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet |dr|/|r| level in place of the range's own 20th percentile"),
     lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it; a gap whose holds meet is present throughout"),
+    bridge_bursts: str = Query("off", description="'run': the whole stretch between two bursts is present when a breathing run lies between them; 'any': when any single window's peak clears breath_min_peak there; 'off': neither"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
     source_mac: str | None = Query(None, description="Source MAC filter"),
@@ -1304,6 +1305,8 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if rpm_lo >= rpm_hi:
         raise HTTPException(status_code=400, detail="rpm_lo must be below rpm_hi")
+    if bridge_bursts not in ("off", "run", "any"):
+        raise HTTPException(status_code=400, detail="bridge_bursts must be 'off', 'run' or 'any'")
 
     try:
         result = hybrid.compute_hybrid(
@@ -1335,6 +1338,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
             positive_only=positive_only,
             motion_floor=motion_floor,
             lead_hold=lead_hold,
+            bridge_bursts=bridge_bursts,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1013,6 +1013,7 @@ export interface HybridParams {
   positive_only: boolean;
   motion_floor: number | null;
   lead_hold: boolean;
+  bridge_bursts: "off" | "run" | "any";
 }
 
 export interface HybridConfusion extends Confusion {
@@ -1086,6 +1087,9 @@ export interface HybridOptions {
   /** Breathing also holds presence `holdS` before it, and a gap whose
    *  holds meet is present throughout. On by default. */
   leadHold?: boolean;
+  /** Fill the whole stretch between two bursts when breathing lies between
+   *  them: 'run' needs a breathing run, 'any' a single qualifying window. */
+  bridgeBursts?: "off" | "run" | "any";
   marginS?: number;
   mimo?: string | null;
   sourceMac?: string | null;
@@ -1125,6 +1129,7 @@ export async function fetchHybrid(
     maxGapFraction = 0.5,
     motionFloor,
     leadHold = true,
+    bridgeBursts = "off",
     marginS = 5,
     mimo,
     sourceMac,
@@ -1145,7 +1150,7 @@ export async function fetchHybrid(
     (motionFracHi != null ? `&motion_frac_hi=${motionFracHi}` : "") +
     `&positive_only=${positiveOnly}&max_gap_fraction=${maxGapFraction}` +
     (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
-    `&lead_hold=${leadHold}` +
+    `&lead_hold=${leadHold}&bridge_bursts=${bridgeBursts}` +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
 
