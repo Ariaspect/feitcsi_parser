@@ -100,6 +100,10 @@ endpoint on lg. The ±2 h rows were measured before that floor was removed:
 | hybrid, own floor, lead hold on | 0 | 70.8 % | 89.0 % | 61.4 % | 75.2 % |
 | hybrid, own floor, lead hold off | 5 | 74.8 % | 84.9 % | 69.3 % | 77.1 % |
 | hybrid, own floor, lead hold on | 5 | 72.9 % | 89.0 % | 64.0 % | 76.5 % |
+| hybrid, own floor, lead off, **2026-09-22 FarSense set** | 0 | 75.0 % | 68.0 % | 78.6 % | 73.3 % |
+| hybrid, own floor, lead on, 2026-09-22 FarSense set | 0 | 75.9 % | 73.2 % | 77.2 % | 75.2 % |
+| hybrid, own floor, lead off, 2026-09-22 FarSense set | 5 | 76.9 % | 68.0 % | 81.8 % | 74.9 % |
+| **hybrid, own floor, lead on, 2026-09-22 FarSense set (current default)** | 5 | 78.0 % | 73.2 % | 80.6 % | 76.9 % |
 
 By day, hybrid with the ±2 h floor, lead hold on, margin 5 (balanced; lead off in brackets):
 09-09 (1) 93.0 [93.0]; 09-10 (2) 77.1 [80.9]; 09-11 (19) 75.1 [75.9];
@@ -110,6 +114,15 @@ With the range's own floor the threshold is the 0.10 minimum on 26 of the
 at the cost of 75 fn. Pooled totals barely move because the two floors
 coincide on most of the set. The errors are false positives in the empty
 stretches: 2 808 fp against 5 002 tn at margin 5, own floor, lead on.
+
+The 2026-09-22 FarSense set (15 s window, 10–30 rpm, keep 0.6, 200 θ,
+S-G 1.0 s, no high-pass, peak ≥ 0.2) trades recall for specificity: at
+margin 5 with lead on, fp 2 808 → 1 512 and fn 472 → 1 146. By day
+(balanced, lead on, margin 5; previous set in brackets): 09-09 93.0
+[93.0], 09-10 87.4 [76.7], 09-11 78.8 [75.1], 09-14 70.3 [65.1], 09-15
+76.5 [81.0], 09-16 85.1 [96.0]. The captures now missed are still
+sitters: `20260915_152235` recall 29.5, `20260915_211721` 27.2,
+`20260911_141638` 26.2.
 
 ## 2. What the corpus taught, in the order it was found
 
