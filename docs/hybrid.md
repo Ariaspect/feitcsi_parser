@@ -361,6 +361,29 @@ a fraction ≤ 0.2–0.3 reaches them; at 0.2 the empty room fires too
 lose 23 points of specificity. From 0.4 up the rule is nearly inert.
 Default left at 0 (off).
 
+#### Clamping the own floor (2026-09-22)
+
+The rule is already `max(2 × floor, 0.10)`, so a floor under 0.05 gives 0.10.
+Variants on all 105 captures, `any` + lead on: **A** — floor < 0.10 →
+threshold 0.10 (touches only floors in 0.05–0.10); **C** — floor > 0.10 →
+floor capped at 0.10 (threshold 0.20); **A+C**; fixed 0.10.
+
+| metric | own | A | C | A+C | fixed |
+|---|---|---|---|---|---|
+| empty (22) specificity | 95.0 | 92.3 | 86.9 | 84.2 | 79.5 |
+| control accuracy / F1 | 84.5 / 84.3 | 83.3 / 83.3 | 82.0 / 82.3 | 80.9 / 81.4 | 80.9 / 81.4 |
+| fully occupied (16) recall | 44.5 | 44.5 | 85.7 | 85.7 | 99.0 |
+| seated fidgeting (13) recall | 16.8 | 16.8 | 81.2 | 81.2 | 99.5 |
+| other (22) accuracy | 66.8 | 56.1 | 74.8 | 64.1 | 55.6 |
+| empty + control accuracy | 88.0 | 86.3 | 83.7 | 82.0 | 80.4 |
+| all 105 accuracy / F1 | 76.9 / 71.6 | 73.7 / 68.9 | 82.2 / 80.8 | 79.0 / 78.1 | 78.4 / 78.6 |
+
+Own floors by kind (min / median / max): empty 0.015 / 0.017 / 0.170 (3
+of 22 above 0.10); control 0.011 / 0.028 / 0.172 (2 of 45); fully
+occupied 0.038 / 0.145 / 0.165 (15 of 16); other 0.019 / 0.093 / 0.156
+(9 of 22). A floor above 0.10 is therefore an occupant in 24 captures and
+a noisy empty link in 5. Default unchanged.
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
