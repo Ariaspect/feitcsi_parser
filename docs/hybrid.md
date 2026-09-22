@@ -285,6 +285,35 @@ bursts bracket empty seconds) plus 33 s in two empty captures. With
 bridging on, the leading hold only adds false positives: lead off + run
 88.7 %, lead off + any 88.9 %. Default left at `off`.
 
+#### Three classification accuracies and the dataset status (2026-09-22)
+
+All 105 labelled captures on lg (three anomalous excluded), current
+defaults, lead on, margin 5. Motion / static seconds come from the camera
+boxes: a second is *motion* when the highest-confidence box moved ≥ 20 px
+or changed area by > 30 % since the previous frame, *static* otherwise.
+
+| classification | seconds | bridge off | bridge run |
+|---|---|---|---|
+| empty room (specificity) — all empty seconds | 18 275 | 84.6 % | 84.6 % |
+| — in empty captures | 6 582 | 95.5 % | 95.5 % |
+| — in control captures | 7 570 | 78.9 % | 78.9 % |
+| — in other captures | 4 123 | 77.9 % | 77.9 % |
+| motion (recall) | 964 | 91.9 % | 91.9 % |
+| static presence (recall) | 10 957 | 60.0 % | 64.0 % |
+
+| dataset | captures | occupied s | empty s | accuracy | F1 | recall | specificity | run: accuracy | run: F1 |
+|---|---|---|---|---|---|---|---|---|---|
+| empty | 22 | 0 | 6 582 | 95.5 % | — | — | 95.5 % | 95.5 % | — |
+| control | 45 | 5 420 | 7 570 | 80.8 % | 78.4 % | 83.4 % | 78.9 % | 83.9 % | 82.5 % |
+| fully occupied | 16 | 4 817 | 0 | 40.8 % | 57.9 % | 40.8 % | — | 41.4 % | 58.6 % |
+| other (near-empty, multi-visit) | 22 | 1 922 | 4 123 | 71.8 % | 56.9 % | 58.6 % | 77.9 % | 71.8 % | 56.9 % |
+| all | 105 | 12 159 | 18 275 | 75.8 % | 67.4 % | 62.6 % | 84.6 % | 77.3 % | 69.9 % |
+
+By day (accuracy / F1, bridge off): 09-03 72.8 / 84.3; 09-04 69.3 / 73.6;
+09-09 94.0 / 95.0; 09-10 78.0 / 26.3; 09-11 82.3 / 79.0; 09-14 73.5 /
+61.5; 09-15 76.1 / 61.8; 09-16 58.8 / 64.5; 09-17 66.6 / 65.6; 09-21 78.0 /
+57.9; 09-22 87.0 / 78.0.
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
