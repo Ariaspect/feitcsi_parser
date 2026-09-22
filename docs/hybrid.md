@@ -124,6 +124,34 @@ margin 5 with lead on, fp 2 808 → 1 512 and fn 472 → 1 146. By day
 sitters: `20260915_152235` recall 29.5, `20260915_211721` 27.2,
 `20260911_141638` 26.2.
 
+### 2026-09-22 evaluation set: KPI #1 minus anomalies, plus 09-17 and 09-21
+
+Three captures the user marked anomalous are excluded: `20260911_135229`,
+`20260911_154719`, `20260917_134843`. Every labelled capture from 09-17 and
+09-21 is added (lg holds none for 09-18 … 09-20). Current defaults
+(2026-09-22 FarSense set, own floor, hold 20), margin 5, lead on / off:
+
+| group | n | occupied | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|---|
+| KPI set minus anomalies | 40 | 35 % | on | 79.5 % | 73.3 % | 82.8 % | **78.1 %** |
+| | | | off | 78.2 % | 67.8 % | 83.8 % | 75.8 % |
+| 09-17 | 6 | 63 % | on | 69.9 % | 55.6 % | 94.6 % | 75.1 % |
+| | | | off | 67.7 % | 51.6 % | 95.3 % | 73.5 % |
+| 09-21 | 32 | 32 % | on | 76.3 % | 42.3 % | 92.3 % | 67.3 % |
+| | | | off | 75.1 % | 37.6 % | 92.7 % | 65.1 % |
+| all | 78 | 36 % | on | 77.4 % | 59.4 % | 87.6 % | 73.5 % |
+| | | | off | 76.1 % | 54.4 % | 88.2 % | 71.3 % |
+
+By day, balanced, lead on [off]: 09-09 93.0 [93.0], 09-10 87.4 [89.3],
+09-11 82.0 [78.8], 09-14 70.3 [69.9], 09-15 76.5 [73.5], 09-16 85.1
+[88.7], 09-17 75.1 [73.5], 09-21 67.3 [65.1].
+
+On 09-21 the three evening captures occupied throughout
+(`20260921_201725`, `_202301`, `_203359`) score recall 0: their own floor
+is 0.15 (the occupant), so the motion threshold is 0.30 and never trips,
+and the breathing channel under the new set finds no run. Under the
+previous set with the pooled floor the same day scored 91.4 % (§1).
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
