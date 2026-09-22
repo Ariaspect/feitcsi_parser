@@ -314,6 +314,30 @@ By day (accuracy / F1, bridge off): 09-03 72.8 / 84.3; 09-04 69.3 / 73.6;
 61.5; 09-15 76.1 / 61.8; 09-16 58.8 / 64.5; 09-17 66.6 / 65.6; 09-21 78.0 /
 57.9; 09-22 87.0 / 78.0.
 
+#### Per-situation accuracy with `any` + lead on (default since 2026-09-22)
+
+Sets from the user's capture log (CSV). "Whole" scores the capture's occupied
+seconds against its own empty stretches; "occupied only" scores the occupied
+part alone (accuracy = recall, precision fixed at 100). Bridging `off` in
+brackets.
+
+| situation | captures | whole: accuracy / F1 | occupied only: recall / F1 |
+|---|---|---|---|
+| empty room (empty as the positive label) | 22 | 95.0 / 97.4 [95.5 / 97.7] | — |
+| motion · walking around | 3 | 83.1 / 82.8 [88.6 / 87.7] | 100.0 / 100.0 [100.0 / 100.0] |
+| motion · seated, fidgeting | 13 | 16.7 / 28.7 [16.7 / 28.7] | 16.8 / 28.8 [16.8 / 28.8] |
+| motion · phone | 28 | 84.3 / 84.1 [80.3 / 77.4] | 100.0 / 100.0 [81.6 / 89.9] |
+| static presence (sitting still, no phone; box-still seconds) | 14 | 84.8 / 88.7 [76.8 / 81.5] | 95.3 / 97.6 [81.8 / 90.0] |
+
+By group, `any`: empty specificity 95.0 %, control accuracy 84.5 % / F1
+84.3 % (recall 99.9, specificity 73.4), fully occupied recall 44.5 %,
+other 66.8 % / 56.3 %. Empty + control total accuracy 88.0 %.
+
+The 13 fidgeting captures do not move: they have 0–4 s of bursts, so there
+is no pair of bursts to bridge, and 0–47 s of breathing runs even though
+26–75 of their 300 windows individually clear peak ≥ 0.2 — the rate does
+not hold for 10 s. The three still sitters have 107–289 s of runs.
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
