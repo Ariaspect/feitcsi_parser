@@ -221,6 +221,27 @@ specificity rises. At 0.80 eleven of the 22 empty captures start firing
 (the 09-21 night captures included, 50–156 s each); at 0.60–0.70 the same
 three or four low-floor captures carry all the empty false positives.
 
+### Final KPI #1 (2026-09-22, keep 0.65)
+
+Current defaults — 10 s window, 10 s run, 10–30 rpm, keep 0.65, 200 θ,
+S-G 1.0 s, no high-pass, peak ≥ 0.2, own floor, hold 20 — margin 5:
+
+| group | n | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|
+| **KPI set minus anomalies** | 40 | **on** | **76.8 %** | 73.2 % | 78.8 % | **76.0 %** |
+| | | off | 76.7 % | 68.5 % | 81.2 % | 74.8 % |
+| 09-17 | 6 | on | 66.6 % | 50.4 % | 94.5 % | 72.4 % |
+| | | off | 65.3 % | 47.9 % | 95.3 % | 71.6 % |
+| 09-21 | 32 | on | 78.0 % | 47.4 % | 92.4 % | 69.9 % |
+| | | off | 76.1 % | 40.7 % | 92.8 % | 66.8 % |
+| all | 78 | on | 76.5 % | 60.5 % | 85.5 % | 73.0 % |
+| | | off | 75.6 % | 55.4 % | 86.9 % | 71.2 % |
+
+Against keep 0.60 (same set, lead on): KPI set 76.8 / 76.0 vs 77.0 / 75.9
+(accuracy / balanced), 09-21 78.0 / 69.9 vs 76.3 / 67.2, all 76.5 / 73.0
+vs 75.9 / 72.0. By day, balanced, lead on: 09-09 93.0, 09-10 88.5, 09-11
+82.0, 09-14 69.3, 09-15 69.6, 09-16 76.0, 09-17 72.4, 09-21 69.9.
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
