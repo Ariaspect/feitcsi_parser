@@ -338,6 +338,29 @@ is no pair of bursts to bridge, and 0–47 s of breathing runs even though
 26–75 of their 300 windows individually clear peak ≥ 0.2 — the rate does
 not hold for 10 s. The three still sitters have 107–289 s of runs.
 
+#### Sparse breathing (`sparse_fraction`, 2026-09-22)
+
+A second is breathing evidence when at least this fraction of the FarSense
+windows within ±30 s clear peak ≥ 0.2, rate not required. All 105
+captures, on top of `any` + lead on:
+
+| fraction | off | 0.2 | 0.3 | 0.4 | 0.5 | 0.6 |
+|---|---|---|---|---|---|---|
+| empty (22) specificity | 95.0 | 88.3 | 95.0 | 95.0 | 95.0 | 95.0 |
+| control accuracy / F1 | 84.5 / 84.3 | 70.8 / 74.1 | 80.3 / 80.9 | 84.0 / 83.9 | 84.5 / 84.3 | 84.5 / 84.3 |
+| control specificity | 73.4 | 50.0 | 66.2 | 72.7 | 73.4 | 73.4 |
+| fully occupied (16) recall | 44.5 | 78.5 | 52.5 | 45.4 | 45.1 | 44.6 |
+| seated fidgeting (13) recall | 16.8 | 69.1 | 32.6 | 19.3 | 17.5 | 16.8 |
+| still sitters (14) recall | 95.5 | 98.9 | 98.0 | 97.7 | 97.3 | 95.7 |
+| empty + control accuracy | 88.0 | 76.7 | 85.2 | 87.7 | 88.0 | 88.0 |
+| all 105 accuracy / F1 | 76.9 / 71.6 | 73.9 / 73.4 | 76.7 / 72.8 | 77.1 / 72.1 | 77.1 / 71.9 | 76.9 / 71.6 |
+
+The fidgeting sitters clear the peak in 9–25 % of their windows, so only
+a fraction ≤ 0.2–0.3 reaches them; at 0.2 the empty room fires too
+(six empty captures gain 44–194 s each) and the control empty stretches
+lose 23 points of specificity. From 0.4 up the rule is nearly inert.
+Default left at 0 (off).
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
