@@ -5,6 +5,11 @@ kinds of evidence and a hold, with no empty-room reference of any kind.
 
 ## Rule
 
+![pipeline](figures/hybrid_pipeline.png)
+
+*Figure: the pipeline from CSI frames to the scored verdict (own-floor
+default, 2026-09-22). Regenerate with `python docs/figures/hybrid_pipeline_fig.py`.*
+
 A human in a room cannot be quiet in both senses at once: over any half
 minute they either move — irregularly — or sit still, and a still human
 breathes. A pushed chair does neither once it is down.
