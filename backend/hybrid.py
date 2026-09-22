@@ -230,8 +230,21 @@ def evidence_series(
     breath_window_seconds: float = BREATH_WINDOW_SECONDS,
     breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
     max_gap_fraction: float = MAX_GAP_FRACTION,
+    band_rpm: tuple[float, float] = farsense.RATE_BAND_RPM,
+    n_theta: int = farsense.N_THETA,
+    fft_size: int = farsense.FFT_SIZE,
+    keep_fraction: float = farsense.BNR_KEEP_FRACTION,
+    savgol_seconds: float = farsense.SAVGOL_SECONDS,
+    savgol_order: int = farsense.SAVGOL_ORDER,
+    motion_frac_hi: float | None = None,
+    positive_only: bool = True,
 ) -> dict[str, Any]:
     """Per-second motion levels and per-window breathing peaks, on one clock.
+
+    The FarSense knobs (``band_rpm`` … ``positive_only``) are passed straight
+    to ``farsense.prepare``/``window_step``. ``motion_frac_hi`` is the paper's
+    stationary gate; ``None`` (the default) leaves it off so every window
+    reports a peak and the hybrid's own burst rule decides what motion means.
 
     ``grid`` is ``(n_samples, n_sc)`` at ``fs`` Hz from ``tiles._presence_grid``;
     times are relative to its first sample. ``amp_diff``/``amp_times`` are the
@@ -282,16 +295,19 @@ def evidence_series(
         prep = farsense.prepare(
             grid, fs, fabricated=fab,
             window_seconds=breath_window_seconds, hop_seconds=1.0,
+            band_rpm=(float(band_rpm[0]), float(band_rpm[1])),
+            savgol_seconds=savgol_seconds, savgol_order=savgol_order,
             highpass_hz=breath_highpass_hz,
         )
-        # The paper's absolute stationary gate is replaced by this module's
-        # relative burst; every window gets its peak and rate.
+        # With the stationary gate off, every window gets its peak and rate
+        # and this module's relative burst decides what motion means.
         # ``positive_only``: a negative "first peak" is a wiggle on the slope
         # out of the trough, not a period -- see ``farsense.first_peak``.
         step = dict(
-            n_theta=farsense.N_THETA, fft_size=farsense.FFT_SIZE,
-            keep_fraction=farsense.BNR_KEEP_FRACTION, motion_frac_hi=1e9,
-            max_gap_fraction=max_gap_fraction, min_peak=-1.0, positive_only=True,
+            n_theta=int(n_theta), fft_size=int(fft_size),
+            keep_fraction=float(keep_fraction),
+            motion_frac_hi=1e9 if motion_frac_hi is None else float(motion_frac_hi),
+            max_gap_fraction=max_gap_fraction, min_peak=-1.0, positive_only=bool(positive_only),
         )
         fz = farsense._run(prep, step, None)
         cell = np.floor(fz["time_s"]).astype(int)
@@ -316,6 +332,15 @@ def evidence_series(
             "breath_window_seconds": float(breath_window_seconds),
             "breath_highpass_hz": float(breath_highpass_hz),
             "max_gap_fraction": float(max_gap_fraction),
+            "rpm_lo": float(band_rpm[0]),
+            "rpm_hi": float(band_rpm[1]),
+            "n_theta": int(n_theta),
+            "fft_size": int(fft_size),
+            "keep_fraction": float(keep_fraction),
+            "savgol_seconds": float(savgol_seconds),
+            "savgol_order": int(savgol_order),
+            "motion_frac_hi": None if motion_frac_hi is None else float(motion_frac_hi),
+            "positive_only": bool(positive_only),
         },
     }
 
@@ -440,6 +465,20 @@ def verdict(
     return out
 
 
+EVIDENCE_PARAMS = (
+    "breath_window_seconds", "breath_highpass_hz", "max_gap_fraction",
+    "band_rpm", "n_theta", "fft_size", "keep_fraction",
+    "savgol_seconds", "savgol_order", "motion_frac_hi", "positive_only",
+)
+
+
+def split_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate ``evidence_series`` keywords from ``verdict`` keywords."""
+    evidence = {k: v for k, v in params.items() if k in EVIDENCE_PARAMS}
+    decision = {k: v for k, v in params.items() if k not in EVIDENCE_PARAMS}
+    return evidence, decision
+
+
 def hybrid_seconds(
     grid: np.ndarray,
     fs: float,
@@ -447,17 +486,11 @@ def hybrid_seconds(
     fabricated: np.ndarray | None = None,
     amp_diff: np.ndarray | None = None,
     amp_times: np.ndarray | None = None,
-    breath_window_seconds: float = BREATH_WINDOW_SECONDS,
-    breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
-    max_gap_fraction: float = MAX_GAP_FRACTION,
-    **decision: Any,
+    **params: Any,
 ) -> dict[str, Any]:
     """Both stages over a uniform complex ratio grid, one verdict per second."""
-    ev = evidence_series(
-        grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times,
-        breath_window_seconds=breath_window_seconds, breath_highpass_hz=breath_highpass_hz,
-        max_gap_fraction=max_gap_fraction,
-    )
+    evidence, decision = split_params(params)
+    ev = evidence_series(grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times, **evidence)
     return verdict(ev, **decision)
 
 
@@ -507,21 +540,25 @@ def capture_evidence(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    breath_window_seconds: float = BREATH_WINDOW_SECONDS,
-    breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
-    max_gap_fraction: float = MAX_GAP_FRACTION,
+    **evidence: Any,
 ) -> dict[str, Any]:
-    """Decode a capture range and build its evidence series, cached; times on the capture's clock."""
+    """Decode a capture range and build its evidence series, cached; times on the capture's clock.
+
+    ``evidence`` are ``evidence_series`` keywords (see ``EVIDENCE_PARAMS``).
+    """
     from pathlib import Path
 
     from backend.tiles import _presence_grid, get_index
 
+    unknown = set(evidence) - set(EVIDENCE_PARAMS)
+    if unknown:
+        raise TypeError(f"not evidence parameters: {sorted(unknown)}")
     path = Path(path)
     st = path.stat()
     key = (
         str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
         mimo, source_mac, bool(interpolate),
-        float(breath_window_seconds), float(breath_highpass_hz), float(max_gap_fraction),
+        tuple(sorted((k, tuple(v) if isinstance(v, (tuple, list)) else v) for k, v in evidence.items())),
     )
     with _cache_lock:
         hit = _cache.get(key)
@@ -540,9 +577,7 @@ def capture_evidence(
     amp_times = (times_all[ids][1:] - origin) if amp_diff is not None else None
 
     ev = evidence_series(
-        grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times,
-        breath_window_seconds=breath_window_seconds, breath_highpass_hz=breath_highpass_hz,
-        max_gap_fraction=max_gap_fraction,
+        grid, fs, fabricated=fabricated, amp_diff=amp_diff, amp_times=amp_times, **evidence,
     )
     ev["time_s"] = origin + ev["time_s"]
     ev["frames_used"] = int(times.size)
@@ -565,17 +600,14 @@ def compute_hybrid(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    breath_window_seconds: float = BREATH_WINDOW_SECONDS,
-    breath_highpass_hz: float = BREATH_HIGHPASS_HZ,
-    max_gap_fraction: float = MAX_GAP_FRACTION,
-    **decision: Any,
+    **params: Any,
 ) -> dict[str, Any]:
-    """Decode a capture range and run the detector; times on the capture's clock."""
-    ev = capture_evidence(
-        path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
-        breath_window_seconds=breath_window_seconds, breath_highpass_hz=breath_highpass_hz,
-        max_gap_fraction=max_gap_fraction,
-    )
+    """Decode a capture range and run the detector; times on the capture's clock.
+
+    ``params`` are ``evidence_series`` keywords and ``verdict`` keywords mixed.
+    """
+    evidence, decision = split_params(params)
+    ev = capture_evidence(path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate, **evidence)
     # ``verdict`` works on times relative to the first second; the cached
     # series is on the capture's clock, so shift in and back out.
     origin = float(ev["time_s"][0]) - 0.5

@@ -188,6 +188,21 @@ def test_holds_that_do_not_meet_leave_the_gap_empty() -> None:
     assert "bridged" not in out["state"]
 
 
+def test_the_farsense_knobs_reach_the_breathing_channel() -> None:
+    """A band that excludes 15 rpm finds no breathing; the same room with the
+    default band does, and the parameters travel out with the result."""
+    sig = _room(200.0, chest=(0.0, 200.0))
+    default = hybrid.hybrid_seconds(sig, FS)
+    assert default["breathing"].any()
+    outside = hybrid.hybrid_seconds(sig, FS, band_rpm=(25.0, 40.0), n_theta=20, savgol_seconds=0.0)
+    assert not outside["breathing"].any()
+    assert outside["params"]["rpm_lo"] == 25.0 and outside["params"]["n_theta"] == 20
+    assert outside["params"]["motion_frac_hi"] is None and outside["params"]["positive_only"] is True
+    gated = hybrid.hybrid_seconds(_room(200.0, chest=(0.0, 200.0), walk=(80.0, 90.0)), FS, motion_frac_hi=0.25)
+    assert gated["params"]["motion_frac_hi"] == 0.25
+    assert not gated["breathing"][_between(gated, 80.0, 90.0)].any()
+
+
 def test_the_verdict_does_not_depend_on_the_links_noise_scale() -> None:
     """Calibration-free means the same verdicts at five times the noise: the
     floor moves with the link and the threshold with it."""
@@ -267,6 +282,21 @@ def test_endpoint_scores_the_visit_against_the_camera(tmp_path: Path) -> None:
     assert c["excluded"] > 0
     assert body["truth"]["present"][100] is True and body["truth"]["present"][10] is False
     assert "NaN" not in r.text
+
+
+def test_endpoint_takes_the_farsense_knobs_and_rejects_an_empty_band(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path)
+    client = TestClient(app)
+    bad = client.get("/api/hybrid", params={"path": str(p), "t0": 0.0, "t1": 200.0, "rpm_lo": 30, "rpm_hi": 20})
+    assert bad.status_code == 400
+    ok = client.get("/api/hybrid", params={
+        "path": str(p), "t0": 0.0, "t1": 200.0, "rpm_lo": 8, "rpm_hi": 40, "n_theta": 24,
+        "keep_fraction": 0.5, "savgol_seconds": 0.3, "motion_frac_hi": 0.4, "positive_only": False,
+    })
+    assert ok.status_code == 200, ok.text
+    prm = ok.json()["params"]
+    assert prm["rpm_lo"] == 8 and prm["rpm_hi"] == 40 and prm["n_theta"] == 24
+    assert prm["keep_fraction"] == 0.5 and prm["motion_frac_hi"] == 0.4 and prm["positive_only"] is False
 
 
 def test_endpoint_without_a_sidecar_returns_no_confusion(tmp_path: Path) -> None:

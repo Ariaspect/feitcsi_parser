@@ -1001,6 +1001,16 @@ export interface HybridParams {
   breath_window_seconds: number;
   breath_highpass_hz: number;
   max_gap_fraction: number;
+  rpm_lo: number;
+  rpm_hi: number;
+  n_theta: number;
+  fft_size: number;
+  keep_fraction: number;
+  savgol_seconds: number;
+  savgol_order: number;
+  /** FarSense stationary gate; null when off. */
+  motion_frac_hi: number | null;
+  positive_only: boolean;
   motion_floor: number | null;
   lead_hold: boolean;
 }
@@ -1058,6 +1068,18 @@ export interface HybridOptions {
   breathRateTol?: number;
   breathWindow?: number;
   breathHighpass?: number;
+  /** FarSense search knobs, same meaning as on the FarSense tab. */
+  rpmLo?: number;
+  rpmHi?: number;
+  nTheta?: number;
+  fftSize?: number;
+  keepFraction?: number;
+  savgolSeconds?: number;
+  savgolOrder?: number;
+  /** The paper's stationary gate; null or undefined leaves it off. */
+  motionFracHi?: number | null;
+  positiveOnly?: boolean;
+  maxGapFraction?: number;
   /** An explicit quiet |Δr|/|r| level in place of the range's own 20th
    *  percentile. Omit for the range's own. */
   motionFloor?: number | null;
@@ -1091,6 +1113,16 @@ export async function fetchHybrid(
     breathRateTol = 3,
     breathWindow = 30,
     breathHighpass = 0.1,
+    rpmLo = 10,
+    rpmHi = 37,
+    nTheta = 100,
+    fftSize = 8192,
+    keepFraction = 0.7,
+    savgolSeconds = 0.5,
+    savgolOrder = 3,
+    motionFracHi,
+    positiveOnly = true,
+    maxGapFraction = 0.5,
     motionFloor,
     leadHold = true,
     marginS = 5,
@@ -1108,6 +1140,10 @@ export async function fetchHybrid(
     `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
     `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
     `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
+    `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&n_theta=${nTheta}&fft_size=${fftSize}` +
+    `&keep_fraction=${keepFraction}&savgol_seconds=${savgolSeconds}&savgol_order=${savgolOrder}` +
+    (motionFracHi != null ? `&motion_frac_hi=${motionFracHi}` : "") +
+    `&positive_only=${positiveOnly}&max_gap_fraction=${maxGapFraction}` +
     (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
     `&lead_hold=${leadHold}` +
     filterParams(mimo, sourceMac) +

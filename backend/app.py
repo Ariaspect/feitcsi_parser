@@ -1274,6 +1274,16 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
     breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=60, description="How far the rates in that run may differ, rpm"),
     breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
     breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
+    rpm_lo: float = Query(farsense.RATE_BAND_RPM[0], gt=0, le=120, description="Slowest breathing rate the FarSense search considers"),
+    rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate the FarSense search considers"),
+    n_theta: int = Query(farsense.N_THETA, ge=2, le=720, description="FarSense projection angles swept"),
+    fft_size: int = Query(farsense.FFT_SIZE, ge=64, le=65536, description="FarSense BNR spectrum size"),
+    keep_fraction: float = Query(farsense.BNR_KEEP_FRACTION, ge=0, le=1, description="Subcarriers with BNR below this fraction of the best are excluded"),
+    savgol_seconds: float = Query(farsense.SAVGOL_SECONDS, ge=0, le=5, description="Savitzky-Golay window in seconds; 0 disables it"),
+    savgol_order: int = Query(farsense.SAVGOL_ORDER, ge=1, le=7, description="Savitzky-Golay polynomial order"),
+    motion_frac_hi: float | None = Query(None, gt=0, le=5, description="FarSense stationary gate: windows whose median fractional change is above this report no peak. Omitted: off (the hybrid's burst rule decides)"),
+    positive_only: bool = Query(True, description="Take the first POSITIVE local maximum of the autocorrelation as the breath; off reproduces the paper's literal first peak"),
+    max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
     motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet |dr|/|r| level in place of the range's own 20th percentile"),
     lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it; a gap whose holds meet is present throughout"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
@@ -1292,6 +1302,9 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         mimo_filter = parse_mimo_filter(mimo)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rpm_lo >= rpm_hi:
+        raise HTTPException(status_code=400, detail="rpm_lo must be below rpm_hi")
+
     try:
         result = hybrid.compute_hybrid(
             p, t0, t1,
@@ -1311,6 +1324,15 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
             breath_rate_tol=breath_rate_tol,
             breath_window_seconds=breath_window,
             breath_highpass_hz=breath_highpass,
+            max_gap_fraction=max_gap_fraction,
+            band_rpm=(rpm_lo, rpm_hi),
+            n_theta=n_theta,
+            fft_size=fft_size,
+            keep_fraction=keep_fraction,
+            savgol_seconds=savgol_seconds,
+            savgol_order=savgol_order,
+            motion_frac_hi=motion_frac_hi,
+            positive_only=positive_only,
             motion_floor=motion_floor,
             lead_hold=lead_hold,
         )
