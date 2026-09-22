@@ -241,6 +241,27 @@ has the best control balanced accuracy, so it stays.
 Pooled over all 66 at keep 0.65, lead on: recall 83.0 %, specificity
 86.7 %, balanced 84.9 %.
 
+#### Band floor check (rpm_lo 10 / 12 / 14, keep 0.65, window 10 s)
+
+A 10 s window holds under two periods at 10 rpm, so the band's bottom was
+suspected of feeding empty-room false positives. Same 66 captures:
+
+| rpm_lo | lead | total accuracy | empty specificity | empty fp s | control accuracy | control recall | control specificity | control balanced | all-66 balanced |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 | on | 85.7 % | 95.5 % | 299 | 80.6 % | 83.0 % | 78.9 % | 81.0 % | 84.9 % |
+| 12 | on | 85.3 % | 94.7 % | 349 | 80.4 % | 85.0 % | 77.0 % | 81.0 % | 85.2 % |
+| 14 | on | 85.7 % | 93.1 % | 452 | 81.8 % | 89.8 % | 76.1 % | 83.0 % | 87.0 % |
+| 10 | off | 84.8 % | 95.8 % | 279 | 79.2 % | 76.6 % | 81.0 % | 78.8 % | 82.3 % |
+| 14 | off | 85.5 % | 94.3 % | 372 | 81.0 % | 83.8 % | 78.9 % | 81.4 % | 85.0 % |
+
+Total accuracy does not move (85.7 at 10 and 14). Raising the floor adds
+recall (83.0 → 89.8 on control) and *adds* empty false positives (299 →
+452): the three empty captures that fire at 10 rpm fire identically at
+12 and 14 (85 / 73 / 89 s), and `20260916_140316` grows 52 → 102 → 156 s.
+On this set the empty-room false positives are not a band-bottom
+artefact; a narrower band makes the ±3 rpm agreement easier to meet.
+Default left at 10 rpm.
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
