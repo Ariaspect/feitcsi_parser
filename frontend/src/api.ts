@@ -890,7 +890,7 @@ export async function fetchFarSense(
   signal?: AbortSignal,
 ): Promise<FarSense> {
   const {
-    windowSeconds = 15,
+    windowSeconds = 10,
     hopSeconds = 1,
     rpmLo = 10,
     rpmHi = 30,
@@ -1109,9 +1109,9 @@ export async function fetchHybrid(
     ampAbs = 0.5,
     floorPct = 20,
     breathMinPeak = 0.2,
-    breathPersistS = 15,
+    breathPersistS = 10,
     breathRateTol = 3,
-    breathWindow = 15,
+    breathWindow = 10,
     breathHighpass = 0,
     rpmLo = 10,
     rpmHi = 30,

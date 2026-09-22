@@ -12,11 +12,13 @@ breathes. A pushed chair does neither once it is down.
 - **Motion burst**: per-second median |Δr|/|r| of the CSI ratio above a
   threshold for ≥ 2 s. Opens presence, refreshes it.
 - **Breathing**: the FarSense normalised autocorrelation peak (*first
-  positive* local maximum) ≥ 0.2 through 15 s of consecutive windows, 80 %
+  positive* local maximum) ≥ 0.2 through 10 s of consecutive windows, 80 %
   of which agree on the rate within ±3 rpm of the run's median. Opens
   presence too; keeps it open while the person sits. FarSense settings
-  (set 2026-09-22): 15 s window, 10–30 rpm, keep ≥ 0.6 × best BNR, 200 θ
-  steps, 1.0 s Savitzky-Golay, no high-pass, stationary gate off. Every
+  (set 2026-09-22): 10 s window, 10–30 rpm, keep ≥ 0.6 × best BNR, 200 θ
+  steps, 1.0 s Savitzky-Golay, no high-pass, stationary gate off. (The
+  window and the run were 15 s for part of that day; rows below say
+  which.) Every
   one of them is a knob on the tab. The numbers in §1 were measured with
   the earlier set (30 s window, 10–37 rpm, 0.7, 100 θ, 0.5 s S-G, 0.1 Hz
   high-pass, peak ≥ 0.15) unless a row says otherwise.

@@ -72,11 +72,11 @@ AMP_ABS = 0.5              # dB
 FLOOR_PERCENTILE = 20.0
 BREATH_MIN_PEAK = 0.2      # was 0.15; set 2026-09-22
 # Half a 30 s window at the 1 s hop: the run's ends see mostly different data.
-BREATH_PERSIST_SECONDS = 15.0
+BREATH_PERSIST_SECONDS = 10.0  # was 15; set 2026-09-22
 BREATH_RATE_TOL = 3.0      # rpm, from the run's median
 # A run may carry a few windows that dip below the peak or stray in rate.
 BREATH_MIN_FRACTION = 0.8
-BREATH_WINDOW_SECONDS = 15.0   # was 30; set 2026-09-22
+BREATH_WINDOW_SECONDS = 10.0   # was 30, then 15; set 2026-09-22
 BREATH_HIGHPASS_HZ = 0.0       # was 0.1; set 2026-09-22
 # A second is "unknown" when more than this fraction of its samples were
 # interpolated across a dropout; it carries no evidence and no verdict.

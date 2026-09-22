@@ -99,9 +99,9 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [useAmplitude, setUseAmplitude] = useState(false);
   const [leadHold, setLeadHold] = useState(true);
   const [breathMinPeak, setBreathMinPeak] = useState(0.2);
-  const [breathPersistS, setBreathPersistS] = useState(15);
+  const [breathPersistS, setBreathPersistS] = useState(10);
   const [breathRateTol, setBreathRateTol] = useState(3);
-  const [breathWindow, setBreathWindow] = useState(15);
+  const [breathWindow, setBreathWindow] = useState(10);
   const [breathHighpass, setBreathHighpass] = useState(0);
   const [rpmLo, setRpmLo] = useState(10);
   const [rpmHi, setRpmHi] = useState(30);

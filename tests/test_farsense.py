@@ -163,9 +163,14 @@ def test_the_refined_lag_undoes_the_biased_estimator_lean() -> None:
 # --------------------------------------------------------------------------- #
 
 
+# The paper's own parameters, pinned: the module defaults are the user's set
+# (docs/farsense.md) and a 10 s window holds only two periods at 12 rpm.
+PAPER = dict(window_seconds=12.0, band_rpm=(10.0, 37.0), keep_fraction=0.7, n_theta=100, savgol_seconds=0.5)
+
+
 @pytest.mark.parametrize("rpm", [12.0, 15.0, 25.0, 30.0])
 def test_a_chest_is_recovered_within_the_papers_half_rpm(rpm: float) -> None:
-    out = fz.farsense_windows(_chest(rpm), FS)
+    out = fz.farsense_windows(_chest(rpm), FS, **PAPER)
     est = out["rpm"]
     assert np.isfinite(est).mean() > 0.95
     assert np.mean(np.abs(est[np.isfinite(est)] - rpm) < 0.5) > 0.95

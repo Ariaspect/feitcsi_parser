@@ -64,7 +64,7 @@ from scipy.signal import butter, filtfilt, savgol_filter
 from backend.presence import autocorr_columns, fractional_motion, live_subcarriers
 
 # Sec. 5.2.2: "the window length of projection is set to 12 seconds".
-WINDOW_SECONDS = 15.0        # the paper uses 12; set 2026-09-22
+WINDOW_SECONDS = 10.0        # the paper uses 12; set 2026-09-22 (15 earlier that day)
 # Not stated; the GUI updates continuously. One second matches the other
 # panels' hop so the strips line up.
 HOP_SECONDS = 1.0
