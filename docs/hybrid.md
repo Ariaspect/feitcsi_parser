@@ -262,6 +262,29 @@ On this set the empty-room false positives are not a band-bottom
 artefact; a narrower band makes the ±3 rpm agreement easier to meet.
 Default left at 10 rpm.
 
+#### Bridging between bursts (`bridge_bursts`, 2026-09-22)
+
+The whole stretch between two motion bursts is present when breathing lies
+between them: `run` needs a breathing run (persistence rule), `any` a
+single window with peak ≥ 0.2. Same 66 captures, keep 0.65:
+
+| mode | lead | total accuracy | empty specificity | empty fp s | control accuracy | control recall | control specificity | control balanced | control fp s | control fn s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| off | on | 85.7 % | 95.5 % | 299 | 80.6 % | 83.0 % | 78.9 % | 81.0 % | 1562 | 899 |
+| run | on | 87.8 % | 95.5 % | 299 | 83.8 % | 90.6 % | 78.9 % | 84.8 % | 1562 | 497 |
+| any | on | 88.0 % | 95.0 % | 332 | 84.4 % | 99.9 % | 73.3 % | 86.6 % | 1977 | 4 |
+| off | off | 84.8 % | 95.8 % | 279 | 79.2 % | 76.6 % | 81.0 % | 78.8 % | 1406 | 1239 |
+| run | off | 88.7 % | 95.8 % | 279 | 85.0 % | 90.6 % | 81.0 % | 85.8 % | 1406 | 497 |
+| any | off | 88.9 % | 95.3 % | 312 | 85.6 % | 99.9 % | 75.3 % | 87.6 % | 1826 | 4 |
+
+`run` removes 402 s of misses in eight control captures without adding a
+false-positive second anywhere (the bridged stretches lie inside the
+stay). `any` removes all but 4 s of misses and adds 415 s of false
+positives in the control captures (the person's approach and departure
+bursts bracket empty seconds) plus 33 s in two empty captures. With
+bridging on, the leading hold only adds false positives: lead off + run
+88.7 %, lead off + any 88.9 %. Default left at `off`.
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
