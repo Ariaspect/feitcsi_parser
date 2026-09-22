@@ -91,14 +91,20 @@ endpoint on lg. The ±2 h rows were measured before that floor was removed:
 | hybrid, ±2 h floor, lead hold on | 0 | 70.0 % | 90.6 % | 59.3 % | 75.0 % |
 | hybrid, ±2 h floor, lead hold off | 5 | 73.9 % | 86.3 % | 67.1 % | 76.7 % |
 | hybrid, ±2 h floor, lead hold on | 5 | 72.0 % | 90.6 % | 61.8 % | 76.2 % |
+| **hybrid, own floor (default), lead hold off** | 0 | 72.7 % | 84.9 % | 66.5 % | 75.7 % |
+| hybrid, own floor, lead hold on | 0 | 70.8 % | 89.0 % | 61.4 % | 75.2 % |
+| hybrid, own floor, lead hold off | 5 | 74.8 % | 84.9 % | 69.3 % | 77.1 % |
+| hybrid, own floor, lead hold on | 5 | 72.9 % | 89.0 % | 64.0 % | 76.5 % |
 
 By day, hybrid with the ±2 h floor, lead hold on, margin 5 (balanced; lead off in brackets):
 09-09 (1) 93.0 [93.0]; 09-10 (2) 77.1 [80.9]; 09-11 (19) 75.1 [75.9];
 09-14 (7) 65.1 [68.7]; 09-15 (12) 81.1 [79.4]; 09-16 (1) 96.2 [96.2].
-The ±2 h floor on these captures is 0.019–0.084 (one at 0.136), so on 28
-of the 42 the threshold is the 0.10 absolute minimum and the floor plays
-no part. The errors are false positives in the empty stretches: 2 980 fp
-against 4 830 tn at margin 5, lead on.
+With the range's own floor the threshold is the 0.10 minimum on 26 of the
+42 and 0.105–0.265 on the rest; `20260915_211721` goes from 166 fp / 3 tn
+(pooled floor 0.019) to 22 fp / 147 tn (own floor 0.118, threshold 0.236),
+at the cost of 75 fn. Pooled totals barely move because the two floors
+coincide on most of the set. The errors are false positives in the empty
+stretches: 2 808 fp against 5 002 tn at margin 5, own floor, lead on.
 
 ## 2. What the corpus taught, in the order it was found
 
