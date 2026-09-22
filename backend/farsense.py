@@ -64,26 +64,27 @@ from scipy.signal import butter, filtfilt, savgol_filter
 from backend.presence import autocorr_columns, fractional_motion, live_subcarriers
 
 # Sec. 5.2.2: "the window length of projection is set to 12 seconds".
-WINDOW_SECONDS = 12.0
+WINDOW_SECONDS = 15.0        # the paper uses 12; set 2026-09-22
 # Not stated; the GUI updates continuously. One second matches the other
 # panels' hop so the strips line up.
 HOP_SECONDS = 1.0
 # Sec. 5.2.2: "the human respiration range (10 bpm to 37 bpm)".
-RATE_BAND_RPM = (10.0, 37.0)
+RATE_BAND_RPM = (10.0, 30.0)  # the paper uses (10, 37); set 2026-09-22
 # Sec. 6.3: theta from 0 to 2*pi at a step of pi/50 -- 100 candidates. Half of
 # them are sign flips of the other half and score the same BNR; the sweep is
 # kept whole so the numbers match the paper's, and the first maximum wins.
-N_THETA = 100
+N_THETA = 200                 # the paper uses 100; set 2026-09-22
 # Sec. 5.2.2: "we increase the number of samples to 8192 by means of
 # zero-padding".
 FFT_SIZE = 8192
 # Sec. 6.4.2: "include those sub-carriers whose BNR is larger than 0.7 * eps".
-BNR_KEEP_FRACTION = 0.7
+BNR_KEEP_FRACTION = 0.6       # the paper uses 0.7; set 2026-09-22
 # Sec. 6.2 names the Savitzky-Golay filter and nothing else. Half a second of
 # cubic fit keeps a 0.6 Hz breath (the top of the band) essentially intact
 # while taking out per-packet scatter; at the paper's 100 Hz that is a
 # 51-sample window, a common choice in their group's later code.
-SAVGOL_SECONDS = 0.5
+SAVGOL_SECONDS = 1.0          # was 0.5; set 2026-09-22
+MIN_PEAK = 0.2                # normalised ACF peak below which no rate is reported; the paper has no such gate
 SAVGOL_ORDER = 3
 # The gate's threshold, shared with backend.presence.DEFAULT_MOTION_FRAC_HI so
 # "large motion" means the same thing on both tabs.

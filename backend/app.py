@@ -1157,7 +1157,7 @@ def farsense_detector(   # not `farsense`: that name is the module this calls
     savgol_order: int = Query(farsense.SAVGOL_ORDER, ge=1, le=7, description="Savitzky-Golay polynomial order"),
     highpass_hz: float = Query(0.0, ge=0, le=5, description="Zero-phase high-pass before smoothing, in Hz; 0 reproduces the paper"),
     motion_frac_hi: float = Query(farsense.MOTION_FRAC_HI, gt=0, le=5, description="Median fractional channel change above which a window is non-stationary and reports no rate"),
-    min_peak: float = Query(0.0, ge=-1, le=1, description="Rates whose normalised autocorrelation peak is below this are blanked; 0 reproduces the paper"),
+    min_peak: float = Query(farsense.MIN_PEAK, ge=-1, le=1, description="Rates whose normalised autocorrelation peak is below this are blanked; 0 reproduces the paper"),
     max_gap_fraction: float = Query(farsense.MAX_GAP_FRACTION, gt=0, le=1, description="A window more than this fraction interpolated across dropouts reports nothing"),
     detail_t: float | None = Query(None, description="Return the window nearest this time in full: I/Q trajectory, patterns, autocorrelation"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),

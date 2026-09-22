@@ -205,15 +205,15 @@ export function FarSense({
   interpolate,
   dark,
 }: FarSenseProps) {
-  const [windowSeconds, setWindowSeconds] = useState(12);
+  const [windowSeconds, setWindowSeconds] = useState(15);
   const [rpmLo, setRpmLo] = useState(10);
-  const [rpmHi, setRpmHi] = useState(37);
-  const [keepFraction, setKeepFraction] = useState(0.7);
-  const [nTheta, setNTheta] = useState(100);
-  const [savgolSeconds, setSavgolSeconds] = useState(0.5);
+  const [rpmHi, setRpmHi] = useState(30);
+  const [keepFraction, setKeepFraction] = useState(0.6);
+  const [nTheta, setNTheta] = useState(200);
+  const [savgolSeconds, setSavgolSeconds] = useState(1.0);
   const [highpassHz, setHighpassHz] = useState(0);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
-  const [minPeak, setMinPeak] = useState(0);
+  const [minPeak, setMinPeak] = useState(0.2);
   const [detailT, setDetailT] = useState<number | null>(null);
   const [data, setData] = useState<FarSenseData | null>(null);
   const [labels, setLabels] = useState<Labels | null>(null);
