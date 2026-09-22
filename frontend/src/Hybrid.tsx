@@ -105,7 +105,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [breathHighpass, setBreathHighpass] = useState(0);
   const [rpmLo, setRpmLo] = useState(10);
   const [rpmHi, setRpmHi] = useState(30);
-  const [keepFraction, setKeepFraction] = useState(0.6);
+  const [keepFraction, setKeepFraction] = useState(0.65);
   const [nTheta, setNTheta] = useState(200);
   const [fftSize, setFftSize] = useState(8192);
   const [savgolSeconds, setSavgolSeconds] = useState(1.0);

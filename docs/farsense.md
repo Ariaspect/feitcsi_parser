@@ -11,7 +11,7 @@ does, where we already do the same, where we differ, and what the copy does on
 the September data.
 
 > **Tab defaults since 2026-09-22** differ from the paper: window 10 s
-> (paper 12), band 10–30 rpm (paper 10–37), keep ≥ 0.6 × best (paper 0.7),
+> (paper 12), band 10–30 rpm (paper 10–37), keep ≥ 0.65 × best (paper 0.7),
 > 200 θ steps (paper 100), Savitzky-Golay 1.0 s (was 0.5), high-pass 0,
 > min peak 0.2 (the paper has no peak gate). The paper's values remain in
 > the text below; every default is a knob on the tab and a query parameter.

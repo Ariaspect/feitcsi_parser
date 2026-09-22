@@ -78,7 +78,7 @@ N_THETA = 200                 # the paper uses 100; set 2026-09-22
 # zero-padding".
 FFT_SIZE = 8192
 # Sec. 6.4.2: "include those sub-carriers whose BNR is larger than 0.7 * eps".
-BNR_KEEP_FRACTION = 0.6       # the paper uses 0.7; set 2026-09-22
+BNR_KEEP_FRACTION = 0.65      # the paper uses 0.7; 0.6 then 0.65 on 2026-09-22 (docs/hybrid.md keep sweep)
 # Sec. 6.2 names the Savitzky-Golay filter and nothing else. Half a second of
 # cubic fit keeps a 0.6 Hz breath (the top of the band) essentially intact
 # while taking out per-packet scatter; at the paper's 100 Hz that is a

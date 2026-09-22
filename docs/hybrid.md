@@ -15,7 +15,7 @@ breathes. A pushed chair does neither once it is down.
   positive* local maximum) ≥ 0.2 through 10 s of consecutive windows, 80 %
   of which agree on the rate within ±3 rpm of the run's median. Opens
   presence too; keeps it open while the person sits. FarSense settings
-  (set 2026-09-22): 10 s window, 10–30 rpm, keep ≥ 0.6 × best BNR, 200 θ
+  (set 2026-09-22): 10 s window, 10–30 rpm, keep ≥ 0.65 × best BNR, 200 θ
   steps, 1.0 s Savitzky-Golay, no high-pass, stationary gate off. (The
   window and the run were 15 s for part of that day; rows below say
   which.) Every

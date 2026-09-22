@@ -208,7 +208,7 @@ export function FarSense({
   const [windowSeconds, setWindowSeconds] = useState(10);
   const [rpmLo, setRpmLo] = useState(10);
   const [rpmHi, setRpmHi] = useState(30);
-  const [keepFraction, setKeepFraction] = useState(0.6);
+  const [keepFraction, setKeepFraction] = useState(0.65);
   const [nTheta, setNTheta] = useState(200);
   const [savgolSeconds, setSavgolSeconds] = useState(1.0);
   const [highpassHz, setHighpassHz] = useState(0);
