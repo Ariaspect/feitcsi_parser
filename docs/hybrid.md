@@ -16,6 +16,10 @@ breathes. A pushed chair does neither once it is down.
   consecutive windows, 80 % of which agree on the rate within ±3 rpm of the
   run's median. Opens presence too; keeps it open while the person sits.
 - **Hold**: presence persists 20 s after the last evidence, then drops.
+- **Leading hold** (`lead_hold`, on): breathing evidence also holds
+  presence 20 s *before* it. A gap between two pieces of evidence whose
+  holds meet — a burst's trailing hold reaching a breathing run's leading
+  hold, or two trailing holds — is present throughout (state `bridged`).
 
 The motion threshold is `max(2 × floor, 0.10)`, where *floor* is the link's
 quiet level — the 20th percentile of the per-second motion level over the
@@ -33,6 +37,24 @@ frames within 5 s of a transition not scored).
 | + floor from the whole day | 75.8 % | 74.9 % | 75.3 % |
 | **+ floor from ±2 h (default)** | **75.7 %** | **80.5 %** | **78.1 %** |
 | ±2 h floor, hold 30 | 79.1 % | 76.6 % | 77.8 % |
+| ±2 h floor, hold 20, + leading hold | 80.6 % | 76.7 % | 78.7 % |
+
+Leading hold on/off, hold 20, by floor and link (recall / specificity /
+balanced):
+
+| floor | lead | all 75 | 2026-09-21 (32) | September (43) |
+|---|---|---|---|---|
+| ±2 h | off | 75.7 / 80.5 / 78.1 | 97.5 / 85.2 / 91.4 | 63.9 / 76.0 / 69.9 |
+| ±2 h | on | 80.6 / 76.7 / 78.7 | 99.1 / 82.2 / 90.7 | 70.7 / 71.4 / 71.1 |
+| none (fixed 0.10) | off | 95.4 / 59.0 / 77.2 | 97.5 / 85.2 / 91.4 | 94.3 / 34.1 / 64.2 |
+| none (fixed 0.10) | on | 96.7 / 56.2 / 76.4 | 99.1 / 82.2 / 90.7 | 95.4 / 31.4 / 63.4 |
+| own range | off | 56.3 / 82.0 / 69.1 | 49.8 / 85.2 / 67.5 | 59.8 / 78.9 / 69.4 |
+| own range | on | 62.4 / 78.2 / 70.3 | 54.5 / 82.2 / 68.4 | 66.7 / 74.4 / 70.5 |
+
+Fixed thresholds without any floor, lead off (all / 0921 / September,
+balanced): 0.05 → 74.5 / 90.7 / 59.0; 0.10 → 77.2 / 91.4 / 64.2; 0.20 →
+74.0 / 81.4 / 67.6; 0.30 → 68.6 / 68.2 / 68.4. Breathing only, no motion
+channel: 66.8 / 65.4 / 67.2.
 
 By link, ±2 h floor, hold 20:
 
@@ -46,6 +68,32 @@ calibration and the same 5 s margin scores 84.8 % balanced on its 20-capture
 September subset — and needs a labelled empty stretch that a moved chair
 invalidates. On the current link the calibration-free detector is above
 that with no reference at all.
+
+### KPI #1 set: the 42 September captures the calibrated number used
+
+The 2026-09-18 KPI #1 report scored the amplitude-offset detector with
+in-capture calibration on 42 captures: the 53 September (09-09 … 09-16)
+captures with any camera occupancy, minus the 11 without a 30 s
+camera-empty stretch long enough to calibrate. The hybrid on the same 42,
+every second scored (it holds nothing out), ±2 h floor, hold 20, through
+the `:8002` endpoint on lg:
+
+| detector | margin | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|
+| calibrated, in-capture, 15 s matched window (report) | 0 | 87.4 % | 82.4 % | 93.6 % | 88.0 % |
+| calibrated, in-capture, 1 s tiles (report) | 0 | 86.1 % | 83.5 % | 89.0 % | 86.3 % |
+| hybrid, lead hold off | 0 | 71.8 % | 86.3 % | 64.3 % | 75.3 % |
+| hybrid, lead hold on | 0 | 70.0 % | 90.6 % | 59.3 % | 75.0 % |
+| hybrid, lead hold off | 5 | 73.9 % | 86.3 % | 67.1 % | 76.7 % |
+| hybrid, lead hold on | 5 | 72.0 % | 90.6 % | 61.8 % | 76.2 % |
+
+By day, hybrid, lead hold on, margin 5 (balanced; lead off in brackets):
+09-09 (1) 93.0 [93.0]; 09-10 (2) 77.1 [80.9]; 09-11 (19) 75.1 [75.9];
+09-14 (7) 65.1 [68.7]; 09-15 (12) 81.1 [79.4]; 09-16 (1) 96.2 [96.2].
+The ±2 h floor on these captures is 0.019–0.084 (one at 0.136), so on 28
+of the 42 the threshold is the 0.10 absolute minimum and the floor plays
+no part. The errors are false positives in the empty stretches: 2 980 fp
+against 4 830 tn at margin 5, lead on.
 
 ## 2. What the corpus taught, in the order it was found
 
@@ -79,6 +127,18 @@ that with no reference at all.
    (specificity 0.85 → 0.42) and pooled 54.6 % balanced. Raw, not
    AGC-corrected: the correction fires on a person's own variation and adds
    jitter (0.10 → 0.63 dB frame-diff on a still occupant).
+
+7. **A burst inside a breathing window reads as breathing at the band's
+   top.** On a synthetic empty room, a 5 s walk makes every 30 s window
+   that contains it return the same peak (0.19) at the same rate
+   (34.9 rpm): the burst's energy makes the autocorrelation a triangle and
+   the first positive local maximum sits at the shortest lag. Fifteen such
+   windows agree, so the run rule accepts them and "breathing" is flagged
+   from 10 s before the walk to 15 s after it. A 3 s walk does not do this
+   (no peak found). `breathing &= ~burst` removes only the burst seconds
+   themselves, not the windows that contain them. Not yet measured on the
+   corpus; the windows around every walk-in count as breathing evidence
+   there, right or wrong.
 
 ## 3. What still fails, and why it is the link
 
