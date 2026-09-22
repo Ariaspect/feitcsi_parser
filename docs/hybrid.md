@@ -202,6 +202,25 @@ Control, by day, balanced, lead on [off]: 09-04 (2) 94.8 [92.3], 09-09 (1)
 51.6, `20260911_102312` 52.9 (recall 27.5), `20260914_130413` 52.9 (recall
 28.1), `20260921_135955` 53.9 (recall 22.5).
 
+### Keep-fraction sweep on the two groups (2026-09-22)
+
+Same empty and control groups (22 empty — `20260922_152927` had gone
+missing from lg by then — and 44 control), 10 s defaults, lead on, margin
+5, keep ≥ x × best BNR:
+
+| keep | total accuracy (66) | empty specificity | empty fp s | control accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|---|
+| 0.60 | 85.7 % | 96.2 % | 247 | 80.3 % | 79.5 % | 80.9 % | 80.2 % |
+| 0.65 | 85.7 % | 95.5 % | 299 | 80.6 % | 83.0 % | 78.9 % | 81.0 % |
+| 0.70 | 84.5 % | 94.7 % | 349 | 79.2 % | 86.8 % | 73.8 % | 80.3 % |
+| 0.75 | 82.0 % | 92.6 % | 490 | 76.6 % | 90.9 % | 66.4 % | 78.6 % |
+| 0.80 | 74.5 % | 79.2 % | 1368 | 72.1 % | 92.7 % | 57.4 % | 75.0 % |
+
+Lower keep (fewer, better subcarriers voting) is stricter: recall falls,
+specificity rises. At 0.80 eleven of the 22 empty captures start firing
+(the 09-21 night captures included, 50–156 s each); at 0.60–0.70 the same
+three or four low-floor captures carry all the empty false positives.
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
