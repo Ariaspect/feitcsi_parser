@@ -351,14 +351,13 @@ def verdict(
     whose holds meet -- a burst's trailing hold reaching a breathing run's
     leading one, say -- is present throughout (state ``bridged``).
 
-    ``motion_floor`` replaces the range's own quiet level with one measured
-    elsewhere -- the link's quiet level over the day, say. A range that is
-    occupied throughout has no quiet stretch: its own 20th percentile *is*
-    the occupant, and a threshold set from it can never fire. Measured on
-    the six 2026-09-21 evening captures, the per-second level sat at
-    0.15-0.18 for half an hour against the link's 0.019 when empty -- a body
-    attenuating the link raises the ratio's noise nine-fold, which is
-    evidence, and only a floor from outside the range can see it.
+    The floor is the range's own quiet level (``floor_percentile`` of its
+    per-second motion). ``motion_floor`` replaces it with an explicit value.
+    A range occupied throughout has no quiet stretch -- its own percentile
+    *is* the occupant -- and a floor pooled from neighbouring captures was
+    tried for that (docs/hybrid.md §2) and removed: it is a reference taken
+    from other captures, and on a link whose idle level had risen it set the
+    threshold under an empty room.
     """
     seconds = np.asarray(ev["time_s"], dtype=float) - 0.5
     n_sec = seconds.size
@@ -556,76 +555,6 @@ def capture_evidence(
         while len(_cache) > _CACHE_SIZE:
             _cache.popitem(last=False)
     return ev
-
-
-# Per-capture quiet levels, for the link floor. Keyed on the file's identity
-# and the filters; a capture's per-second motion level is cheap next to the
-# FarSense sweep but a floor pools a handful of neighbours.
-_level_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
-
-
-def motion_levels(
-    path,
-    *,
-    mimo: tuple[int, int] | None = None,
-    source_mac: str | None = None,
-    interpolate: bool = True,
-) -> np.ndarray:
-    """Per-second median ``|dr|/|r|`` over a whole capture, cached."""
-    from pathlib import Path
-
-    from backend.tiles import _presence_grid, get_index
-
-    path = Path(path)
-    st = path.stat()
-    key = (str(path.resolve()), st.st_size, st.st_mtime_ns, mimo, source_mac, bool(interpolate))
-    with _cache_lock:
-        hit = _level_cache.get(key)
-        if hit is not None:
-            _level_cache.move_to_end(key)
-            return hit
-    index = get_index(path)
-    times = np.asarray(index.times, dtype=float)
-    if times.size < 2:
-        return np.zeros(0)
-    grid, fabricated, fs, grid_times, *_ = _presence_grid(
-        path, float(times[0]), float(times[-1]),
-        mimo=mimo, source_mac=source_mac, interpolate=interpolate,
-    )
-    live = live_subcarriers(grid)
-    if not live.any():
-        return np.zeros(0)
-    frac = fractional_motion(grid[:, live])
-    seconds = np.arange(0.0, max(grid.shape[0] / fs, 1.0))
-    level = per_second(frac, (np.arange(grid.shape[0]) / fs)[1:], seconds)
-    unknown = per_second(np.asarray(fabricated, dtype=float), np.arange(grid.shape[0]) / fs, seconds)
-    level[~np.isfinite(unknown) | (unknown > MAX_GAP_FRACTION)] = np.nan
-    with _cache_lock:
-        _level_cache[key] = level
-        while len(_level_cache) > 64:
-            _level_cache.popitem(last=False)
-    return level
-
-
-def pooled_floor(
-    paths,
-    *,
-    percentile: float = FLOOR_PERCENTILE,
-    mimo: tuple[int, int] | None = None,
-    source_mac: str | None = None,
-    interpolate: bool = True,
-) -> float:
-    """The quiet level of a link: a low percentile over several captures' seconds.
-
-    Measured on the corpus (docs/hybrid.md): a floor from the captures within
-    two hours of the one being judged scores 78.1% balanced against 69.1% for
-    the range's own floor and 75.3% for the whole day's -- the day mixes
-    link states (2026-09-15 ran at 0.10-0.12 at midday and 0.02 by evening),
-    the range alone cannot see an occupant who never leaves.
-    """
-    levels = [motion_levels(q, mimo=mimo, source_mac=source_mac, interpolate=interpolate) for q in paths]
-    pool = np.concatenate([lv[np.isfinite(lv)] for lv in levels]) if levels else np.zeros(0)
-    return float(np.percentile(pool, percentile)) if pool.size else float("nan")
 
 
 def compute_hybrid(

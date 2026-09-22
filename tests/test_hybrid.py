@@ -279,8 +279,7 @@ def test_endpoint_without_a_sidecar_returns_no_confusion(tmp_path: Path) -> None
 
 def test_an_external_floor_lets_an_occupied_throughout_range_fire() -> None:
     """A person fidgeting for the whole range IS the range's 20th percentile,
-    so the own-range threshold never trips; the link's quiet level from
-    outside the range does."""
+    so the own-range threshold never trips; an explicit quiet level does."""
     rng = np.random.default_rng(11)
     t = np.arange(int(120 * FS)) / FS
     sig = np.ones((t.size, N_SC), dtype=complex)
@@ -291,34 +290,3 @@ def test_an_external_floor_lets_an_occupied_throughout_range_fire() -> None:
     assert not own["burst"].any()
     assert link["burst"].mean() > 0.9
     assert link["params"]["motion_floor"] == 0.02 and own["params"]["motion_floor"] is None
-
-
-def test_pooled_floor_is_the_links_quiet_level_across_captures(tmp_path: Path) -> None:
-    """A noisy occupied capture and a quiet empty one an hour apart: the
-    pooled floor is the quiet one's, and the noisy one's own is the occupant."""
-    quiet = _capture_with_a_visit(tmp_path, n=2000)
-    quiet_named = quiet.with_name("20260101_120000.bin")
-    quiet.rename(quiet_named)
-    quiet.with_name("visit_cv.json").rename(quiet_named.with_name("20260101_120000_cv.json"))
-    own = hybrid.motion_levels(quiet_named)
-    assert own.size > 50 and np.isfinite(own).any()
-    floor_one = hybrid.pooled_floor([quiet_named])
-    floor_two = hybrid.pooled_floor([quiet_named, quiet_named])
-    assert floor_one == pytest.approx(floor_two)
-    assert floor_one == pytest.approx(hybrid.floor_level(own))
-
-
-def test_endpoint_pools_the_neighbours_for_the_floor(tmp_path: Path) -> None:
-    p = _capture_with_a_visit(tmp_path)
-    stamped = p.with_name("20260102_150000.bin")
-    p.rename(stamped)
-    p.with_name("visit_cv.json").rename(stamped.with_name("20260102_150000_cv.json"))
-    client = TestClient(app)
-    recent = client.get("/api/hybrid", params={"path": str(stamped), "t0": 0.0, "t1": 200.0}).json()
-    own = client.get("/api/hybrid", params={"path": str(stamped), "t0": 0.0, "t1": 200.0, "floor_scope": "own"}).json()
-    assert recent["floor_scope"] == "recent" and stamped.name in recent["floor_captures"]
-    assert own["floor_scope"] == "own" and own["floor_captures"] == []
-    explicit = client.get("/api/hybrid", params={"path": str(stamped), "t0": 0.0, "t1": 200.0, "motion_floor": 0.02}).json()
-    assert explicit["floor_scope"] == "explicit" and explicit["ratio_floor"] == 0.02
-    bad = client.get("/api/hybrid", params={"path": str(stamped), "t0": 0.0, "t1": 200.0, "floor_scope": "day"})
-    assert bad.status_code == 400

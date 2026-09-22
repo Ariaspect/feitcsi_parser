@@ -3,13 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { fetchHybrid, type Hybrid as HybridData, type HybridState, type Meta } from "./api";
 import { Chart, CHART_MARGIN } from "./Chart";
 import { formatTime, linearScale, runs } from "./series";
@@ -101,7 +94,6 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [breathRateTol, setBreathRateTol] = useState(3);
   const [breathWindow, setBreathWindow] = useState(30);
   const [motionFloor, setMotionFloor] = useState<number | null>(null);
-  const [floorScope, setFloorScope] = useState<"recent" | "own">("recent");
   const [marginS, setMarginS] = useState(5);
   const [data, setData] = useState<HybridData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -138,7 +130,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
       path, range[0], range[1],
       {
         holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, breathMinPeak, breathPersistS,
-        breathRateTol, breathWindow, motionFloor, floorScope, marginS, mimo, sourceMac, interpolate,
+        breathRateTol, breathWindow, motionFloor, marginS, mimo, sourceMac, interpolate,
       },
       controller.signal,
     )
@@ -152,7 +144,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
     return () => controller.abort();
   }, [
     path, range, holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, breathMinPeak,
-    breathPersistS, breathRateTol, breathWindow, motionFloor, floorScope, marginS, mimo, sourceMac, interpolate,
+    breathPersistS, breathRateTol, breathWindow, motionFloor, marginS, mimo, sourceMac, interpolate,
   ]);
 
   const domain = useMemo<[number, number]>(() => {
@@ -204,19 +196,8 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
         <NumberField id="hy-abs" label="min" value={motionAbs} onChange={setMotionAbs} min={0} max={10} step={0.01} width="w-16"
           title="…but never below this |Δr|/|r|" />
         <div className="flex items-center gap-2"
-          title="Where the quiet level comes from. Recent: the 20th percentile over the captures within 2 h of this one — the link's own quiet level, which sees an occupant who never leaves (a range occupied throughout has no quiet stretch of its own). Own: this range's 20th percentile. Measured: 78.1% vs 69.1% balanced over the corpus">
-          <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">Floor</Label>
-          <Select value={floorScope} onValueChange={(v) => setFloorScope(v as "recent" | "own")}>
-            <SelectTrigger className="h-7 w-28 text-[11px]"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="recent" className="text-[11px]">recent (±2 h)</SelectItem>
-              <SelectItem value="own" className="text-[11px]">this range</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="flex items-center gap-2"
-          title="An explicit quiet |Δr|/|r| level; overrides the scope when set, blank to use it">
-          <Label htmlFor="hy-floor" className="text-[10px] text-muted-foreground uppercase tracking-wide">or set</Label>
+          title="The quiet level is this range's own 20th percentile of the per-second motion; type a value to use instead">
+          <Label htmlFor="hy-floor" className="text-[10px] text-muted-foreground uppercase tracking-wide">Floor</Label>
           <Input id="hy-floor" type="number" min={0} max={10} step={0.005} className="w-20" placeholder="auto"
             value={motionFloor ?? ""}
             onChange={(e) => {
@@ -255,8 +236,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
           title="Empty camera frames within this many seconds of a transition are not scored" />
         {data && (
           <span className="text-[11px] text-muted-foreground tabular-nums">
-            {data.fsHz.toFixed(1)} Hz · floor {data.ratioFloor?.toFixed(3) ?? "—"} ({data.floorScope}
-            {data.floorScope === "recent" && `, ${data.floorCaptures.length} captures`}) → threshold{" "}
+            {data.fsHz.toFixed(1)} Hz · floor {data.ratioFloor?.toFixed(3) ?? "—"} ({data.floorScope}) → threshold{" "}
             {data.ratioThreshold?.toFixed(3) ?? "—"}
             {useAmplitude && data.ampThreshold !== null && <> · amp {data.ampFloor?.toFixed(2)} → {data.ampThreshold.toFixed(2)} dB</>}
             {loading && " · refreshing"}

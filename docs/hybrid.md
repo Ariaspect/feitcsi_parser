@@ -21,9 +21,14 @@ breathes. A pushed chair does neither once it is down.
   holds meet — a burst's trailing hold reaching a breathing run's leading
   hold, or two trailing holds — is present throughout (state `bridged`).
 
-The motion threshold is `max(2 × floor, 0.10)`, where *floor* is the link's
-quiet level — the 20th percentile of the per-second motion level over the
-captures within ±2 h of this one (see §3 for why not the range's own).
+The motion threshold is `max(2 × floor, 0.10)`, where *floor* is the
+range's own quiet level — the 20th percentile of its per-second motion
+level. Nothing outside the range is consulted. (A floor pooled from the
+captures within ±2 h was the default from 2026-09-21 to 2026-09-22 and was
+removed: it is a reference taken from other captures, not calibration-free,
+and on `20260915_211721` it set the threshold to 0.10 under a range whose
+own level was 0.12 — the whole empty tail read as present. Its numbers stay
+below as data.)
 
 Scored on a 1 s grid against the camera through `backend.truth` (empty
 frames within 5 s of a transition not scored).
@@ -33,9 +38,9 @@ frames within 5 s of a transition not scored).
 | variant | recall | specificity | balanced |
 |---|---|---|---|
 | first cut (all-or-nothing breathing run, paper's first peak, own floor) | 39.6 % | 88.9 % | 64.2 % |
-| + tolerant run (80 %), first *positive* peak, own floor | 56.3 % | 82.0 % | 69.1 % |
+| **+ tolerant run (80 %), first *positive* peak, own floor (default)** | **56.3 %** | **82.0 %** | **69.1 %** |
 | + floor from the whole day | 75.8 % | 74.9 % | 75.3 % |
-| **+ floor from ±2 h (default)** | **75.7 %** | **80.5 %** | **78.1 %** |
+| + floor from ±2 h (removed 2026-09-22) | 75.7 % | 80.5 % | 78.1 % |
 | ±2 h floor, hold 30 | 79.1 % | 76.6 % | 77.8 % |
 | ±2 h floor, hold 20, + leading hold | 80.6 % | 76.7 % | 78.7 % |
 
@@ -56,7 +61,7 @@ balanced): 0.05 → 74.5 / 90.7 / 59.0; 0.10 → 77.2 / 91.4 / 64.2; 0.20 →
 74.0 / 81.4 / 67.6; 0.30 → 68.6 / 68.2 / 68.4. Breathing only, no motion
 channel: 66.8 / 65.4 / 67.2.
 
-By link, ±2 h floor, hold 20:
+By link, ±2 h floor (removed), hold 20:
 
 | link | n | recall | specificity | balanced |
 |---|---|---|---|---|
@@ -75,19 +80,19 @@ The 2026-09-18 KPI #1 report scored the amplitude-offset detector with
 in-capture calibration on 42 captures: the 53 September (09-09 … 09-16)
 captures with any camera occupancy, minus the 11 without a 30 s
 camera-empty stretch long enough to calibrate. The hybrid on the same 42,
-every second scored (it holds nothing out), ±2 h floor, hold 20, through
-the `:8002` endpoint on lg:
+every second scored (it holds nothing out), hold 20, through the `:8002`
+endpoint on lg. The ±2 h rows were measured before that floor was removed:
 
 | detector | margin | accuracy | recall | specificity | balanced |
 |---|---|---|---|---|---|
 | calibrated, in-capture, 15 s matched window (report) | 0 | 87.4 % | 82.4 % | 93.6 % | 88.0 % |
 | calibrated, in-capture, 1 s tiles (report) | 0 | 86.1 % | 83.5 % | 89.0 % | 86.3 % |
-| hybrid, lead hold off | 0 | 71.8 % | 86.3 % | 64.3 % | 75.3 % |
-| hybrid, lead hold on | 0 | 70.0 % | 90.6 % | 59.3 % | 75.0 % |
-| hybrid, lead hold off | 5 | 73.9 % | 86.3 % | 67.1 % | 76.7 % |
-| hybrid, lead hold on | 5 | 72.0 % | 90.6 % | 61.8 % | 76.2 % |
+| hybrid, ±2 h floor, lead hold off | 0 | 71.8 % | 86.3 % | 64.3 % | 75.3 % |
+| hybrid, ±2 h floor, lead hold on | 0 | 70.0 % | 90.6 % | 59.3 % | 75.0 % |
+| hybrid, ±2 h floor, lead hold off | 5 | 73.9 % | 86.3 % | 67.1 % | 76.7 % |
+| hybrid, ±2 h floor, lead hold on | 5 | 72.0 % | 90.6 % | 61.8 % | 76.2 % |
 
-By day, hybrid, lead hold on, margin 5 (balanced; lead off in brackets):
+By day, hybrid with the ±2 h floor, lead hold on, margin 5 (balanced; lead off in brackets):
 09-09 (1) 93.0 [93.0]; 09-10 (2) 77.1 [80.9]; 09-11 (19) 75.1 [75.9];
 09-14 (7) 65.1 [68.7]; 09-15 (12) 81.1 [79.4]; 09-16 (1) 96.2 [96.2].
 The ±2 h floor on these captures is 0.019–0.084 (one at 0.136), so on 28
@@ -117,7 +122,7 @@ against 4 830 tn at margin 5, lead on.
    attenuating the link raises the ratio's noise nine-fold, which is
    evidence, and only a floor from outside the range can see it (0921:
    67.5 → 91.4 % balanced).
-5. **But the floor must be *recent*, not daily.** On 2026-09-15 the link's
+5. **But the floor must be *recent*, not daily** (both pooled floors since removed, see the rule above). On 2026-09-15 the link's
    noise was 0.10–0.12 at midday and 0.02 in the evening; a whole-day floor
    sits under the midday empties and the `negative:furniture` captures fire
    throughout (specificity 65 %). A ±2 h window keeps every day at or above
