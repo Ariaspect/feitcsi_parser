@@ -148,6 +148,27 @@ By day, balanced, lead on [off]: 09-09 93.0 [93.0], 09-10 87.4 [89.3],
 09-11 82.0 [78.8], 09-14 70.3 [69.9], 09-15 76.5 [73.5], 09-16 85.1
 [88.7], 09-17 75.1 [73.5], 09-21 67.3 [65.1].
 
+The same set with the window and the breathing run at 10 s (the current
+default; the table above is 15 s / 15 s), margin 5:
+
+| group | n | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|
+| KPI set minus anomalies | 40 | on | 77.0 % | 72.4 % | 79.5 % | 75.9 % |
+| | | off | 76.5 % | 67.1 % | 81.6 % | 74.4 % |
+| 09-17 | 6 | on | 66.7 % | 50.4 % | 94.8 % | 72.6 % |
+| | | off | 65.2 % | 47.7 % | 95.3 % | 71.5 % |
+| 09-21 | 32 | on | 76.3 % | 42.1 % | 92.4 % | 67.2 % |
+| | | off | 74.8 % | 36.5 % | 92.8 % | 64.7 % |
+| all | 78 | on | 75.9 % | 58.2 % | 85.9 % | 72.0 % |
+| | | off | 74.9 % | 53.2 % | 87.2 % | 70.2 % |
+
+Lowest accuracy, 10 s, lead on: `20260917_143944`, `20260921_201725`,
+`_202301`, `_203359` at 0 % (occupied throughout, own floor 0.14–0.16 so the
+motion threshold is 0.28–0.31, no breathing run found); `20260917_142007`
+15 %, `20260921_202830` 25 %, `_203926` 29 %, `_204455` 31 % (same shape);
+`20260915_152235` 30 % (recall 29.5, specificity 31.1); `20260914_125024`
+47 % (recall 68.1, specificity 32.9).
+
 On 09-21 the three evening captures occupied throughout
 (`20260921_201725`, `_202301`, `_203359`) score recall 0: their own floor
 is 0.15 (the occupant), so the motion threshold is 0.30 and never trips,
