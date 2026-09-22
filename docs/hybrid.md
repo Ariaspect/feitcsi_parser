@@ -175,6 +175,33 @@ is 0.15 (the occupant), so the motion threshold is 0.30 and never trips,
 and the breathing channel under the new set finds no run. Under the
 previous set with the pooled floor the same day scored 91.4 % (§1).
 
+### Empty captures and control-scenario captures (2026-09-22, 10 s defaults)
+
+Grouped from the camera labels over every labelled capture on lg
+(104, the three anomalous ones excluded): **empty** = no occupied frame at
+all (23); **control** = empty ≥ 20 s, one occupied block ≥ 30 s (gaps ≤ 5 s
+merged), empty ≥ 20 s (44, spanning 09-04 … 09-22). Margin 5.
+
+| group | n | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|
+| empty | 23 | on / off | 95.1 % | — | 95.1 % | — |
+| control | 44 | on | 80.3 % | 79.5 % | 80.9 % | 80.2 % |
+| | | off | 78.3 % | 72.6 % | 82.3 % | 77.5 % |
+
+Empty: 19 of 23 captures have zero false-positive seconds (every 09-21
+night capture, 09-16, 09-17); the 339 fp are four captures —
+`20260922_152927` 92 s, `20260922_135920` 89 s, `20260914_131846` 85 s,
+`20260915_135620` 73 s — all with a low own floor (0.03–0.07) so the
+threshold is at or near the 0.10 minimum. Lead hold changes nothing in an
+empty capture (no breathing evidence to lead).
+
+Control, by day, balanced, lead on [off]: 09-04 (2) 94.8 [92.3], 09-09 (1)
+93.0 [93.0], 09-11 (17) 81.6 [78.2], 09-14 (6) 63.9 [66.0], 09-15 (4) 79.0
+[73.7], 09-17 (2) 94.7 [93.6], 09-21 (10) 78.5 [74.9], 09-22 (2) 93.4
+[88.6]. Lowest accuracy: `20260914_125024` 47.1 (fp 116), `20260914_135133`
+51.6, `20260911_102312` 52.9 (recall 27.5), `20260914_130413` 52.9 (recall
+28.1), `20260921_135955` 53.9 (recall 22.5).
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
