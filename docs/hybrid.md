@@ -283,7 +283,7 @@ stay). `any` removes all but 4 s of misses and adds 415 s of false
 positives in the control captures (the person's approach and departure
 bursts bracket empty seconds) plus 33 s in two empty captures. With
 bridging on, the leading hold only adds false positives: lead off + run
-88.7 %, lead off + any 88.9 %. Default left at `off`.
+88.7 %, lead off + any 88.9 %. Default set to `any` with lead on, 2026-09-22 (the user's choice).
 
 #### Three classification accuracies and the dataset status (2026-09-22)
 

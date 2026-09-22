@@ -209,7 +209,7 @@ def test_breathing_between_two_bursts_fills_the_stretch_when_asked() -> None:
     between the last breathing hold and the second walk is empty."""
     sig = _room(300.0, walk=(20.0, 25.0), chest=(60.0, 160.0))
     sig[int(200.0 * FS):int(205.0 * FS)] *= np.exp(1j * np.cumsum(np.random.default_rng(5).uniform(-2.0, 2.0, (int(5.0 * FS), 1)), axis=0))
-    off = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0)
+    off = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, bridge_bursts="off")
     run = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, bridge_bursts="run")
     anyw = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, bridge_bursts="any")
     assert off["burst"][_between(off, 21.0, 24.0)].all() and off["burst"][_between(off, 201.0, 204.0)].all()

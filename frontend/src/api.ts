@@ -1129,7 +1129,7 @@ export async function fetchHybrid(
     maxGapFraction = 0.5,
     motionFloor,
     leadHold = true,
-    bridgeBursts = "off",
+    bridgeBursts = "any",
     marginS = 5,
     mimo,
     sourceMac,
