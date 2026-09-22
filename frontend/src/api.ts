@@ -997,6 +997,8 @@ export interface HybridParams {
   breath_min_peak: number;
   breath_persist_seconds: number;
   breath_rate_tol: number;
+  sparse_fraction: number;
+  sparse_window_seconds: number;
   breath_min_fraction: number;
   breath_window_seconds: number;
   breath_highpass_hz: number;
@@ -1067,6 +1069,9 @@ export interface HybridOptions {
   breathMinPeak?: number;
   breathPersistS?: number;
   breathRateTol?: number;
+  /** Sparse breathing: fraction of windows within `sparseWindow` seconds that must clear the peak threshold; 0 = off. */
+  sparseFraction?: number;
+  sparseWindow?: number;
   breathWindow?: number;
   breathHighpass?: number;
   /** FarSense search knobs, same meaning as on the FarSense tab. */
@@ -1115,6 +1120,8 @@ export async function fetchHybrid(
     breathMinPeak = 0.2,
     breathPersistS = 10,
     breathRateTol = 3,
+    sparseFraction = 0,
+    sparseWindow = 60,
     breathWindow = 10,
     breathHighpass = 0,
     rpmLo = 10,
@@ -1144,6 +1151,7 @@ export async function fetchHybrid(
     `&amp_rel=${ampRel}&amp_abs=${ampAbs}&floor_pct=${floorPct}` +
     `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
     `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
+    `&sparse_fraction=${sparseFraction}&sparse_window=${sparseWindow}` +
     `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
     `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&n_theta=${nTheta}&fft_size=${fftSize}` +
     `&keep_fraction=${keepFraction}&savgol_seconds=${savgolSeconds}&savgol_order=${savgolOrder}` +

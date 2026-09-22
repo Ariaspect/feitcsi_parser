@@ -102,6 +102,8 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [breathMinPeak, setBreathMinPeak] = useState(0.2);
   const [breathPersistS, setBreathPersistS] = useState(10);
   const [breathRateTol, setBreathRateTol] = useState(3);
+  const [sparseFraction, setSparseFraction] = useState(0);
+  const [sparseWindow, setSparseWindow] = useState(60);
   const [breathWindow, setBreathWindow] = useState(10);
   const [breathHighpass, setBreathHighpass] = useState(0);
   const [rpmLo, setRpmLo] = useState(10);
@@ -151,7 +153,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
       path, range[0], range[1],
       {
         holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, bridgeBursts, breathMinPeak, breathPersistS,
-        breathRateTol, breathWindow, breathHighpass, rpmLo, rpmHi, keepFraction, nTheta, fftSize,
+        breathRateTol, sparseFraction, sparseWindow, breathWindow, breathHighpass, rpmLo, rpmHi, keepFraction, nTheta, fftSize,
         savgolSeconds, savgolOrder, motionFracHi, positiveOnly, maxGapFraction,
         motionFloor, marginS, mimo, sourceMac, interpolate,
       },
@@ -167,7 +169,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
     return () => controller.abort();
   }, [
     path, range, holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, bridgeBursts, breathMinPeak,
-    breathPersistS, breathRateTol, breathWindow, breathHighpass, rpmLo, rpmHi, keepFraction, nTheta,
+    breathPersistS, breathRateTol, sparseFraction, sparseWindow, breathWindow, breathHighpass, rpmLo, rpmHi, keepFraction, nTheta,
     fftSize, savgolSeconds, savgolOrder, motionFracHi, positiveOnly, maxGapFraction,
     motionFloor, marginS, mimo, sourceMac, interpolate,
   ]);
@@ -280,6 +282,10 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
             title="…through this many seconds of consecutive windows, 80% of which must qualify and agree on the rate" />
           <NumberField id="hy-tol" label="± rpm" value={breathRateTol} onChange={setBreathRateTol} min={0} max={60} step={0.5} width="w-16"
             title="How far a window's rate may sit from the run's median and still agree" />
+          <NumberField id="hy-sparse" label="Sparse ≥" value={sparseFraction} onChange={setSparseFraction} min={0} max={1} step={0.05} width="w-16"
+            title="Sparse breathing: a second counts as breathing when at least this fraction of the windows around it clear the peak threshold, no rate agreement asked. Catches a fidgeting sitter whose rhythm never holds; too low and an empty room's scattered peaks count. 0: off." />
+          <NumberField id="hy-sparse-win" label="over (s)" value={sparseWindow} onChange={setSparseWindow} min={2} max={600} width="w-16"
+            title="Span around each second over which the sparse fraction is counted" />
           <NumberField id="hy-margin" label="Label margin (s)" value={marginS} onChange={setMarginS} min={0} max={60} width="w-16"
             title="Empty camera frames within this many seconds of a transition are not scored" />
         </div>

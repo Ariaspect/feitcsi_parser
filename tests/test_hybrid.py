@@ -222,6 +222,42 @@ def test_breathing_between_two_bursts_fills_the_stretch_when_asked() -> None:
         hybrid.hybrid_seconds(sig, FS, bridge_bursts="always")
 
 
+def _evidence(n: int, peak, rpm):
+    z = np.zeros(n)
+    return {
+        "time_s": np.arange(n) + 0.5, "unknown": np.zeros(n, dtype=bool),
+        "motion_ratio": z + 0.01, "motion_amp": np.full(n, np.nan),
+        "breath_peak": np.asarray(peak, float), "breath_rpm": np.asarray(rpm, float),
+        "breath_note": None, "fs_hz": FS, "evidence_params": {},
+    }
+
+
+def test_sparse_breathing_counts_scattered_peaks_without_a_rate() -> None:
+    """A fidgeting sitter: 40% of windows clear the peak but the rates never
+    agree, so the run rule finds nothing; the sparse rule at 0.3 does and
+    at 0.6 does not."""
+    rng = np.random.default_rng(2)
+    n = 300
+    peak = np.where(rng.random(n) < 0.4, 0.3, 0.05)
+    rpm = rng.uniform(10.0, 30.0, n)                      # no two neighbours agree
+    ev = _evidence(n, peak, rpm)
+    plain = hybrid.verdict(ev)
+    assert not plain["breathing"].any() and not plain["present"].any()
+    loose = hybrid.verdict(ev, sparse_fraction=0.3, sparse_window_seconds=60.0)
+    assert loose["breathing"][30:270].mean() > 0.9
+    assert loose["params"]["sparse_fraction"] == 0.3
+    strict = hybrid.verdict(ev, sparse_fraction=0.6, sparse_window_seconds=60.0)
+    assert strict["breathing"].mean() < 0.1
+
+
+def test_sparse_breathing_ignores_a_lone_peak_in_an_empty_room() -> None:
+    n = 300
+    peak = np.full(n, 0.05); peak[150] = 0.4
+    ev = _evidence(n, peak, np.full(n, 15.0))
+    out = hybrid.verdict(ev, sparse_fraction=0.3)
+    assert not out["present"].any()
+
+
 def test_the_verdict_does_not_depend_on_the_links_noise_scale() -> None:
     """Calibration-free means the same verdicts at five times the noise: the
     floor moves with the link and the threshold with it."""

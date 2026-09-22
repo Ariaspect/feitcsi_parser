@@ -76,6 +76,10 @@ BREATH_PERSIST_SECONDS = 10.0  # was 15; set 2026-09-22
 BREATH_RATE_TOL = 3.0      # rpm, from the run's median
 # A run may carry a few windows that dip below the peak or stray in rate.
 BREATH_MIN_FRACTION = 0.8
+# Sparse breathing: within SPARSE_WINDOW_SECONDS, the fraction of windows
+# whose peak clears BREATH_MIN_PEAK -- no rate agreement asked. 0 = off.
+SPARSE_FRACTION = 0.0
+SPARSE_WINDOW_SECONDS = 60.0
 BREATH_WINDOW_SECONDS = 10.0   # was 30, then 15; set 2026-09-22
 BREATH_HIGHPASS_HZ = 0.0       # was 0.1; set 2026-09-22
 # A second is "unknown" when more than this fraction of its samples were
@@ -169,6 +173,41 @@ def gaps_between_bursts_with(burst: np.ndarray, inside: np.ndarray) -> np.ndarra
         a, b = idx[k], idx[k + 1]
         if inside[a + 1 : b].any():
             out[a + 1 : b] = True
+    return out
+
+
+def sparse_breathing(
+    peak: np.ndarray,
+    unknown: np.ndarray,
+    *,
+    min_peak: float,
+    window_seconds: float,
+    fraction: float,
+) -> np.ndarray:
+    """Seconds whose surrounding ``window_seconds`` hold at least ``fraction``
+    of qualifying windows (peak >= ``min_peak``), counted over the known
+    seconds only and only where at least half the window is known.
+
+    The rate need not hold: a fidgeting sitter clears the peak in scattered
+    windows without ever sustaining one rate for the persistence rule.
+    """
+    peak = np.asarray(peak, dtype=float)
+    unknown = np.asarray(unknown, dtype=bool)
+    n = peak.size
+    out = np.zeros(n, dtype=bool)
+    if fraction <= 0 or n == 0:
+        return out
+    q = np.isfinite(peak) & (peak >= min_peak) & ~unknown
+    known = ~unknown
+    cq = np.concatenate([[0], np.cumsum(q)])
+    ck = np.concatenate([[0], np.cumsum(known)])
+    half = max(1, int(round(window_seconds / 2.0)))
+    for i in range(n):
+        a, b = max(0, i - half), min(n, i + half + 1)
+        k = ck[b] - ck[a]
+        if k * 2 < (b - a):
+            continue
+        out[i] = (cq[b] - cq[a]) >= fraction * k
     return out
 
 
@@ -386,6 +425,8 @@ def verdict(
     breath_persist_seconds: float = BREATH_PERSIST_SECONDS,
     breath_rate_tol: float = BREATH_RATE_TOL,
     breath_min_fraction: float = BREATH_MIN_FRACTION,
+    sparse_fraction: float = SPARSE_FRACTION,
+    sparse_window_seconds: float = SPARSE_WINDOW_SECONDS,
     motion_floor: float | None = None,
     lead_hold: bool = True,
     bridge_bursts: str = "any",
@@ -443,6 +484,11 @@ def verdict(
         rate_tol=breath_rate_tol,
         min_fraction=breath_min_fraction,
     )
+    if sparse_fraction > 0:
+        breathing = breathing | sparse_breathing(
+            ev["breath_peak"], unknown,
+            min_peak=breath_min_peak, window_seconds=sparse_window_seconds, fraction=sparse_fraction,
+        )
     breathing &= ~burst & ~unknown
 
     if bridge_bursts not in ("off", "run", "any"):
@@ -494,6 +540,8 @@ def verdict(
             "breath_persist_seconds": float(breath_persist_seconds),
             "breath_rate_tol": float(breath_rate_tol),
             "breath_min_fraction": float(breath_min_fraction),
+            "sparse_fraction": float(sparse_fraction),
+            "sparse_window_seconds": float(sparse_window_seconds),
             "motion_floor": None if motion_floor is None else float(motion_floor),
             "lead_hold": bool(lead_hold),
             "bridge_bursts": str(bridge_bursts),
