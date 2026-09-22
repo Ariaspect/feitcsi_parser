@@ -22,6 +22,7 @@ const STATE_LABEL: Record<HybridState, string> = {
   moving: "moving",
   breathing: "breathing",
   held: "held",
+  bridged: "bridged",
   empty: "empty",
   unknown: "no data",
 };
@@ -34,6 +35,8 @@ function stateColor(state: HybridState, dark: boolean): string {
       return "#2f6fed";
     case "held":
       return dark ? "#2c4a7a" : "#b9cdf0";
+    case "bridged":
+      return dark ? "#3d5f95" : "#95b3e6";
     case "empty":
       return dark ? "#2b3038" : "#e6e9ee";
     case "unknown":
@@ -92,6 +95,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [motionRel, setMotionRel] = useState(2);
   const [motionAbs, setMotionAbs] = useState(0.1);
   const [useAmplitude, setUseAmplitude] = useState(false);
+  const [leadHold, setLeadHold] = useState(true);
   const [breathMinPeak, setBreathMinPeak] = useState(0.15);
   const [breathPersistS, setBreathPersistS] = useState(15);
   const [breathRateTol, setBreathRateTol] = useState(3);
@@ -133,7 +137,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
     fetchHybrid(
       path, range[0], range[1],
       {
-        holdS, burstS, motionRel, motionAbs, useAmplitude, breathMinPeak, breathPersistS,
+        holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, breathMinPeak, breathPersistS,
         breathRateTol, breathWindow, motionFloor, floorScope, marginS, mimo, sourceMac, interpolate,
       },
       controller.signal,
@@ -147,7 +151,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [
-    path, range, holdS, burstS, motionRel, motionAbs, useAmplitude, breathMinPeak,
+    path, range, holdS, burstS, motionRel, motionAbs, useAmplitude, leadHold, breathMinPeak,
     breathPersistS, breathRateTol, breathWindow, motionFloor, floorScope, marginS, mimo, sourceMac, interpolate,
   ]);
 
@@ -166,7 +170,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
     [data],
   );
   const tally = useMemo(() => {
-    const counts: Record<HybridState, number> = { moving: 0, breathing: 0, held: 0, empty: 0, unknown: 0 };
+    const counts: Record<HybridState, number> = { moving: 0, breathing: 0, held: 0, bridged: 0, empty: 0, unknown: 0 };
     for (const s of data?.state ?? []) counts[s] += 1;
     return counts;
   }, [data]);
@@ -231,6 +235,15 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
         >
           amplitude {useAmplitude ? "on" : "off"}
         </Button>
+        <Button
+          variant={leadHold ? "default" : "outline"}
+          size="sm"
+          className="h-7 px-2 text-[11px]"
+          title="Breathing also holds presence for the hold length before it; where that meets the hold running out of earlier evidence, the whole gap is present (bridged). Off: presence only runs forward from evidence."
+          onClick={() => setLeadHold((v) => !v)}
+        >
+          lead hold {leadHold ? "on" : "off"}
+        </Button>
         <NumberField id="hy-peak" label="Breath peak ≥" value={breathMinPeak} onChange={setBreathMinPeak} min={-1} max={1} step={0.05}
           title="Normalised FarSense peak a window needs" />
         <NumberField id="hy-persist" label="for (s)" value={breathPersistS} onChange={setBreathPersistS} min={1} max={120} width="w-16"
@@ -290,7 +303,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
             </svg>
             <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
               <span><span style={{ color: cam }}>■</span> person in frame</span>
-              {(["moving", "breathing", "held", "empty", "unknown"] as HybridState[]).map((s) => (
+              {(["moving", "breathing", "held", "bridged", "empty", "unknown"] as HybridState[]).map((s) => (
                 <span key={s} className="flex items-center gap-1.5">
                   <svg width={10} height={10}><rect width={10} height={10} fill={stateColor(s, dark)} /></svg>
                   {STATE_LABEL[s]} · {tally[s]}

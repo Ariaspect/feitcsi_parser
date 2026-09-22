@@ -132,6 +132,62 @@ def test_a_pushed_chair_is_a_burst_followed_by_nothing() -> None:
     assert not present[_between(out, 125.0, 300.0)].any()
 
 
+def _first_true(out: dict, key: str) -> float:
+    idx = np.flatnonzero(out[key])
+    return float(out["time_s"][idx[0]]) if idx.size else float("nan")
+
+
+def _last_true(out: dict, key: str) -> float:
+    idx = np.flatnonzero(out[key])
+    return float(out["time_s"][idx[-1]]) if idx.size else float("nan")
+
+
+def test_breathing_holds_presence_before_it_as_well_as_after() -> None:
+    """The person was in the chair while the first window filled: with the
+    leading hold, presence opens ``hold_seconds`` earlier than the evidence."""
+    sig = _room(200.0, chest=(80.0, 200.0))
+    with_lead = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, lead_hold=True)
+    without = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, lead_hold=False)
+    onset = _first_true(without, "breathing")
+    assert 55.0 < onset < 95.0
+    assert _first_true(without, "present") == onset
+    assert abs(_first_true(with_lead, "present") - (onset - 20.0)) <= 1.0
+    assert not with_lead["present"][_between(with_lead, 0.0, onset - 22.0)].any()
+
+
+def test_holds_that_meet_make_the_gap_between_present() -> None:
+    """Two breathing stretches with a pause the two holds can span between
+    them: the seconds between are present (bridged) rather than empty."""
+    sig = _room(200.0, chest=(0.0, 60.0))
+    sig += _room(200.0, chest=(110.0, 200.0), noise=0.0) - 1.0
+    out = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, lead_hold=True)
+    plain = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, lead_hold=False)
+    breathing = np.asarray(plain["breathing"])
+    ends = np.flatnonzero(breathing[:-1] & ~breathing[1:])
+    starts = np.flatnonzero(~breathing[:-1] & breathing[1:]) + 1
+    assert ends.size >= 1 and starts.size >= 1
+    gap_a, gap_b = float(plain["time_s"][ends[0]]), float(plain["time_s"][starts[starts > ends[0]][0]])
+    assert 5.0 < gap_b - gap_a <= 40.0                      # under two holds: they meet
+    assert out["present"][_between(out, gap_a, gap_b)].all()
+    assert "bridged" in out["state"]
+    assert not plain["present"][_between(plain, gap_a, gap_b)].all()
+
+
+def test_holds_that_do_not_meet_leave_the_gap_empty() -> None:
+    sig = _room(300.0, chest=(0.0, 60.0))
+    sig += _room(300.0, chest=(200.0, 300.0), noise=0.0) - 1.0
+    out = hybrid.hybrid_seconds(sig, FS, hold_seconds=20.0, lead_hold=True)
+    breathing = np.asarray(out["breathing"])
+    ends = np.flatnonzero(breathing[:-1] & ~breathing[1:])
+    starts = np.flatnonzero(~breathing[:-1] & breathing[1:]) + 1
+    gap_a, gap_b = float(out["time_s"][ends[0]]), float(out["time_s"][starts[starts > ends[0]][0]])
+    assert gap_b - gap_a > 50.0
+    assert out["present"][_between(out, gap_a, gap_a + 20.0)].all()          # trailing hold
+    assert not out["present"][_between(out, gap_a + 22.0, gap_b - 21.0)].any()
+    assert out["present"][_between(out, gap_b - 19.0, gap_b)].all()          # leading hold only
+    assert "bridged" not in out["state"]
+
+
 def test_the_verdict_does_not_depend_on_the_links_noise_scale() -> None:
     """Calibration-free means the same verdicts at five times the noise: the
     floor moves with the link and the threshold with it."""

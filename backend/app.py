@@ -1277,6 +1277,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
     floor_scope: str = Query("recent", description="Where the motion floor comes from: 'recent' pools the captures within floor_hours of this one (the link's quiet level; the default), 'own' uses this range's 20th percentile, which an occupied-throughout range cannot supply"),
     floor_hours: float = Query(2.0, gt=0, le=48, description="Half-width of the 'recent' pool in hours"),
     motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet |dr|/|r| level; overrides floor_scope when given"),
+    lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it; a gap whose holds meet is present throughout"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
     source_mac: str | None = Query(None, description="Source MAC filter"),
@@ -1329,6 +1330,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
             breath_window_seconds=breath_window,
             breath_highpass_hz=breath_highpass,
             motion_floor=motion_floor,
+            lead_hold=lead_hold,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

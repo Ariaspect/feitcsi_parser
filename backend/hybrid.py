@@ -86,6 +86,7 @@ STATE_UNKNOWN = "unknown"
 STATE_MOVING = "moving"
 STATE_BREATHING = "breathing"
 STATE_HELD = "held"
+STATE_BRIDGED = "bridged"
 STATE_EMPTY = "empty"
 
 
@@ -133,6 +134,36 @@ def bursts(level: np.ndarray, threshold: float, min_run: int) -> np.ndarray:
         if j - i >= min_run:
             out[i:j] = True
         i = j
+    return out
+
+
+def hold_after(mask: np.ndarray, n: int) -> np.ndarray:
+    """Cells within ``n`` cells after a true cell (the true cells included)."""
+    mask = np.asarray(mask, dtype=bool)
+    out = mask.copy()
+    for k in range(1, min(int(n), mask.size - 1) + 1):
+        out[k:] |= mask[:-k]
+    return out
+
+
+def hold_before(mask: np.ndarray, n: int) -> np.ndarray:
+    """Cells within ``n`` cells before a true cell (the true cells included)."""
+    return hold_after(np.asarray(mask, dtype=bool)[::-1], n)[::-1]
+
+
+def bridged_gaps(evidence: np.ndarray, covered: np.ndarray) -> np.ndarray:
+    """Gaps between two evidence cells whose every cell a hold covers.
+
+    The heuristic: a hold running forward from one piece of evidence and a
+    hold running back from the next that meet make the whole gap present.
+    """
+    evidence = np.asarray(evidence, dtype=bool)
+    covered = np.asarray(covered, dtype=bool)
+    out = np.zeros(evidence.shape, dtype=bool)
+    idx = np.flatnonzero(evidence)
+    for a, b in zip(idx[:-1], idx[1:]):
+        if b - a > 1 and covered[a + 1 : b].all():
+            out[a + 1 : b] = True
     return out
 
 
@@ -310,8 +341,15 @@ def verdict(
     breath_rate_tol: float = BREATH_RATE_TOL,
     breath_min_fraction: float = BREATH_MIN_FRACTION,
     motion_floor: float | None = None,
+    lead_hold: bool = True,
 ) -> dict[str, Any]:
     """Bursts, breathing runs and the held state from an evidence series.
+
+    Presence runs ``hold_seconds`` past any evidence. With ``lead_hold`` the
+    breathing evidence also holds presence for ``hold_seconds`` *before* it
+    (the person was already there while the first window filled), and a gap
+    whose holds meet -- a burst's trailing hold reaching a breathing run's
+    leading one, say -- is present throughout (state ``bridged``).
 
     ``motion_floor`` replaces the range's own quiet level with one measured
     elsewhere -- the link's quiet level over the day, say. A range that is
@@ -356,24 +394,20 @@ def verdict(
     )
     breathing &= ~burst & ~unknown
 
-    present = np.zeros(n_sec, dtype=bool)
+    n_hold = max(0, int(round(hold_seconds)))
+    evidence = burst | breathing
+    trailing = hold_after(evidence, n_hold)
+    leading = hold_before(breathing, n_hold) if lead_hold else np.zeros(n_sec, dtype=bool)
+    covered = (trailing | leading) & ~evidence
+    bridged = bridged_gaps(evidence, covered)
+    present = (evidence | covered) & ~unknown
+
     state = np.full(n_sec, STATE_EMPTY, dtype=object)
-    last_evidence = -np.inf
-    for i in range(n_sec):
-        if unknown[i]:
-            state[i] = STATE_UNKNOWN
-            continue
-        if burst[i] or breathing[i]:
-            last_evidence = seconds[i]
-        present[i] = (seconds[i] - last_evidence) <= hold_seconds
-        if burst[i]:
-            state[i] = STATE_MOVING
-        elif breathing[i]:
-            state[i] = STATE_BREATHING
-        elif present[i]:
-            state[i] = STATE_HELD
-        else:
-            state[i] = STATE_EMPTY
+    state[covered] = STATE_HELD
+    state[bridged] = STATE_BRIDGED
+    state[breathing] = STATE_BREATHING
+    state[burst] = STATE_MOVING
+    state[unknown] = STATE_UNKNOWN
 
     out = dict(ev)
     out.update(
@@ -400,6 +434,7 @@ def verdict(
             "breath_rate_tol": float(breath_rate_tol),
             "breath_min_fraction": float(breath_min_fraction),
             "motion_floor": None if motion_floor is None else float(motion_floor),
+            "lead_hold": bool(lead_hold),
         },
     )
     out.pop("evidence_params", None)

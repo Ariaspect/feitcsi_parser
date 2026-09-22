@@ -979,9 +979,11 @@ export async function fetchFarSense(
 }
 
 /** One second of the calibration-free detector. `moving` and `breathing`
- *  are the evidence; `held` is presence kept alive by evidence within the
- *  hold; `empty` is the room once nothing has happened for that long. */
-export type HybridState = "unknown" | "moving" | "breathing" | "held" | "empty";
+ *  are the evidence; `held` is presence kept alive by a hold running out
+ *  from evidence (after any, before breathing); `bridged` is a gap whose
+ *  holds met from both sides; `empty` is the room once nothing has
+ *  happened for that long. */
+export type HybridState = "unknown" | "moving" | "breathing" | "held" | "bridged" | "empty";
 
 export interface HybridParams {
   use_amplitude: boolean;
@@ -1000,6 +1002,7 @@ export interface HybridParams {
   breath_highpass_hz: number;
   max_gap_fraction: number;
   motion_floor: number | null;
+  lead_hold: boolean;
 }
 
 export interface HybridConfusion extends Confusion {
@@ -1065,6 +1068,9 @@ export interface HybridOptions {
    *  'own' uses this range's 20th percentile. */
   floorScope?: "recent" | "own";
   floorHours?: number;
+  /** Breathing also holds presence `holdS` before it, and a gap whose
+   *  holds meet is present throughout. On by default. */
+  leadHold?: boolean;
   marginS?: number;
   mimo?: string | null;
   sourceMac?: string | null;
@@ -1095,6 +1101,7 @@ export async function fetchHybrid(
     motionFloor,
     floorScope = "recent",
     floorHours = 2,
+    leadHold = true,
     marginS = 5,
     mimo,
     sourceMac,
@@ -1111,7 +1118,7 @@ export async function fetchHybrid(
     `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
     `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
     (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
-    `&floor_scope=${floorScope}&floor_hours=${floorHours}` +
+    `&floor_scope=${floorScope}&floor_hours=${floorHours}&lead_hold=${leadHold}` +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
 
