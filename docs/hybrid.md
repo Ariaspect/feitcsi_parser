@@ -384,6 +384,24 @@ occupied 0.038 / 0.145 / 0.165 (15 of 16); other 0.019 / 0.093 / 0.156
 (9 of 22). A floor above 0.10 is therefore an occupant in 24 captures and
 a noisy empty link in 5. Default unchanged.
 
+Excluding the three noisy empty captures the user judged bad data
+(`20260916_140316`, `20260916_140908`, `20260917_201323`), own vs C on the
+remaining 102:
+
+| metric | own | C |
+|---|---|---|
+| empty (19) specificity | 95.1 | 95.1 |
+| control (45) accuracy / F1 | 84.5 / 84.3 | 82.0 / 82.3 |
+| fully occupied (16) recall | 44.5 | 85.7 |
+| seated fidgeting (13) recall | 16.8 | 81.2 |
+| other (22) accuracy / F1 | 66.8 / 56.3 | 74.8 / 70.5 |
+| empty + control accuracy | 87.7 | 86.0 |
+| all 102 accuracy / F1 | 76.4 / 71.7 | 83.7 / 82.5 |
+
+C's remaining cost sits in three captures on the same noisy days:
+`20260917_195828` fp 19 → 189 s, `20260917_161300` 17 → 164 s,
+`20260916_151218` 132 → 177 s (their empty stretches sit at 0.13–0.17).
+
 #### The same defaults on the 78-capture set (fully occupied captures included)
 
 Same defaults, margin 5. The fully occupied captures (own floor = the
