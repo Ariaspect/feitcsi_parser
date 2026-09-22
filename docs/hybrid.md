@@ -221,14 +221,34 @@ specificity rises. At 0.80 eleven of the 22 empty captures start firing
 (the 09-21 night captures included, 50–156 s each); at 0.60–0.70 the same
 three or four low-floor captures carry all the empty false positives.
 
-### Final KPI #1 (2026-09-22, keep 0.65)
+### Final KPI #1 (2026-09-22, keep 0.65): empty + control captures
 
-Current defaults — 10 s window, 10 s run, 10–30 rpm, keep 0.65, 200 θ,
-S-G 1.0 s, no high-pass, peak ≥ 0.2, own floor, hold 20 — margin 5:
+The number the user asked for: the empty (22) and control-scenario (44)
+captures — captures occupied from start to end excluded — current
+defaults (keep 0.65), lead on, margin 5. Keep 0.50–0.70 was swept on this
+set with lead on and off; 0.65 ties 0.60 for the best total accuracy and
+has the best control balanced accuracy, so it stays.
+
+| keep | lead | total accuracy (66) | empty specificity | control accuracy | control recall | control specificity | control balanced |
+|---|---|---|---|---|---|---|---|
+| 0.50 | on | 85.5 % | 96.2 % | 79.9 % | 75.3 % | 83.1 % | 79.2 % |
+| 0.55 | on | 85.0 % | 96.2 % | 79.2 % | 76.1 % | 81.5 % | 78.8 % |
+| 0.60 | on | 85.7 % | 96.2 % | 80.3 % | 79.5 % | 80.9 % | 80.2 % |
+| **0.65** | **on** | **85.7 %** | 95.5 % | **80.6 %** | 83.0 % | 78.9 % | **81.0 %** |
+| 0.70 | on | 84.5 % | 94.7 % | 79.2 % | 86.8 % | 73.8 % | 80.3 % |
+| 0.65 | off | 84.8 % | 95.8 % | 79.2 % | 76.6 % | 81.0 % | 78.8 % |
+
+Pooled over all 66 at keep 0.65, lead on: recall 83.0 %, specificity
+86.7 %, balanced 84.9 %.
+
+#### The same defaults on the 78-capture set (fully occupied captures included)
+
+Same defaults, margin 5. The fully occupied captures (own floor = the
+occupant, no motion ever trips) pull this set down:
 
 | group | n | lead | accuracy | recall | specificity | balanced |
 |---|---|---|---|---|---|---|
-| **KPI set minus anomalies** | 40 | **on** | **76.8 %** | 73.2 % | 78.8 % | **76.0 %** |
+| KPI set minus anomalies | 40 | on | 76.8 % | 73.2 % | 78.8 % | 76.0 % |
 | | | off | 76.7 % | 68.5 % | 81.2 % | 74.8 % |
 | 09-17 | 6 | on | 66.6 % | 50.4 % | 94.5 % | 72.4 % |
 | | | off | 65.3 % | 47.9 % | 95.3 % | 71.6 % |
