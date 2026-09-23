@@ -460,6 +460,18 @@ given specificity 56.8 % with 114 "false positives" — the lying person.
 Every table above that includes this capture was computed with the old
 label.
 
+### Excluded from evaluation: `20260915_135620` (2026-09-23)
+
+The 13:56 "empty room" capture had people walking and talking loudly
+outside the room; the user judged it contaminated. Its sidecar now carries
+a top-level `exclude_from_eval` record (reason, set_by, time) on lg and
+locally. `backend.app._camera_truth` returns no truth for a flagged
+sidecar, so `/api/hybrid` (and every other scorer that goes through it)
+reports no confusion for the capture, the tab says "not scored — excluded
+from evaluation: …", and the corpus scripts drop it without a hand-kept
+list. Frames are left intact for viewing. Earlier tables that list 22 empty
+captures include it.
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s

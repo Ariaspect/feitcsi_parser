@@ -387,7 +387,9 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
                   {STATE_LABEL[s]} · {tally[s]}
                 </span>
               ))}
-              {!data.truth && <span>no camera sidecar beside this capture</span>}
+              {!data.truth && (data.truthExcluded
+                ? <span className="text-amber-700 dark:text-amber-400">not scored — excluded from evaluation: {data.truthExcluded}</span>
+                : <span>no camera sidecar beside this capture</span>)}
             </div>
           </div>
 

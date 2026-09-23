@@ -747,12 +747,42 @@ def phase1(
     return out
 
 
-def _camera_truth(capture: Path) -> np.ndarray | None:
-    """(time_s, present) per camera frame, relative to the capture's start."""
+def _truth_exclusion(capture: Path) -> str | None:
+    """The reason a capture's labels must not be scored, if its sidecar says so.
+
+    A sidecar may carry a top-level ``exclude_from_eval`` (a string, or an
+    object with ``reason``) when the user has judged the capture
+    contaminated -- people outside the room, a mislabelled stretch. Such a
+    capture keeps its frames for viewing but yields no truth, so every
+    scorer and the corpus scripts drop it without a hand-kept list.
+    """
     cv_path = capture.with_name(f"{capture.stem}_cv.json")
     if not cv_path.is_file():
         return None
-    frames = (json.loads(cv_path.read_text()).get("frames") or [])
+    try:
+        flag = json.loads(cv_path.read_text()).get("exclude_from_eval")
+    except (OSError, ValueError):
+        return None
+    if not flag:
+        return None
+    if isinstance(flag, dict):
+        return str(flag.get("reason") or "excluded from evaluation")
+    return str(flag) if isinstance(flag, str) else "excluded from evaluation"
+
+
+def _camera_truth(capture: Path) -> np.ndarray | None:
+    """(time_s, present) per camera frame, relative to the capture's start.
+
+    ``None`` when there is no sidecar, no frames, or the sidecar is flagged
+    ``exclude_from_eval`` (see ``_truth_exclusion``).
+    """
+    cv_path = capture.with_name(f"{capture.stem}_cv.json")
+    if not cv_path.is_file():
+        return None
+    data = json.loads(cv_path.read_text())
+    if data.get("exclude_from_eval"):
+        return None
+    frames = (data.get("frames") or [])
     if not frames:
         return None
     base = frames[0].get("epoch")
@@ -1391,6 +1421,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         "t_max": result["t_max"],
         "floor_scope": "explicit" if motion_floor is not None else "own",
         "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
         "confusion": confusion_out,
     }
 

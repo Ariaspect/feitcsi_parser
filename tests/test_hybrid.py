@@ -357,6 +357,18 @@ def test_endpoint_takes_the_farsense_knobs_and_rejects_an_empty_band(tmp_path: P
     assert prm["keep_fraction"] == 0.5 and prm["motion_frac_hi"] == 0.4 and prm["positive_only"] is False
 
 
+def test_a_sidecar_flagged_exclude_from_eval_yields_no_truth(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path)
+    cv = p.with_name("visit_cv.json")
+    data = json.loads(cv.read_text())
+    data["exclude_from_eval"] = {"reason": "people walking past outside the room", "set_by": "user"}
+    cv.write_text(json.dumps(data))
+    body = TestClient(app).get("/api/hybrid", params={"path": str(p), "t0": 0.0, "t1": 200.0}).json()
+    assert body["confusion"] is None and body["truth"] is None
+    assert body["truth_excluded"] == "people walking past outside the room"
+    assert any(body["present"])
+
+
 def test_endpoint_without_a_sidecar_returns_no_confusion(tmp_path: Path) -> None:
     p = _capture_with_a_visit(tmp_path)
     p.with_name("visit_cv.json").unlink()

@@ -1054,6 +1054,8 @@ export interface Hybrid {
   /** Where the floor came from: 'own' (this range's 20th percentile) or 'explicit'. */
   floorScope: string;
   truth: { timeS: number[]; present: boolean[] } | null;
+  /** Why the capture's labels are not scored, when its sidecar says so. */
+  truthExcluded: string | null;
   confusion: HybridConfusion | null;
 }
 
@@ -1193,6 +1195,7 @@ export async function fetchHybrid(
     captureTMax: body.t_max,
     floorScope: body.floor_scope ?? "own",
     truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded ?? null,
     confusion: c
       ? {
           tp: c.tp, fp: c.fp, fn: c.fn, tn: c.tn, total: c.total, excluded: c.excluded,
