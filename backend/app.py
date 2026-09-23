@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import farsense, hybrid, lgdetect, lgproc, truth as truthmod
+from . import farsense, hybrid, lgdetect, lgproc, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1423,6 +1423,91 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         "truth": truth_out,
         "truth_excluded": _truth_exclusion(p),
         "confusion": confusion_out,
+    }
+
+
+@app.get("/api/motion-signal")
+def motion_signal(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    window_s: float = Query(motionsig.WINDOW_SECONDS, gt=0, le=60, description="Feature window in seconds; the experiment fixed 2"),
+    hop_s: float = Query(motionsig.HOP_SECONDS, gt=0, le=30, description="Step between windows in seconds; the experiment fixed 0.5"),
+    highpass_hz: float = Query(motionsig.HIGHPASS_HZ, ge=0.01, le=5, description="High-pass before the variance, Hz; lag-1 is taken before it either way"),
+    max_gap_fraction: float = Query(motionsig.MAX_GAP_FRACTION, gt=0, le=1, description="A window more than this fraction interpolated across dropouts reports nothing"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The adopted amplitude-motion signal: RATIO, variance and lag-1, per window.
+
+    See ``backend.motionsig``. The logistic weights are fixed constants fitted
+    once over the marked corpus, not re-fitted here, and both normalisations
+    are returned side by side because the gap between them is what a
+    deployment pays.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = motionsig.compute_motion_signal(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            window_seconds=window_s,
+            hop_seconds=hop_s,
+            highpass_hz=highpass_hz,
+            max_gap_fraction=max_gap_fraction,
+            margin_s=margin_s,
+            camera=_camera_truth(p),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    modes = {}
+    for name, entry in result["modes"].items():
+        modes[name] = {
+            "variance": _nullable(entry["z"]["variance"]),
+            "lag1": _nullable(entry["z"]["lag1"]),
+            "score": _nullable(entry["score"]),
+            "present": [bool(v) for v in entry["present"]],
+            "threshold": entry["threshold"],
+            "reference": entry["reference"],
+            "coefficients": entry["coefficients"],
+            "note": entry["note"],
+            "confusion": entry.get("confusion"),
+        }
+
+    truth_out = None
+    if result["truth"] is not None:
+        truth_out = {
+            "time_s": [float(v) for v in result["truth"]["time_s"]],
+            "present": [bool(v) for v in result["truth"]["present"]],
+        }
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "variance_raw": _nullable(result["raw"]["variance"]),
+        "lag1_raw": _nullable(result["raw"]["lag1"]),
+        "gap_fraction": _nullable(result["gap_fraction"]),
+        "modes": modes,
+        "fs_hz": result["fs"],
+        "streams": result["streams"],
+        "n_samples": result["n_samples"],
+        "window_seconds": result["window_seconds"],
+        "hop_seconds": result["hop_seconds"],
+        "highpass_hz": result["highpass_hz"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "in_corpus": result["in_corpus"],
+        "margin_s": result["margin_s"],
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
     }
 
 

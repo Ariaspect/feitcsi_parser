@@ -4,6 +4,7 @@ import { TWILIGHT } from "./colormap";
 import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
+import { MotionSignal } from "./MotionSignal";
 import { LgDetector } from "./LgDetector";
 import { Phase1 } from "./Phase1";
 import { PresenceBar } from "./PresenceBar";
@@ -664,6 +665,7 @@ export function App() {
               <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
               <TabsTrigger value="farsense">FarSense</TabsTrigger>
               <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+              <TabsTrigger value="motionsig">Motion signal</TabsTrigger>
               <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
             </TabsList>
 
@@ -999,6 +1001,18 @@ export function App() {
 
             <TabsContent value="hybrid">
               <Hybrid
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </TabsContent>
+
+            <TabsContent value="motionsig">
+              <MotionSignal
                 path={path}
                 meta={meta}
                 timeLink={timeLink}
