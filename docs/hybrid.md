@@ -475,6 +475,28 @@ captures include it.
 `20260911_154719` (15:47, one of the three captures the user had called
 anomalous) was flagged the same way on 2026-09-23.
 
+### Evaluation on the user's curated log (2026-09-23)
+
+Only captures whose first column in the experiment log is blank or carries a
+heart (❤️) were scored — 48 captures (41 dropped by tag: 🤨 ☠️ ❌ ⭐ 폐기,
+and the "새벽 15개" row, which is text). Current defaults (own floor, lead
+hold on, bridge off, sparse off, keep 0.65, 10 s window), margin 5.
+
+| set | n | accuracy | F1 | recall | specificity |
+|---|---|---|---|---|---|
+| curated 48 | 48 | 79.9 % | 76.6 % | 69.1 % | 89.8 % |
+| — empty (occupancy 0) | 6 | 97.1 % | — | — | 97.1 % |
+| — visits (0 < occupancy < 98 %) | 32 | 88.4 % | 86.1 % | 89.9 % | 87.4 % |
+| — fully occupied | 10 | 43.6 % | 60.7 % | 43.6 % | — |
+| curated 48 + the 15 night empties | 63 | 84.3 % | 76.6 % | 69.1 % | 93.3 % |
+| curated without fully occupied | 38 | 89.8 % | 85.5 % | 89.9 % | 89.8 % |
+| — plus the 15 night empties | 53 | 92.5 % | 85.5 % | 89.9 % | 93.3 % |
+
+By log type: control (16) 86.4 / 86.3, empty (6) 97.1 / —, misc (3)
+91.0 / 90.9, natural (23) 69.5 / 68.8 (accuracy / F1). The six 09-21
+evening "seated, small movements" captures (blank tag, fully occupied)
+carry 1 516 of the 2 039 missed seconds.
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
