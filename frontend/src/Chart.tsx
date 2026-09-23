@@ -27,12 +27,20 @@ export interface ChartDots {
   label: string;
 }
 
+/** A shaded span behind the lines -- where a detector said present. */
+export interface ChartBand {
+  t0: number;
+  t1: number;
+}
+
 export interface ChartProps {
   times: number[];
   domain: [number, number];
   yDomain: [number, number];
   series: ChartSeries[];
   guides?: ChartGuide[];
+  bands?: ChartBand[];
+  bandColor?: string;
   dots?: ChartDots;
   height?: number;
   yLabel: string;
@@ -60,6 +68,8 @@ export function Chart({
   yDomain,
   series,
   guides = [],
+  bands = [],
+  bandColor = "#d62728",
   dots,
   height = 120,
   yLabel,
@@ -112,6 +122,21 @@ export function Chart({
             {xMode === "time" ? formatTime(v, span) : `${v}s`}
           </text>
         ))}
+        {bands.map((b, i) => {
+          const a = Math.max(0, Math.min(inner.w, x(b.t0)));
+          const c = Math.max(0, Math.min(inner.w, x(b.t1)));
+          return c > a ? (
+            <rect
+              key={`band-${i}`}
+              x={a}
+              width={Math.max(1, c - a)}
+              y={0}
+              height={inner.h}
+              fill={bandColor}
+              opacity={0.13}
+            />
+          ) : null;
+        })}
         {guides.map((g) => (
           <line
             key={g.label}

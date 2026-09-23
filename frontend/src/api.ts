@@ -1206,3 +1206,146 @@ export async function fetchHybrid(
       : null,
   };
 }
+
+// --------------------------------------------------------------------------- //
+//  Motion signal                                                              //
+// --------------------------------------------------------------------------- //
+
+/** Which scale each feature was divided by, and where zero sits.
+ *
+ *  Two normalisations, and the difference between them is what a deployment
+ *  pays: `label` centres on the camera-empty windows and cannot ship; `free`
+ *  uses the capture's own 10th/40th percentiles and can. See
+ *  `backend.motionsig` for why that pair has to be low. */
+export type MotionSignalMode = "label" | "free";
+
+export interface MotionSignalReference {
+  centre: number;
+  scale: number;
+}
+
+export interface MotionSignalModeData {
+  /** Normalised features — what the weights actually see. */
+  variance: (number | null)[];
+  lag1: (number | null)[];
+  score: (number | null)[];
+  present: boolean[];
+  threshold: number;
+  reference: Record<string, MotionSignalReference>;
+  coefficients: Record<string, number>;
+  /** Why the normalisation fell back, when it did. */
+  note: string | null;
+  confusion: HybridConfusion | null;
+}
+
+export interface MotionSignal {
+  /** Window centres, on the capture's clock. */
+  timeS: number[];
+  /** Before normalisation — the same numbers on every capture mean nothing
+   *  across captures, which is the point of the note in `backend.motionsig`. */
+  varianceRaw: (number | null)[];
+  lag1Raw: (number | null)[];
+  gapFraction: (number | null)[];
+  modes: Record<MotionSignalMode, MotionSignalModeData>;
+  fsHz: number;
+  streams: number;
+  nSamples: number;
+  windowSeconds: number;
+  hopSeconds: number;
+  highpassHz: number;
+  framesUsed: number;
+  framesWithoutRatio: number;
+  /** True when this capture is one of the 29 the weights were fitted on, so
+   *  the panel is showing training error. */
+  inCorpus: boolean;
+  marginSeconds: number;
+  truth: { timeS: number[]; present: boolean[] } | null;
+  truthExcluded: string | null;
+}
+
+export interface MotionSignalOptions {
+  windowS?: number;
+  hopS?: number;
+  highpassHz?: number;
+  maxGapFraction?: number;
+  marginS?: number;
+  mimo?: string;
+  sourceMac?: string;
+  interpolate?: boolean;
+}
+
+export async function fetchMotionSignal(
+  path: string,
+  t0: number,
+  t1: number,
+  options: MotionSignalOptions = {},
+  signal?: AbortSignal,
+): Promise<MotionSignal> {
+  const {
+    windowS = 2,
+    hopS = 0.5,
+    highpassHz = 0.3,
+    maxGapFraction = 0.5,
+    marginS = 5,
+    mimo,
+    sourceMac,
+    interpolate,
+  } = options;
+
+  const url =
+    `/api/motion-signal?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&window_s=${windowS}&hop_s=${hopS}&highpass_hz=${highpassHz}` +
+    `&max_gap_fraction=${maxGapFraction}&margin_s=${marginS}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `motion signal: ${res.status}`);
+  }
+  const body = await res.json();
+  const modes = {} as Record<MotionSignalMode, MotionSignalModeData>;
+  for (const name of ["label", "free"] as MotionSignalMode[]) {
+    const m = body.modes[name];
+    const c = m.confusion;
+    modes[name] = {
+      variance: m.variance,
+      lag1: m.lag1,
+      score: m.score,
+      present: m.present,
+      threshold: m.threshold,
+      reference: m.reference,
+      coefficients: m.coefficients,
+      note: m.note,
+      confusion: c
+        ? {
+            tp: c.tp, fp: c.fp, fn: c.fn, tn: c.tn, total: c.total,
+            excluded: c.excluded, accuracy: c.accuracy, recall: c.recall,
+            specificity: c.specificity, precision: c.precision,
+            baseRate: c.base_rate, marginSeconds: c.margin_s,
+          }
+        : null,
+    };
+  }
+  return {
+    timeS: body.time_s,
+    varianceRaw: body.variance_raw,
+    lag1Raw: body.lag1_raw,
+    gapFraction: body.gap_fraction,
+    modes,
+    fsHz: body.fs_hz,
+    streams: body.streams,
+    nSamples: body.n_samples,
+    windowSeconds: body.window_seconds,
+    hopSeconds: body.hop_seconds,
+    highpassHz: body.highpass_hz,
+    framesUsed: body.frames_used,
+    framesWithoutRatio: body.frames_without_ratio,
+    inCorpus: body.in_corpus,
+    marginSeconds: body.margin_s,
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded,
+  };
+}
