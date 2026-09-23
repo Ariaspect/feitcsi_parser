@@ -472,6 +472,9 @@ from evaluation: …", and the corpus scripts drop it without a hand-kept
 list. Frames are left intact for viewing. Earlier tables that list 22 empty
 captures include it.
 
+`20260911_154719` (15:47, one of the three captures the user had called
+anomalous) was flagged the same way on 2026-09-23.
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
