@@ -429,14 +429,15 @@ def verdict(
     sparse_window_seconds: float = SPARSE_WINDOW_SECONDS,
     motion_floor: float | None = None,
     lead_hold: bool = True,
-    bridge_bursts: str = "any",
+    bridge_bursts: str = "off",
 ) -> dict[str, Any]:
     """Bursts, breathing runs and the held state from an evidence series.
 
-    ``bridge_bursts``: ``"any"`` (default since 2026-09-22) fills the whole
-    stretch between two bursts when any single window's peak clears
-    ``breath_min_peak`` there; ``"run"`` needs a breathing *run* (the
-    persistence rule) between them; ``"off"`` leaves only the holds.
+    ``bridge_bursts``: ``"off"`` (default; ``"any"`` was the default for a
+    day and was rolled back 2026-09-23) leaves only the holds to bridge;
+    ``"run"`` fills the whole stretch between two bursts when a breathing
+    *run* (the persistence rule) lies between them; ``"any"`` does so when
+    any single window's peak clears ``breath_min_peak`` there.
 
     Presence runs ``hold_seconds`` past any evidence. With ``lead_hold`` the
     breathing evidence also holds presence for ``hold_seconds`` *before* it

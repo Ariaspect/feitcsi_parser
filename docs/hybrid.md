@@ -8,7 +8,7 @@ kinds of evidence and a hold, with no empty-room reference of any kind.
 ![pipeline](figures/hybrid_pipeline.png)
 
 *Figure: the pipeline from CSI frames to the scored verdict (own-floor
-default, 2026-09-22). Regenerate with `python docs/figures/hybrid_pipeline_fig.py`.*
+default, bridge off, 2026-09-23). Regenerate with `python docs/figures/hybrid_pipeline_fig.py`.*
 
 A human in a room cannot be quiet in both senses at once: over any half
 minute they either move — irregularly — or sit still, and a still human
@@ -288,7 +288,8 @@ stay). `any` removes all but 4 s of misses and adds 415 s of false
 positives in the control captures (the person's approach and departure
 bursts bracket empty seconds) plus 33 s in two empty captures. With
 bridging on, the leading hold only adds false positives: lead off + run
-88.7 %, lead off + any 88.9 %. Default set to `any` with lead on, 2026-09-22 (the user's choice).
+88.7 %, lead off + any 88.9 %. `any` was the default from 2026-09-22 and was rolled back to `off` on
+2026-09-23 (the user judged the fill too risky); the option stays on the tab.
 
 #### Three classification accuracies and the dataset status (2026-09-22)
 

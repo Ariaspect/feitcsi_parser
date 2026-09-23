@@ -40,7 +40,7 @@ def label(x, y, s, fs=9, **kw):
 ax.add_patch(FancyBboxPatch((1.5, 1.5), 45, H - 3, boxstyle="round,pad=0,rounding_size=1.5", fc=C_PANEL, ec="#222", lw=1.8, zorder=1))
 ax.add_patch(FancyBboxPatch((49, 1.5), W - 50.5, H - 3, boxstyle="round,pad=0,rounding_size=1.5", fc=C_PANEL, ec="#222", lw=1.8, zorder=1))
 ax.text(24, H - 5, "(a)  Hybrid presence detector", fontsize=13, fontweight="bold", ha="center", va="center")
-ax.text(52, H - 5, "(b)  Signal processing, own-floor default  (keep 0.65 · 10 s window · any + lead hold · 2026-09-22)",
+ax.text(52, H - 5, "(b)  Signal processing, own-floor default  (keep 0.65 · 10 s window · lead hold on · bridge off · 2026-09-23)",
         fontsize=13, fontweight="bold", ha="left", va="center")
 ax.text(24, H - 8.4, "one 5-min capture → present / empty every second\n→ scored against the camera",
         fontsize=8.6, ha="center", va="center", style="italic", linespacing=1.4)
@@ -48,7 +48,7 @@ ax.text(24, H - 8.4, "one 5-min capture → present / empty every second\n→ sc
 # ---------------- panel (a)
 box(4, 84, 19, 20, "CSI capture (.bin)", ["MT7921 · AP 2 Tx → 1 Rx", "245 live subcarriers", "≈20 Hz (Sept) / 42 Hz (09-21)", "5 min per capture"], fc=C_IN)
 box(26, 84, 18, 20, "Camera (1 fps)", ["YOLO person box", "occupied if conf ≥ 0.5 in ROI", "→ ground truth"], fc="#f2f2f2")
-box(4, 56, 40, 20, "Hybrid detector (own floor)", ["evidence = motion burst  OR  breathing", "hold 20 s · lead hold 20 s · bridge bursts (any)", "no empty-room reference: the floor is", "this range's own 20th percentile"], fc="#fff6d6", tfs=10.5)
+box(4, 56, 40, 20, "Hybrid detector (own floor)", ["evidence = motion burst  OR  breathing", "hold 20 s · lead hold 20 s · bridge bursts off", "no empty-room reference: the floor is", "this range's own 20th percentile"], fc="#fff6d6", tfs=10.5)
 box(4, 33, 40, 16, "Verdict per second", ["moving · breathing · held · bridged · empty · no data", "present = moving ∪ breathing ∪ held ∪ bridged"], fc=C_DEC)
 box(4, 7, 40, 19, "Scoring (truth.py)", ["1 s cells vs camera; empty cells within 5 s of a", "transition are not scored (label margin)", "tp fp fn tn → accuracy · recall · specificity · F1", "reported per capture set (empty / control / …)"], fc=C_SC)
 arrow((13.5, 84), (16, 76)); arrow((35, 84), (32, 76)); arrow((24, 56), (24, 49)); arrow((24, 33), (24, 26))
@@ -102,8 +102,8 @@ box(100, 8, 52, 38, "Holds & bridging  (verdict)",
      "trailing hold: 20 s after any evidence",
      "leading hold:  20 s before breathing (lead hold on)",
      "holds that meet from both sides → gap = bridged",
-     "bridge bursts = any:  between two bursts, if any",
-     "   single window has p ≥ 0.2 → whole stretch present",
+     "bridge bursts = off  (option: run / any fill the stretch",
+     "   between two bursts when breathing lies between)",
      "",
      "present = (evidence ∪ holds ∪ bridged) ∧ ¬unknown",
      "state ∈ {moving, breathing, held, bridged, empty, no data}"], fc=C_DEC, title_tag="M6")
@@ -126,7 +126,7 @@ label(148, 48.5, "p, rate", fs=8, color="#2f5fa8")
 
 # ---------------- footer: parameter strip
 ax.text(52, 4.2, "Defaults (own):  keep 0.65 · θ 200 · S-G 1.0 s · high-pass 0 · window 10 s · band 10–30 rpm · peak ≥ 0.2 · run 10 s / 80 % / ±3 rpm · "
-        "floor = own P20 · T = max(2F, 0.10) · burst ≥ 2 s · hold 20 s · lead hold on · bridge any · margin 5 s",
+        "floor = own P20 · T = max(2F, 0.10) · burst ≥ 2 s · hold 20 s · lead hold on · bridge off · margin 5 s",
         fontsize=8.6, ha="left", va="center", style="italic")
 import os
 fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hybrid_pipeline.png"), dpi=150, facecolor="white")

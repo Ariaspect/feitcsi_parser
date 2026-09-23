@@ -1288,7 +1288,7 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
     max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
     motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet |dr|/|r| level in place of the range's own 20th percentile"),
     lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it; a gap whose holds meet is present throughout"),
-    bridge_bursts: str = Query("any", description="'run': the whole stretch between two bursts is present when a breathing run lies between them; 'any': when any single window's peak clears breath_min_peak there; 'off': neither"),
+    bridge_bursts: str = Query("off", description="'run': the whole stretch between two bursts is present when a breathing run lies between them; 'any': when any single window's peak clears breath_min_peak there; 'off': neither"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
     source_mac: str | None = Query(None, description="Source MAC filter"),

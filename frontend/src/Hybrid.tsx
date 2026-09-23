@@ -98,7 +98,7 @@ export function Hybrid({ path, meta, timeLink, mimo, sourceMac, interpolate, dar
   const [motionAbs, setMotionAbs] = useState(0.1);
   const [useAmplitude, setUseAmplitude] = useState(false);
   const [leadHold, setLeadHold] = useState(true);
-  const [bridgeBursts, setBridgeBursts] = useState<"off" | "run" | "any">("any");
+  const [bridgeBursts, setBridgeBursts] = useState<"off" | "run" | "any">("off");
   const [breathMinPeak, setBreathMinPeak] = useState(0.2);
   const [breathPersistS, setBreathPersistS] = useState(10);
   const [breathRateTol, setBreathRateTol] = useState(3);
