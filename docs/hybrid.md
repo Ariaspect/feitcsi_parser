@@ -446,6 +446,20 @@ Against keep 0.60 (same set, lead on): KPI set 76.8 / 76.0 vs 77.0 / 75.9
 vs 75.9 / 72.0. By day, balanced, lead on: 09-09 93.0, 09-10 88.5, 09-11
 82.0, 09-14 69.3, 09-15 69.6, 09-16 76.0, 09-17 72.4, 09-21 69.9.
 
+### Label fix: `20260915_143211` (2026-09-23)
+
+The person lay on the desk and YOLO detected them only while entering
+(frames 106–112) and leaving (220–227). At the user's instruction every
+frame between the first and the last detection was set to occupied in the
+`_cv.json` sidecar (107 frames filled, `manual: true` on each, a
+`manual_override` record at the top level, the original kept as
+`_cv.json.orig`) on lg and in the local captures folder. Occupancy 5 % →
+40.8 %. Under the current defaults the capture now scores accuracy 94.1 %,
+recall 100 %, specificity 89.8 % (fp 17, tn 150) where the old label had
+given specificity 56.8 % with 114 "false positives" — the lying person.
+Every table above that includes this capture was computed with the old
+label.
+
 ## 2. What the corpus taught, in the order it was found
 
 1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
