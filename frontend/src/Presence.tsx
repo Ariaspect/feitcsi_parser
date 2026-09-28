@@ -13,11 +13,13 @@ import {
 import {
   fetchFrameDiff,
   fetchLabels,
+  fetchMotionSignal,
   fetchPresence,
   type FrameDiff,
   type FrameDiffSignal,
   type Labels,
   type Meta,
+  type MotionSignal,
   type Presence as PresenceData,
   type PresenceChannel,
   type PresenceState,
@@ -426,6 +428,14 @@ export function Presence({
   // ratio grid) and because it is evidence rather than a vote: nothing in the
   // verdict above depends on it, so it must not be able to slow the verdict
   // down or fail it.
+  // The second motion channel: the ratio's variance (magnitude, 4 s) and
+  // lag-1 autocorrelation (phase, 15 s), combined by fixed weights. Its own
+  // fetch and its own loading state, because it is a second decode and the
+  // rest of the panel should not wait on it.
+  const [showSignal, setShowSignal] = useState(true);
+  const [signal, setSignal] = useState<MotionSignal | null>(null);
+  const [signalError, setSignalError] = useState<string | null>(null);
+  const [signalLoading, setSignalLoading] = useState(false);
   const [showStep, setShowStep] = useState(true);
   // Off by default: it was measured after the panel shipped, and a measurement
   // does not get to change what the panel showed. See docs/frame_step.md.
@@ -522,6 +532,26 @@ export function Presence({
   useEffect(() => setStepWindow(null), [path, range]);
 
   useEffect(() => {
+    if (!showSignal) {
+      setSignal(null);
+      setSignalError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setSignalLoading(true);
+    fetchMotionSignal(path, range[0], range[1],
+      { mimo, sourceMac, interpolate }, controller.signal)
+      .then((result) => { setSignal(result); setSignalError(null); })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setSignal(null);
+        setSignalError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => { if (!controller.signal.aborted) setSignalLoading(false); });
+    return () => controller.abort();
+  }, [path, range, showSignal, mimo, sourceMac, interpolate]);
+
+  useEffect(() => {
     if (!showStep) {
       setStep(null);
       setStepError(null);
@@ -573,6 +603,36 @@ export function Presence({
     if (!data || data.timeS.length === 0) return range;
     return [data.timeS[0], data.timeS[data.timeS.length - 1]];
   }, [data, range]);
+
+  // Limits wide enough to hold both the score and the line it is judged
+  // against, so a capture that never reaches the threshold still shows how
+  // far short it falls rather than clipping it off the top.
+  const signalDomain = useMemo<[number, number]>(() => {
+    if (!signal) return [-1, 1];
+    let lo = signal.modes.free.threshold;
+    let hi = signal.modes.free.threshold;
+    for (const v of signal.modes.free.score) {
+      if (v === null || !Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    const pad = Math.max((hi - lo) * 0.08, 0.05);
+    return [lo - pad, hi + pad];
+  }, [signal]);
+
+  // Where the score clears its threshold, as a filled band between the axis
+  // limits -- this panel's Chart shades a value range per sample, not a span.
+  const signalBands = useMemo(() => {
+    if (!signal) return [];
+    const [lo, hi] = signalDomain;
+    return [{
+      lo: signal.modes.free.present.map((p) => (p ? lo : null)),
+      hi: signal.modes.free.present.map((p) => (p ? hi : null)),
+      color: "#d62728",
+      label: "over threshold",
+      opacity: 0.12,
+    }];
+  }, [signal, signalDomain]);
 
   const stateRuns = useMemo(
     () => (data ? runs(data.timeS, data.state) : []),
@@ -684,6 +744,15 @@ export function Presence({
         </div>
 
         <div className="flex items-center gap-2">
+          <Button
+            variant={showSignal ? "default" : "outline"}
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            title="The second motion channel: the ratio's variance (magnitude, 4 s window) and lag-1 autocorrelation (phase, 15 s window), each normalised against this capture's own quiet level and combined by fixed weights. Within-capture AUC 0.878 against 0.606 for |Δr|/|r|, and 0.96 against 0.46 on a perched occupant. Evidence only; it does not vote on the verdict above."
+            onClick={() => setShowSignal((v) => !v)}
+          >
+            var+lag1 {showSignal ? "on" : "off"}
+          </Button>
           <Button
             variant={showStep ? "default" : "outline"}
             size="sm"
@@ -922,6 +991,41 @@ export function Presence({
             ]}
             guides={[{ value: motionFracHi, color: "#d62728", label: "gross motion" }]}
           />
+
+          {showSignal && (
+            signalError !== null ? (
+              <p className="text-[11px] text-red-500">var+lag1: {signalError}</p>
+            ) : signal === null ? (
+              <p className="text-[11px] text-muted-foreground">
+                {signalLoading ? "var+lag1: extracting…" : "var+lag1: nothing to show"}
+              </p>
+            ) : (
+              <div className="space-y-1">
+                <Chart
+                  width={width}
+                  times={signal.timeS}
+                  domain={domain}
+                  yDomain={signalDomain}
+                  yLabel="motion var+lag1 (label-free score)"
+                  dark={dark}
+                  series={[
+                    { values: signal.modes.free.score, color: "#0d8a94", width: 1.4, label: "var+lag1" },
+                  ]}
+                  bands={signalBands}
+                  guides={[{ value: signal.modes.free.threshold, color: "#d62728", label: "threshold" }]}
+                />
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  The other motion channel, for comparison with |Δr|/|r| above. Variance of the ratio&apos;s{" "}
+                  <b>magnitude</b> over {signal.windows.variance} s, lag-1 autocorrelation of its{" "}
+                  <b>phase</b> over {signal.windows.lag1} s, each divided by this capture&apos;s own 5th–25th
+                  percentile spread and combined by weights fitted once over 29 captures. Shading is where it
+                  clears its threshold — <b>not</b> a verdict: no hold, no breathing, and the seconds before the
+                  first {signal.windows.lag1} s window has filled have no score at all.
+                  {signal.inCorpus && " This capture is one of the 29 the weights were fitted on."}
+                </p>
+              </div>
+            )
+          )}
 
           {showStep && (stepError !== null || step !== null) && (
             <div className="space-y-1">

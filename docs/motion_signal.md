@@ -1,69 +1,107 @@
-# The motion signal: amplitude → two features → one scalar
+# The motion signal: the CSI ratio → two features → one scalar
 
 `backend/motionsig.py`, `/api/motion-signal`, the **Motion signal** tab.
-The front end of a CSI → signal processing → ML pipeline: it reduces a
-window of CSI to one number meant for a back-end classifier, and nothing
-else. No hold, no breathing channel, no second chance.
+It reduces a window of CSI to one number: *how much is the channel moving
+right now*. No hold, no breathing channel, no second chance.
 
 Separate from [the hybrid detector](hybrid.md), which answers *is someone
-there* from motion **or** breathing. This one answers only *how much is the
-channel moving right now*, and a still occupant is a miss by construction.
-The two are complementary, not competing.
+there* from motion **or** breathing. A still occupant is a miss here by
+construction, and covering them is what the hybrid's breathing channel is
+for. As a motion **channel** this one is much the stronger of the two —
+within-capture AUC 0.878 against the hybrid's 0.606, and 0.96 against 0.46
+on a perched occupant — but as a presence **detector** on its own it tops
+out near 75 %, because half of what the hybrid knows comes from breathing.
+See *Against the hybrid's own motion channel* below.
 
 ## Pipeline
 
 ```
 CSI frames
-  └─ RATIO            |H_tx1 / H_tx0| per subcarrier, uniform grid
+  └─ RATIO            H_tx1 / H_tx0 per subcarrier, uniform grid
                       (tiles._presence_grid — the same road the presence
                        detector takes, so a change of decode cannot read
-                       as motion)
-  └─ per-stream       divide each subcarrier by its own median
+                       as motion).  COMPLEX: both halves are used.
+  └─ per-stream       magnitude: divide each subcarrier by its own median
+                      phase:     unwrap along TIME, restart at each dropout
   └─ Hampel           11 samples, 3σ; only strays are replaced
-  └─ high-pass        0.3 Hz, 4th-order Butterworth  ──► for variance only
-  └─ window           2 s, hop 0.5 s
-  └─ features         variance   of the high-passed window
-                      lag-1 ACF  of the window BEFORE the high-pass
-                      ── median over ~245 subcarriers ──
+  └─ high-pass        0.05 Hz, 4th-order Butterworth  ──► for variance only
+  └─ windows          variance: 4 s   ·   lag-1: 15 s   ·   hop 0.5 s
+                      (one grid: the longer window's centres, the shorter
+                       feature read from the window centred at the same
+                       instant)
+  └─ features         variance  of |ratio|, high-passed        ─┐
+                      lag-1 ACF of ∠ratio, BEFORE the filter    ─┤ median over
+                                                                 ─┘ ~245 subcarriers
   └─ normalise        per capture, against its own quiet level
   └─ score            fixed logistic weights, fixed threshold
 ```
 
-Lag-1 is deliberately taken before the filter. A high-pass leaves
-neighbouring noise samples anticorrelated, and lag-1 on a filtered empty
-room reads that as structure — the plan's §4.2 note, confirmed here.
+Three choices in there were each settled by a measurement that overturned
+the plan, and each is a different kind of mistake worth keeping on the page.
 
-## Why these choices
+**Lag-1 is taken before the high-pass.** A high-pass leaves neighbouring
+noise samples anticorrelated, and lag-1 on a filtered empty room reads that
+as structure. The plan's §4.2 note, confirmed here — and the sweep confirms
+the code obeys it, since lag-1 is identical digit for digit at both corner
+frequencies tried.
 
-Established by the stage-1/2 experiment (`report_motion_signal.md`),
-29 captures, capture-level splits, pre-registered predictions.
+**The two features ride different windows.** A sweep over 2/4/8/10/15 s
+found lag-1 rising monotonically with window length in every condition, most
+on the one that matters — still posture, AUC 0.624 at 2 s against 0.756 at
+15 s — while variance peaks near 4 s and falls away. A window of T seconds
+resolves nothing below 1/T, so a 2 s window cannot see a slow occupant at
+all; variance is a spread rather than a rhythm and a longer window averages
+a burst into a calm. The cumulative-sum machinery makes the second window
+nearly free.
 
-**Source.** RATIO won on AUC (0.993 against 0.983 for raw amplitude) and on
-empty-room stability (CV 0.33 against 0.78). The plan predicted `RAW-PC1`
-would be the AGC common-mode component and should be dropped; it is not —
-**no** candidate source correlated with common gain above 0.29, so nothing
-was dropped on that ground. A single PC of the ratio came within 0.02 of
-the full stream set on walking, which by the plan's own tie-break rule
-(§3.6, "within 0.02 → take the lighter one") would have won. It was not
-taken: it loses by 0.084 on *small* motion, and the stage-1 comparison was
-run on walking only, so the tie-break was deciding on the case that does
-not matter.
+**The high-pass corner was a bug.** At 0.3 Hz under a 2 s window it sat
+*below* that window's first non-DC bin (0.5 Hz): the filter was discarding a
+band the window could not have reported either way, and every slow occupant
+with it. At 0.05 Hz under a 4 s window, still posture goes 0.733 → 0.766 and
+perched breathing 0.888 → 0.942. The invariant is now a test: the corner
+must stay below 1/window.
 
-**Features.** Variance and lag-1. MAD, kurtosis, skewness, the low-band
-energy ratio, spectral entropy and mean (the control) earned nothing on
-top. Lag-1 is the one that carries small motion: on the seated-with-phone
-captures it reaches AUC 0.841 against variance's 0.644, because it is scale
-free — a random walk and white noise at the *same* variance sit at opposite
-ends of it.
+## Which half of the ratio
 
-**Normalisation.** Per capture, always. This began as a methodology error:
-pooling every capture's empty windows into one negative class was measuring
-the **link**, not the room. Empty-room variance spans **36×** across the
-corpus's sample rates (0.008423 at 42 Hz, 0.0002324 at 43 Hz), and when the
-pooling was removed the condition ranking inverted — seated-with-phone
-0.575 → 0.860, still-posture 0.868 → 0.527. One capture went from AUC 0.889
-to 0.000. Nothing in this pipeline is comparable across captures before its
-own capture's scale has divided it.
+The ratio is a complex number and most of this work used only its magnitude.
+Phase is the sensitive half — 2.87 cm of path change is a full 2π at
+5.24 GHz, so a chest moving millimetres turns it while leaving the magnitude
+flat.
+
+| feature | source | why |
+|---|---|---|
+| variance | **magnitude** | phase variance is noise-dominated when nobody moves (still-posture AUC 0.595 against 0.766); its fitted weight came out at zero |
+| lag-1 | **phase** | held out, it wins — see below |
+
+The lag-1 move is a **swap, not an addition**. Magnitude lag-1 and phase
+lag-1 are two views of one thing: fitted together the weight splits between
+them (+0.156 / +0.255) and the held-out result is worse than the swap alone.
+
+### Why the held-out comparison was necessary
+
+In-corpus, magnitude won: 88.8 % against 87.9 % median balanced accuracy.
+Held out over 200 capture-level stratified splits — weights *and* threshold
+fitted on the train half only, paired on the same splits — phase won:
+
+| | in-corpus | held out | overfit |
+|---|---|---|---|
+| lag-1 on magnitude | 88.8 % | 79.4 % | −9.4 |
+| lag-1 on phase | 87.9 % | 81.3 % | −6.6 |
+
+| paired, label-free | Δ | phase wins |
+|---|---|---|
+| balanced accuracy | +1.90 | 75.0 % of splits |
+| accuracy | +3.52 | 84.5 % of splits |
+
+**The ranking of two feature sets can invert when both are scored on the
+captures they were fitted to**, and the amount of inversion is the
+difference in how much each overfits. Splits are stratified by condition
+because condition dominates performance far more than feature choice does:
+an unstratified half can put four of the six still captures on one side and
+settle the comparison by luck. They are split at the capture level, never
+the window level — a 15 s window at 0.5 s hop shares 97 % of its samples
+with its neighbour, so a window split puts near-copies of one moment on both
+sides and every feature set scores near-perfectly.
 
 ## The two normalisations
 
@@ -72,13 +110,27 @@ The tab draws both, because the gap between them is what a deployment pays.
 | | centre | scale | deployable |
 |---|---|---|---|
 | `label` | median of the camera-empty windows | their σ | **no** |
-| `free` | this capture's 10th percentile | p40 − p10 | yes |
+| `free` | this capture's 5th percentile | p25 − p5 | yes |
 
-The percentile pair has to sit **low**. At 20/80 the occupant of a capture
-40 % occupied is inside the upper percentile and scales their own signal
-away: walking recall fell from 100 % to 25.8 % that way — the same
-self-defeat the hybrid's motion floor has on a range that is mostly motion.
-At 10/40 the gap between the two normalisations nearly closes.
+The percentile pair has to sit **low**, and it has come down twice. At 20/80
+the occupant of a capture 40 % occupied is inside the upper percentile and
+scales their own signal away: walking recall fell from 100 % to 25.8 % that
+way — the same self-defeat the hybrid's motion floor has on a range that is
+mostly motion. 10/40 fixed that at a 2 s window. At 15 s it had to come down
+again for a second reason: neighbouring windows share 97 % of their samples
+and every transition smears 7.5 s either side, so the middle of the
+distribution now holds transition windows that used to be a thin tail.
+
+| pair | median balanced accuracy |
+|---|---|
+| 10/40 | 69.7 % |
+| 5/30 | 87.7 % |
+| **5/25** | **88.8 %** |
+| 5/20 | 87.7 % |
+| 10/30 | 78.3 % |
+
+The pair was chosen on the same corpus the weights are fitted to, so treat
+88.8 % as the in-corpus figure it is; the held-out number is 79–81 %.
 
 ## Weights
 
@@ -89,11 +141,11 @@ panel that fits on the capture it is displaying is reporting its own
 training error, and the tab says so when the capture is one of the 29.
 
 ```
-label   variance +0.135084   lag1 +0.629663   intercept -0.578889   threshold +0.321564
-free    variance +0.003270   lag1 +0.630147   intercept -1.059958   threshold +0.439962
+label   variance +0.142381   lag1 +0.746296   intercept -0.882194   threshold +0.224398
+free    variance +0.008124   lag1 +0.372754   intercept -1.181105   threshold +0.206971
 ```
 
-Note the ratio: lag-1 carries 4.7× the variance weight label-based and 190×
+Note the ratio: lag-1 carries 5.2× the variance weight label-based and 46×
 label-free. **The linear model is very nearly lag-1 alone.** Variance
 survives as a tie-break.
 
