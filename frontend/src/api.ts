@@ -1250,6 +1250,9 @@ export interface MotionSignal {
   fsHz: number;
   streams: number;
   nSamples: number;
+  /** Each feature's own window length, seconds — they differ on purpose. */
+  windows: Record<string, number>;
+  /** The longest of them: what a labelled cell has to span. */
   windowSeconds: number;
   hopSeconds: number;
   highpassHz: number;
@@ -1264,7 +1267,8 @@ export interface MotionSignal {
 }
 
 export interface MotionSignalOptions {
-  windowS?: number;
+  varianceWindowS?: number;
+  lag1WindowS?: number;
   hopS?: number;
   highpassHz?: number;
   maxGapFraction?: number;
@@ -1282,9 +1286,10 @@ export async function fetchMotionSignal(
   signal?: AbortSignal,
 ): Promise<MotionSignal> {
   const {
-    windowS = 2,
+    varianceWindowS = 4,
+    lag1WindowS = 15,
     hopS = 0.5,
-    highpassHz = 0.3,
+    highpassHz = 0.05,
     maxGapFraction = 0.5,
     marginS = 5,
     mimo,
@@ -1295,7 +1300,8 @@ export async function fetchMotionSignal(
   const url =
     `/api/motion-signal?path=${encodeURIComponent(path)}` +
     `&t0=${t0}&t1=${t1}` +
-    `&window_s=${windowS}&hop_s=${hopS}&highpass_hz=${highpassHz}` +
+    `&variance_window_s=${varianceWindowS}&lag1_window_s=${lag1WindowS}` +
+    `&hop_s=${hopS}&highpass_hz=${highpassHz}` +
     `&max_gap_fraction=${maxGapFraction}&margin_s=${marginS}` +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
@@ -1338,6 +1344,7 @@ export async function fetchMotionSignal(
     fsHz: body.fs_hz,
     streams: body.streams,
     nSamples: body.n_samples,
+    windows: body.windows,
     windowSeconds: body.window_seconds,
     hopSeconds: body.hop_seconds,
     highpassHz: body.highpass_hz,
