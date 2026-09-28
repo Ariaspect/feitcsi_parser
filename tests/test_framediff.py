@@ -452,7 +452,8 @@ def test_the_summary_reports_the_range_in_both_units(tmp_path: Path) -> None:
     # band and the dead bins never carry a step.
     assert 0 < s["live_median"] <= out["n_subcarriers"]
     assert 0.0 < s["median"] < s["max"] < 1.0
-    assert s["median_db"] == pytest.approx(float(framediff.unit_to_db(s["median"])))
+    assert s["native_unit"] == "dB"
+    assert s["median_native"] == pytest.approx(float(framediff.unit_to_db(s["median"])))
 
 
 # --------------------------------------------------------------------------- #
@@ -529,6 +530,109 @@ def test_the_endpoint_reports_the_frame_set_it_used(tmp_path: Path) -> None:
     assert body["mimo"] == [2, 1]
     assert body["frames_dropped"] == 100
     assert "full width" in body["selection_note"]
+
+
+# --------------------------------------------------------------------------- #
+#  The complex channel                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_pure_rotation_is_invisible_to_the_radial_part_and_read_by_the_total() -> None:
+    """The case backend.motion argues about, as arithmetic.
+
+    A body at fixed range walks the ratio round a circle: the magnitude never
+    changes, so an amplitude-only difference sees nothing at all, and the
+    complex one reads the angle exactly.
+    """
+    for theta in (0.05, 0.3, 1.0, 2.5):
+        r = np.array([[1 + 0j], [np.exp(1j * theta)]])
+        radial, total = framediff.relative_step_complex(r)
+        assert abs(float(radial[0, 0])) < 1e-12
+        assert float(total[0, 0]) == pytest.approx(np.sin(theta / 2), abs=1e-12)
+        assert float(framediff.unit_to_radians(total[0, 0])) == pytest.approx(theta)
+
+
+def test_without_rotation_the_complex_step_is_the_amplitude_step() -> None:
+    """The complex channel GENERALISES the amplitude one rather than replacing
+    it: with the phase held still the two agree to floating point."""
+    rng = np.random.default_rng(4)
+    a = rng.uniform(0.1, 10.0, (50, 8))
+    radial, total = framediff.relative_step_complex(a.astype(complex))
+    from_db = framediff.relative_step(20.0 * np.log10(a))
+    assert np.allclose(radial, from_db, atol=1e-12)
+    assert np.allclose(total, np.abs(from_db), atol=1e-12)
+
+
+def test_the_total_step_is_bounded_and_never_below_the_radial() -> None:
+    """|r - r'| <= |r| + |r'| is the triangle inequality, and the gap between
+    the two traces is exactly the rotation the panel says it is."""
+    rng = np.random.default_rng(6)
+    r = (rng.standard_normal((200, 12)) + 1j * rng.standard_normal((200, 12)))
+    radial, total = framediff.relative_step_complex(r)
+    ok = np.isfinite(total)
+    assert (total[ok] >= -1e-12).all() and (total[ok] <= 1 + 1e-12).all()
+    assert (total[ok] + 1e-12 >= np.abs(radial[ok])).all()
+
+
+def test_two_dead_frames_are_no_step_rather_than_a_zero_one() -> None:
+    """A subcarrier that is zero in both frames has no step. One that goes to
+    zero has the largest step there is, and must keep it."""
+    r = np.zeros((3, 6), dtype=complex)
+    r[0] = 1 + 0j
+    radial, total = framediff.relative_step_complex(r)
+    assert np.allclose(radial[0], -1.0) and np.allclose(total[0], 1.0)
+    assert np.isnan(radial[1]).all() and np.isnan(total[1]).all()
+
+
+def test_the_complex_input_is_not_cast_through_its_real_part(tmp_path: Path) -> None:
+    """A float cast would silently leave this reading Re(r), which is neither
+    the magnitude nor the rotation."""
+    r = np.tile(np.array([[1 + 0j], [1j]]), (1, 6))   # pure 90 deg rotation
+    out = framediff.frame_steps(r, np.array([0.0, 0.05]), complex_input=True)
+    assert float(out["magnitude"][0]) == pytest.approx(np.sin(np.pi / 4))
+    assert abs(float(out["signed"][0])) < 1e-12
+
+
+def test_each_signal_is_served_and_cached_apart(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path, n=400)
+    framediff.reset_cache()
+    seen = {}
+    for sig in framediff.SIGNALS:
+        out = framediff.capture_steps(p, 0.0, 200.0, signal=sig)
+        assert out["signal"] == sig
+        seen[sig] = out
+    assert len({id(v) for v in seen.values()}) == 3
+    assert framediff.capture_steps(p, 0.0, 200.0, signal="ratio_amp") is seen["ratio_amp"]
+
+
+def test_an_unknown_signal_is_refused(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path, n=400)
+    with pytest.raises(ValueError, match="signal must be one of"):
+        framediff.capture_steps(p, 0.0, 200.0, signal="phase")
+
+
+def test_the_complex_channel_reports_degrees_not_dB(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path, n=400)
+    amp = framediff.compute_frame_diff(p, 0.0, 200.0, signal="amplitude")
+    cplx = framediff.compute_frame_diff(p, 0.0, 200.0, signal="ratio_complex")
+    assert amp["summary"]["native_unit"] == "dB"
+    assert cplx["summary"]["native_unit"] == "\u00b0"
+    assert cplx["summary"]["max_native"] == pytest.approx(
+        float(np.degrees(framediff.unit_to_radians(cplx["summary"]["max"])))
+    )
+
+
+def test_the_endpoint_serves_every_signal(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path, n=400)
+    client = TestClient(app)
+    for sig in framediff.SIGNALS:
+        res = client.get("/api/frame-diff", params={
+            "path": str(p), "t0": 0.0, "t1": 200.0, "signal": sig})
+        assert res.status_code == 200, res.text
+        assert res.json()["signal"] == sig
+    bad = client.get("/api/frame-diff", params={
+        "path": str(p), "t0": 0.0, "t1": 200.0, "signal": "nope"})
+    assert bad.status_code == 400
 
 
 # --------------------------------------------------------------------------- #

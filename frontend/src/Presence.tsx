@@ -15,6 +15,7 @@ import {
   fetchLabels,
   fetchPresence,
   type FrameDiff,
+  type FrameDiffSignal,
   type Labels,
   type Meta,
   type Presence as PresenceData,
@@ -50,6 +51,14 @@ const MIN_STEP_SPAN_SECONDS = 0.5;
 // moving. Long enough that one drag is one or two requests rather than one per
 // pointer move, short enough to feel like the panel is keeping up.
 const STEP_FETCH_DEBOUNCE_MS = 180;
+
+/** The symmetric y extent a frame-step response wants, from its envelopes. */
+function ceilingOf(step: FrameDiff): number {
+  const finite = [...step.signedLo, ...step.signedHi, ...step.magnitudeHi].filter(
+    (v): v is number => v !== null && Number.isFinite(v),
+  );
+  return Math.min(1, Math.max(0.02, ...finite.map((v) => Math.abs(v) * 1.2)));
+}
 
 const STATE_LABEL: Record<PresenceState, string> = {
   present: "still occupant",
@@ -421,6 +430,12 @@ export function Presence({
   // Off by default: it was measured after the panel shipped, and a measurement
   // does not get to change what the panel showed. See docs/frame_step.md.
   const [gateGain, setGateGain] = useState(false);
+  const [stepSignal, setStepSignal] = useState<FrameDiffSignal>("amplitude");
+  // The y scale, fixed at the panel range's own extent so zooming magnifies
+  // the trace in time and NOT in level. Recomputed only from an unzoomed
+  // fetch, which is a true upper bound on every zoom inside it: a column's
+  // envelope carries the per-frame extremes, so no sub-range can exceed it.
+  const [stepScale, setStepScale] = useState(0.05);
   // The frame step's own view. `null` follows the panel, so the trace sits on
   // the shared time axis with the charts above it until the reader zooms; a
   // zoom then REFETCHES over the narrower window, because decimation happens
@@ -537,6 +552,7 @@ export function Presence({
         .then((result) => {
           setStep(result);
           setStepError(null);
+          if (!stepWindow) setStepScale(ceilingOf(result));
         })
         .catch((err: unknown) => {
           if (controller.signal.aborted) return;
@@ -549,8 +565,8 @@ export function Presence({
       controller.abort();
     };
   }, [
-    path, range, stepWindow, showStep, gateGain, width, mimo, sourceMac,
-    interpolate,
+    path, range, stepWindow, showStep, stepSignal, gateGain, width, mimo,
+    sourceMac, interpolate,
   ]);
 
   const domain = useMemo<[number, number]>(() => {
@@ -587,20 +603,6 @@ export function Presence({
     // the trace can be read against the line that classifies it.
     return Math.max(motionFracHi * 1.3, ...finite.map((v) => v * 1.2), 0.05);
   }, [data, motionFracHi]);
-
-  // The axis is bounded at +-1 by construction, and on a real link nothing
-  // comes close: measured over 21 captures the loudest *median* step was 0.675
-  // and an empty room's median sits at 0.005-0.077, so a fixed +-1 axis draws
-  // every trace as a flat line on zero. So the view is a symmetric zoom on the
-  // data, in the same shape as devCeiling/motionCeiling above, and the caption
-  // says where the bound and the board's line actually sit.
-  const stepCeiling = useMemo(() => {
-    if (!step) return 0.05;
-    const finite = [...step.signedLo, ...step.signedHi, ...step.magnitudeHi].filter(
-      (v): v is number => v !== null && Number.isFinite(v),
-    );
-    return Math.min(1, Math.max(0.02, ...finite.map((v) => Math.abs(v) * 1.2)));
-  }, [step]);
 
   const stripHeight = 26;
   const innerWidth = Math.max(1, width - MARGIN.left - MARGIN.right);
@@ -693,6 +695,19 @@ export function Presence({
           </Button>
           {showStep && (
             <>
+              <Select
+                value={stepSignal}
+                onValueChange={(v) => setStepSignal(v as FrameDiffSignal)}
+              >
+                <SelectTrigger className="w-36 h-7 text-[11px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="amplitude">raw amplitude</SelectItem>
+                  <SelectItem value="ratio_amp">ratio |r|</SelectItem>
+                  <SelectItem value="ratio_complex">ratio complex</SelectItem>
+                </SelectContent>
+              </Select>
               <Button
                 variant={gateGain ? "default" : "outline"}
                 size="sm"
@@ -927,7 +942,7 @@ export function Presence({
                     limit={range}
                     onWindow={setStepWindow}
                     minSpan={MIN_STEP_SPAN_SECONDS}
-                    yDomain={[-stepCeiling, stepCeiling]}
+                    yDomain={[-stepScale, stepScale]}
                     yLabel="frame step (a−a′)/(a+a′)"
                     dark={dark}
                     height={150}
@@ -969,9 +984,13 @@ export function Presence({
                       |step| median{step.decimated && " (dashed: column peak)"}
                     </span>
                     <span>
-                      axis ±{stepCeiling.toFixed(3)} of a bounded ±1 scale
+                      axis ±{stepScale.toFixed(3)} of a bounded ±1 scale, fixed
+                      across zoom
                       {step.summary.max !== null && (
-                        <> · peak {(step.summary.maxDb ?? 0).toFixed(1)} dB</>
+                        <>
+                          {" "}· peak {(step.summary.maxNative ?? 0).toFixed(1)}
+                          {step.summary.nativeUnit}
+                        </>
                       )}
                     </span>
                     <span>
@@ -1005,9 +1024,11 @@ export function Presence({
                     {step.summary.median !== null && (
                       <>
                         {" "}· median {step.summary.median.toFixed(4)} (
-                        {(step.summary.medianDb ?? 0).toFixed(2)} dB), peak{" "}
+                        {(step.summary.medianNative ?? 0).toFixed(2)}
+                        {step.summary.nativeUnit}), peak{" "}
                         {(step.summary.max ?? 0).toFixed(3)} (
-                        {(step.summary.maxDb ?? 0).toFixed(1)} dB)
+                        {(step.summary.maxNative ?? 0).toFixed(1)}
+                        {step.summary.nativeUnit})
                       </>
                     )}
                   </p>
@@ -1020,26 +1041,60 @@ export function Presence({
             <dl className="text-[11px] text-muted-foreground leading-relaxed grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
               <dt className="font-medium text-foreground">Fold</dt>
               <dd>
-                One <b>d</b> per subcarrier per frame pair,{" "}
-                <b>(a<sub>t</sub> − a<sub>t−1</sub>)/(a<sub>t</sub> + a<sub>t−1</sub>)</b>,
-                then the <b>median</b> across the{" "}
-                {step.summary.liveMedian} live ones (of {step.nSubcarriers}) —
-                twice. <span style={{ color: "#2f7c5c" }}>Signed</span> keeps the
-                direction and so can cancel: a body brightens some subcarriers
-                and fades others, which reads near zero with a wide envelope.{" "}
-                <span style={{ color: "#a34a8f" }}>|step|</span> folds the
-                magnitudes and cannot. Median, not mean — two subcarriers moving
-                40 dB leave it at zero, which is the point. Bins that are dead or
-                in the guard band are dropped first — that is the{" "}
-                {step.nSubcarriers} − {step.summary.liveMedian} missing above —
-                and a pair with fewer than 4 live ones reports nothing rather
-                than a median of two.
+                {step.signal === "ratio_complex" ? (
+                  <>
+                    One step per subcarrier per frame pair on the{" "}
+                    <b>complex ratio</b>, then the <b>median</b> across the{" "}
+                    {step.summary.liveMedian} live ones (of {step.nSubcarriers}).
+                    A complex difference has a direction, not a sign, so the two
+                    traces are its decomposition:{" "}
+                    <span style={{ color: "#2f7c5c" }}>signed</span> is the
+                    radial part <b>(|r|−|r′|)/(|r|+|r′|)</b>, exactly what the
+                    ratio |r| channel shows, and{" "}
+                    <span style={{ color: "#a34a8f" }}>|step|</span> is the total{" "}
+                    <b>|r−r′|/(|r|+|r′|)</b>. The total is never below the
+                    radial, so <b>the gap between the traces is the phase
+                    rotation</b> — a body at fixed range walks the ratio round a
+                    circle at constant magnitude, which the radial part alone
+                    cannot see. At constant magnitude the total reads back as an
+                    angle, {step.summary.nativeUnit} above.
+                  </>
+                ) : (
+                  <>
+                    One <b>d</b> per subcarrier per frame pair,{" "}
+                    <b>(a<sub>t</sub> − a<sub>t−1</sub>)/(a<sub>t</sub> + a<sub>t−1</sub>)</b>{" "}
+                    on {step.signal === "ratio_amp" ? "the ratio's" : "the raw"}{" "}
+                    amplitude, then the <b>median</b> across the{" "}
+                    {step.summary.liveMedian} live ones (of {step.nSubcarriers}) —
+                    twice. <span style={{ color: "#2f7c5c" }}>Signed</span> keeps
+                    the direction and so can cancel: a body brightens some
+                    subcarriers and fades others, which reads near zero with a
+                    wide envelope. <span style={{ color: "#a34a8f" }}>|step|</span>{" "}
+                    folds the magnitudes and cannot.
+                  </>
+                )}{" "}
+                Median, not mean — two subcarriers moving 40 dB leave it at zero,
+                which is the point. Bins that are dead or in the guard band are
+                dropped first — that is the {step.nSubcarriers} −{" "}
+                {step.summary.liveMedian} missing above — and a pair with fewer
+                than 4 live ones reports nothing rather than a median of two.
               </dd>
 
               <dt className="font-medium text-foreground">AGC correction</dt>
               <dd>
-                <b>Off</b> — raw amplitude, matching the board and the Hybrid
-                tab. Measured over 21 captures, applying the per-gain-state
+                <b>Off</b> — matching the board and the Hybrid tab.{" "}
+                {step.signal !== "amplitude" && (
+                  <>
+                    On this signal a gain step mostly cannot reach it — the
+                    common gain divides out of the ratio — and measured, a
+                    crossing reads 1.02× the same-state level on empty and
+                    still captures against 4.4–5.4× on the raw amplitude. Not
+                    always: on a walking capture the ratio still reads 3.4× at a
+                    crossing, because there the gain is changing <i>because</i>{" "}
+                    the person is moving.{" "}
+                  </>
+                )}
+                Measured over 21 captures on the raw amplitude, applying the per-gain-state
                 correction leaves the median within 2 % and raises the 99th
                 percentile by <b>12–125 %</b>: it is a per-frame, shape-only
                 correction, so differencing two differently-corrected frames

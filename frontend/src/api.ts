@@ -1364,7 +1364,11 @@ export async function fetchMotionSignal(
 /** One column of the decimated per-step series. Columns are equal in time, and
  *  each carries a median and the extremes it spans — see `bandPath` for why the
  *  extremes are what gets drawn. */
+export type FrameDiffSignal = "amplitude" | "ratio_amp" | "ratio_complex";
+
 export interface FrameDiff {
+  /** Which series was differenced. */
+  signal: FrameDiffSignal;
   /** Column centres, on the capture's clock. */
   timeS: number[];
   /** Median of the signed fold: + the array brightening, − fading. */
@@ -1411,12 +1415,16 @@ export interface FrameDiff {
     median: number | null;
     p99: number | null;
     max: number | null;
-    medianDb: number | null;
-    maxDb: number | null;
+    /** The step in the units it was measured in: dB for the amplitude signals,
+     *  degrees of rotation for the complex one, where a step IS an angle. */
+    nativeUnit: string;
+    medianNative: number | null;
+    maxNative: number | null;
   };
 }
 
 export interface FrameDiffOptions {
+  signal?: FrameDiffSignal;
   /** Blank the frame pairs that cross a gain state. Off by default. */
   gateGain?: boolean;
   maxPoints?: number;
@@ -1433,13 +1441,14 @@ export async function fetchFrameDiff(
   signal?: AbortSignal,
 ): Promise<FrameDiff> {
   const {
-    gateGain = false, maxPoints = 2000, mimo, sourceMac, interpolate,
+    signal: series = "amplitude", gateGain = false, maxPoints = 2000,
+    mimo, sourceMac, interpolate,
   } = options;
 
   const url =
     `/api/frame-diff?path=${encodeURIComponent(path)}` +
     `&t0=${t0}&t1=${t1}` +
-    `&max_points=${maxPoints}` +
+    `&max_points=${maxPoints}&signal=${series}` +
     (gateGain ? "&gate_gain=true" : "") +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
@@ -1467,6 +1476,7 @@ export async function fetchFrameDiff(
     sourceMac: body.source_mac,
     mimo: body.mimo,
     selectionNote: body.selection_note,
+    signal: body.signal,
     nSubcarriers: body.n_subcarriers,
     captureTMin: body.capture_t_min,
     captureTMax: body.capture_t_max,
@@ -1481,8 +1491,9 @@ export async function fetchFrameDiff(
       median: s.median,
       p99: s.p99,
       max: s.max,
-      medianDb: s.median_db,
-      maxDb: s.max_db,
+      nativeUnit: s.native_unit,
+      medianNative: s.median_native,
+      maxNative: s.max_native,
     },
   };
 }

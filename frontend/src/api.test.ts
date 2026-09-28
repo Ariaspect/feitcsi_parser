@@ -360,7 +360,7 @@ describe("fetchFrameDiff", () => {
       n_bridged: 9, n_gain_crossed: 2628,
       gain_gated: false, gap_limit: 0.12,
       median: 0.04, p99: 0.4, max: 0.7,
-      median_db: 0.7, max_db: 15.1,
+      native_unit: "dB", median_native: 0.7, max_native: 15.1,
     },
   };
 
@@ -381,7 +381,8 @@ describe("fetchFrameDiff", () => {
     expect(out.mimo).toEqual([2, 1]);
     expect(out.framesDropped).toBe(314);
     expect(out.selectionNote).toContain("full width");
-    expect(out.summary.maxDb).toBe(15.1);
+    expect(out.summary.maxNative).toBe(15.1);
+    expect(out.summary.nativeUnit).toBe("dB");
   });
 
   it("sends the column budget and the gate only when asked", async () => {

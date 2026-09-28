@@ -1519,6 +1519,7 @@ def frame_diff(
     path: str = Query(..., description="Path to capture file"),
     t0: float = Query(..., description="Start of requested time window (seconds)"),
     t1: float = Query(..., description="End of requested time window (seconds)"),
+    signal: str = Query(framediff.DEFAULT_SIGNAL, description="Which series to difference: 'amplitude' (raw |H| of tpi slot 0, what the board reads), 'ratio_amp' (|H_tx1/H_tx0| in dB, AGC-immune), or 'ratio_complex' (the ratio kept complex, which alone sees a body rotating it at constant magnitude)"),
     gate_gain: bool = Query(False, description="Blank the frame pairs that cross a reported gain state, the way a pair spanning a dropout is blanked. Costs 12-52% of the steps and halves the tail; does not change the empty/occupied separation or the 15.5x spread of the empty level across captures. Off by default"),
     max_points: int = Query(framediff.DEFAULT_MAX_POINTS, ge=16, le=20000, description="Columns returned; the per-step series is reduced to this many with a median and its envelope, never averaged"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
@@ -1560,6 +1561,7 @@ def frame_diff(
             mimo=mimo_filter,
             source_mac=mac_filter,
             interpolate=interpolate,
+            signal=signal,
             gate_gain=gate_gain,
             max_points=max_points,
         )
@@ -1582,6 +1584,7 @@ def frame_diff(
         "source_mac": result["source_mac"],
         "mimo": result["mimo"],
         "selection_note": result["selection_note"],
+        "signal": result["signal"],
         "n_subcarriers": result["n_subcarriers"],
         "capture_t_min": result["t_min"],
         "capture_t_max": result["t_max"],

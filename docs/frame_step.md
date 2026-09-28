@@ -78,6 +78,68 @@ is the `tanh` of the median fold in dB — this panel's `|step|` trace **is**
 series. `tests/test_framediff.py` asserts both identities, the second by
 running the two modules over one capture and comparing step for step.
 
+## Three signals
+
+`signal=` picks what gets differenced. The arithmetic is the same in each case;
+only the series changes.
+
+| signal | series | reads back as |
+|---|---|---|
+| `amplitude` (default) | raw \|H\| of tpi slot 0 — what the board differences | dB |
+| `ratio_amp` | \|H_tx1/H_tx0\| in dB — the grid every other detector on the tab rides | dB |
+| `ratio_complex` | the same ratio kept complex | degrees of rotation |
+
+The complex channel is the interesting one, and it **generalises** rather than
+replaces the others. A complex difference has a direction rather than a sign, so
+it decomposes into exactly the two traces the chart already draws:
+
+```
+signed  = (|r| − |r′|) / (|r| + |r′|)     the radial part — what ratio_amp shows
+|step|  =  |r − r′|    / (|r| + |r′|)     the total, bounded by the triangle inequality
+```
+
+`|step| ≥ |signed|` always, so **the gap between the traces is the phase
+rotation**. With the phase held still the two coincide and equal the amplitude
+form to floating point; for a pure rotation by θ at constant magnitude the chord
+over the sum gives `|step| = sin(θ/2)`, so a step reads back as an angle. That is
+the case [`backend/motion.py`](../backend/motion.py) exists to argue about: a body
+at fixed range walks the ratio round a circle, the magnitude never moves, and an
+amplitude-only difference is blind to it.
+
+### Measured, occupied / empty within each capture
+
+| group | `amplitude` | `ratio_amp` | `ratio_complex` |
+|---|---|---|---|
+| walking (2) | 3.87× | 4.36× | **4.55×** |
+| phone / standing (3) | 0.73× | 1.03× | 1.03× |
+| still sitter (2) | 0.89× | 0.99× | 1.00× |
+
+The ratio channels are better, and the win is not mainly the extra separation on
+walking — it is that they stop being **inverted**. On raw amplitude, phone and
+still-sitter captures read *quieter* occupied than empty (0.73×, 0.89×), which is
+worse than useless; on the ratio they sit at 1.0. Neither still case separates on
+any signal, which is the approach's floor, not a tuning problem.
+
+`ratio_complex` beats `ratio_amp` by very little (4.55× against 4.36× on
+walking). Per frame at ~42 Hz the rotation a small movement produces is close to
+the ratio phase's own frame-to-frame noise, so the extra half of the signal is
+mostly not paying yet.
+
+### AGC immunity, measured rather than assumed
+
+Median `|d|` at a gain crossing over the same-state level:
+
+| capture | `amplitude` | `ratio_amp` | `ratio_complex` |
+|---|---|---|---|
+| 20260921_030003 (night, empty) | 4.41× | **1.02×** | **1.02×** |
+| 20260916_143259 (still sitter) | 5.39× | **1.02×** | **0.99×** |
+| 20260921_121406 (walking) | 4.45× | 3.44× | 3.76× |
+
+The common gain divides out of the ratio, and on the empty and still captures a
+crossing is indistinguishable from any other pair. The walking capture is the
+exception and probably not a leak: there the gain is changing *because* the
+person is moving, so the crossings really do sit on louder moments.
+
 ## What is drawn
 
 | series | what it is |

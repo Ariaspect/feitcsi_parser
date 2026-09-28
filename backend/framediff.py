@@ -109,6 +109,28 @@ DB_TO_UNIT = math.log(10.0) / 40.0
 # 25 000 steps, which no plot has pixels for.
 DEFAULT_MAX_POINTS = 2000
 
+# Which series the step is taken on.
+#
+# ``amplitude``      raw |H| of tpi slot 0, what the board differences. Sees
+#                    shadowing; sees the receiver's gain control too.
+# ``ratio_amp``      |H_tx1 / H_tx0| in dB. The common gain divides out, so the
+#                    AGC cannot reach it, and it is the grid every other
+#                    detector on the tab rides (tiles._presence_grid).
+# ``ratio_complex``  the same ratio kept complex. Strictly more than
+#                    ``ratio_amp``: identical when the phase does not move, and
+#                    the only form that sees a body at fixed range walking the
+#                    ratio around a circle at constant magnitude -- the case
+#                    ``backend.motion`` exists to argue about.
+SIGNALS = ("amplitude", "ratio_amp", "ratio_complex")
+DEFAULT_SIGNAL = "amplitude"
+
+# The metric pair each signal decodes from, via tiles._decode_for_doppler.
+_SIGNAL_METRICS = {
+    "amplitude": ("amplitude",),
+    "ratio_amp": ("csi_ratio_amplitude",),
+    "ratio_complex": ("csi_ratio_amplitude", "csi_ratio_phase"),
+}
+
 # Subcarriers a step needs before its fold is reported. One live subcarrier is
 # a median of one.
 MIN_LIVE_SUBCARRIERS = 4
@@ -145,12 +167,20 @@ def unit_to_db(d: np.ndarray | float) -> np.ndarray | float:
         return np.arctanh(np.clip(d, -1.0, 1.0)) / DB_TO_UNIT
 
 
+def unit_to_radians(d: np.ndarray | float) -> np.ndarray | float:
+    """Read a complex step back as the rotation it would take at constant
+    magnitude. ``total = sin(theta/2)``, so ``theta = 2*arcsin(total)``."""
+    d = np.asarray(d, dtype=float)
+    return 2.0 * np.arcsin(np.clip(d, -1.0, 1.0))
+
+
 def relative_step(amp_db: np.ndarray) -> np.ndarray:
     """Per-subcarrier signed step in ``(-1, 1)``, one row per frame pair.
 
-    *amp_db* is ``(n_frames, n_subcarriers)`` of raw amplitude in dB, as
-    ``tiles._decode_for_doppler`` returns it. Row *i* is the step from frame
-    *i* to frame *i + 1*, so the result is one row shorter.
+    *amp_db* is ``(n_frames, n_subcarriers)`` of amplitude in dB, as
+    ``tiles._decode_for_doppler`` returns it for ``amplitude`` and for
+    ``csi_ratio_amplitude``. Row *i* is the step from frame *i* to frame
+    *i + 1*, so the result is one row shorter.
     """
     amp_db = np.asarray(amp_db, dtype=float)
     if amp_db.ndim != 2:
@@ -161,16 +191,63 @@ def relative_step(amp_db: np.ndarray) -> np.ndarray:
         return np.tanh(np.diff(amp_db, axis=0) * DB_TO_UNIT)
 
 
-def fold(steps: np.ndarray) -> dict[str, np.ndarray]:
+def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The same step on a complex series. Returns ``(radial, total)``.
+
+    A complex difference has a direction in the plane rather than a sign, so
+    the pair is the honest decomposition of one quantity:
+
+        radial = (|r_t| - |r_t-1|) / (|r_t| + |r_t-1|)     signed, (-1, 1)
+        total  =  |r_t  -  r_t-1|  / (|r_t| + |r_t-1|)     unsigned, [0, 1]
+
+    ``total`` is bounded by the triangle inequality and reaches 1 only when the
+    two samples point opposite ways. ``radial`` is exactly what
+    ``relative_step`` computes on the same series' dB magnitude, so the two
+    channels are directly comparable, and ``total >= |radial|`` always -- the
+    gap between the traces IS the phase rotation, which is the whole reason to
+    read the ratio complex.
+
+    For a pure rotation by ``theta`` at constant magnitude the chord over the
+    sum gives ``total = sin(theta / 2)``, so a step reads back as an angle
+    through ``unit_to_radians``. That is the case ``backend.motion`` is about:
+    a body at fixed range walks the ratio around a circle, the magnitude never
+    changes, and an amplitude-only difference is blind to it.
+    """
+    ratio = np.asarray(ratio)
+    if ratio.ndim != 2:
+        raise ValueError(f"ratio must be 2-D (n_frames, n_sc), got {ratio.shape}")
+    if ratio.shape[0] < 2:
+        empty = np.zeros((0, ratio.shape[1]))
+        return empty, empty.copy()
+    mag = np.abs(ratio)
+    denom = mag[1:] + mag[:-1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        radial = np.diff(mag, axis=0) / denom
+        total = np.abs(np.diff(ratio, axis=0)) / denom
+    # A subcarrier that is zero in both frames has no step, not a zero one.
+    dead = ~np.isfinite(denom) | (denom <= 0)
+    radial[dead] = np.nan
+    total[dead] = np.nan
+    return radial, total
+
+
+def fold(steps: np.ndarray, magnitudes: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Reduce ``(n_steps, n_sc)`` to one row of numbers per step.
 
     ``signed`` and ``magnitude`` are the two median folds and ``live`` is how
     many subcarriers carried them. A step with too few live subcarriers reports
     NaN rather than a median of one or two: a dead array is not a quiet room.
+
+    *magnitudes* is the unsigned per-subcarrier step where it is not simply
+    ``|steps|`` -- the complex channel, whose total step carries rotation the
+    signed radial part cannot. Left out, ``|steps|`` is used.
     """
     steps = np.asarray(steps, dtype=float)
     if steps.ndim != 2:
         raise ValueError(f"steps must be 2-D (n_steps, n_sc), got {steps.shape}")
+    mags = np.abs(steps) if magnitudes is None else np.asarray(magnitudes, dtype=float)
+    if mags.shape != steps.shape:
+        raise ValueError(f"magnitudes {mags.shape} must match steps {steps.shape}")
     n = steps.shape[0]
     out = {
         "signed": np.full(n, np.nan),
@@ -187,9 +264,8 @@ def fold(steps: np.ndarray) -> dict[str, np.ndarray]:
     if not usable.any():
         return out
 
-    rows = steps[usable]
-    out["signed"][usable] = np.nanmedian(rows, axis=1)
-    out["magnitude"][usable] = np.nanmedian(np.abs(rows), axis=1)
+    out["signed"][usable] = np.nanmedian(steps[usable], axis=1)
+    out["magnitude"][usable] = np.nanmedian(mags[usable], axis=1)
     return out
 
 
@@ -197,11 +273,15 @@ def frame_steps(
     amp_db: np.ndarray,
     times: np.ndarray,
     *,
+    complex_input: bool = False,
     gap_limit: float | None = None,
     gain_state: np.ndarray | None = None,
     gate_gain: bool = False,
 ) -> dict[str, Any]:
     """The per-step series over one decoded range, holes removed.
+
+    *amp_db* is amplitude in dB, or -- with *complex_input* -- the complex
+    series itself, whose radial and total steps are folded separately.
 
     *times* are the frame times, same length as *amp_db*. Each step is
     timestamped at the *later* of its two frames, which is the convention
@@ -214,15 +294,21 @@ def frame_steps(
     """
     from backend.doppler import gap_limit_for
 
-    amp_db = np.asarray(amp_db, dtype=float)
+    # Not cast to float: with complex_input that would discard the imaginary
+    # half and silently leave this reading Re(r), which is neither the
+    # magnitude nor the rotation.
+    amp_db = np.asarray(amp_db) if complex_input else np.asarray(amp_db, dtype=float)
     times = np.asarray(times, dtype=float)
     if times.shape[0] != amp_db.shape[0]:
         raise ValueError(
             f"{times.shape[0]} times against {amp_db.shape[0]} frames of amplitude"
         )
 
-    steps = relative_step(amp_db)
-    folded = fold(steps)
+    if complex_input:
+        steps, mags = relative_step_complex(amp_db)
+    else:
+        steps, mags = relative_step(amp_db), None
+    folded = fold(steps, mags)
     dt = np.diff(times) if times.size >= 2 else np.zeros(0)
     limit = gap_limit_for(times) if gap_limit is None else float(gap_limit)
 
@@ -407,6 +493,7 @@ def capture_steps(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
+    signal: str = DEFAULT_SIGNAL,
     gate_gain: bool = False,
 ) -> dict[str, Any]:
     """Decode a range and reduce it to the per-step series, cached.
@@ -429,12 +516,15 @@ def capture_steps(
     path = Path(path)
     st = path.stat()
     key = (str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
-           mimo, source_mac, bool(interpolate), bool(gate_gain))
+           mimo, source_mac, bool(interpolate), str(signal), bool(gate_gain))
     with _cache_lock:
         hit = _cache.get(key)
         if hit is not None:
             _cache.move_to_end(key)
             return hit
+
+    if signal not in SIGNALS:
+        raise ValueError(f"signal must be one of {SIGNALS}, got {signal!r}")
 
     index = get_index(path)
     times_all = np.asarray(index.times, dtype=float)
@@ -447,11 +537,21 @@ def capture_steps(
             f"({sel['note']}), so there is no step to take"
         )
 
-    amp_db = _decode_for_doppler(path, index, ids, "amplitude", None, interpolate)
+    planes = [
+        _decode_for_doppler(path, index, ids, m, None, interpolate)
+        for m in _SIGNAL_METRICS[signal]
+    ]
+    if signal == "ratio_complex":
+        from backend.presence import complex_ratio
+        series, is_complex = complex_ratio(planes[0], planes[1]), True
+    else:
+        series, is_complex = planes[0], False
+
     rssi = np.asarray(getattr(index, "rssi_1", None))
     gain_state = rssi[ids] if rssi.ndim == 1 and rssi.size > int(ids[-1]) else None
-    out = frame_steps(amp_db, times_all[ids],
+    out = frame_steps(series, times_all[ids], complex_input=is_complex,
                       gain_state=gain_state, gate_gain=gate_gain)
+    out["signal"] = signal
     out["source_mac"] = sel["source_mac"]
     out["mimo"] = sel["mimo"]
     out["selection_note"] = sel["note"]
@@ -461,7 +561,7 @@ def capture_steps(
     out["frames_dropped"] = dropped
     out["frames_dropped_narrow"] = int((in_range & sel["narrow"]).sum())
     out["frames_used"] = int(ids.size)
-    out["n_subcarriers"] = int(amp_db.shape[1])
+    out["n_subcarriers"] = int(series.shape[1])
     out["t_min"] = float(times_all[0]) if times_all.size else 0.0
     out["t_max"] = float(times_all[-1]) if times_all.size else 0.0
 
@@ -472,6 +572,13 @@ def capture_steps(
     return out
 
 
+def _native(d: float, signal: str) -> float:
+    """A folded step in the units it was measured in."""
+    if signal == "ratio_complex":
+        return float(np.degrees(unit_to_radians(d)))
+    return float(unit_to_db(d))
+
+
 def compute_frame_diff(
     path,
     t0: float,
@@ -480,13 +587,14 @@ def compute_frame_diff(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
+    signal: str = DEFAULT_SIGNAL,
     gate_gain: bool = False,
     max_points: int = DEFAULT_MAX_POINTS,
 ) -> dict[str, Any]:
     """The per-step series, decimated for a plot, with its summary."""
     steps = capture_steps(
         path, t0, t1, mimo=mimo, source_mac=source_mac,
-        interpolate=interpolate, gate_gain=gate_gain,
+        interpolate=interpolate, signal=signal, gate_gain=gate_gain,
     )
     binned = decimate(steps, max_points)
 
@@ -509,9 +617,14 @@ def compute_frame_diff(
             "median": float(np.median(finite)) if finite.size else None,
             "p99": float(np.percentile(finite, 99)) if finite.size else None,
             "max": float(finite.max()) if finite.size else None,
-            "median_db": float(unit_to_db(np.median(finite))) if finite.size else None,
-            "max_db": float(unit_to_db(finite.max())) if finite.size else None,
+            # The step in the units it was measured in: dB for the two
+            # amplitude signals, degrees of rotation for the complex one,
+            # where a step IS an angle (see unit_to_radians).
+            "native_unit": "\u00b0" if signal == "ratio_complex" else "dB",
+            "median_native": _native(np.median(finite), signal) if finite.size else None,
+            "max_native": _native(finite.max(), signal) if finite.size else None,
         },
+        "signal": steps["signal"],
         "frames_used": steps["frames_used"],
         "frames_dropped": steps["frames_dropped"],
         "frames_dropped_narrow": steps["frames_dropped_narrow"],
