@@ -356,7 +356,8 @@ describe("fetchFrameDiff", () => {
     capture_t_min: 0,
     capture_t_max: 600,
     summary: {
-      steps: 11099, steps_measured: 11090, n_bridged: 9, n_gain_crossed: 2628,
+      steps: 11099, steps_measured: 11090, live_median: 245,
+      n_bridged: 9, n_gain_crossed: 2628,
       gain_gated: false, gap_limit: 0.12,
       median: 0.04, p99: 0.4, max: 0.7,
       median_db: 0.7, max_db: 15.1,
@@ -376,6 +377,7 @@ describe("fetchFrameDiff", () => {
     expect(out.magnitudeHi).toEqual([0.31, null]);
     expect(out.summary.nBridged).toBe(9);
     expect(out.summary.nGainCrossed).toBe(2628);
+    expect(out.summary.liveMedian).toBe(245);
     expect(out.mimo).toEqual([2, 1]);
     expect(out.framesDropped).toBe(314);
     expect(out.selectionNote).toContain("full width");

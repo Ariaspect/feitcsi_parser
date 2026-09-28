@@ -1017,45 +1017,40 @@ export function Presence({
           )}
 
           {showStep && step !== null && (
-            <p className="text-[11px] text-muted-foreground leading-relaxed">
-              The <b>frame step</b> is the oldest signal here and the only
-              per-frame one: the raw per-subcarrier amplitude differenced
-              against the frame before, as{" "}
-              <b>(a<sub>t</sub> − a<sub>t−1</sub>)/(a<sub>t</sub> + a<sub>t−1</sub>)</b>.
-              That is <b>tanh(ΔdB · ln10/40)</b> exactly — the same dB
-              difference the board reads, on an axis bounded by ±1 that needs no
-              per-room constant, and any step can be read back in dB. No
-              threshold is drawn: measured over 21 captures the loudest median
-              step anywhere was 0.675 = 22.5 dB, so the board&apos;s 26 dB line
-              sits above everything this fold can produce (what fires the board
-              is its per-subcarrier count, and 14–26 % of the array crosses
-              26 dB in a single step in empty rooms as readily as occupied ones
-              — see <code>docs/frame_step.md</code>). Because a median commutes with a
-              monotone map, the |step| trace <i>is</i> the Hybrid tab&apos;s
-              amplitude channel, on a different scale rather than a different
-              measurement. Two things to read it with. The{" "}
-              <b>signed median can cancel</b> — a body brightens some
-              subcarriers and fades others, so strong motion can sit near zero
-              while the envelope is wide. And this is the one panel the{" "}
-              <b>receiver&apos;s gain control</b> reaches intact, since there is
-              no per-second median to absorb it:{" "}
-              {step.summary.nGainCrossed > 0 && (
-                <>
-                  {step.summary.nGainCrossed} of {step.summary.steps} pairs here
-                  cross a gain state (
-                  {((step.summary.nGainCrossed / Math.max(1, step.summary.steps)) * 100).toFixed(0)}
-                  %), and{" "}
-                </>
-              )}
-              measured over 21 captures <b>84–100 % of the loudest 1 % of steps
-              are gain crossings</b>, against a 10–52 % base rate — the tail of
-              this trace belongs to the radio, not the room. Neither the AGC
-              correction (it makes the tail worse, +12–125 % at p99) nor the
-              shape of the fold can be used to tell them apart; what can is that
-              the gain state is <i>reported</i>, which is what{" "}
-              <b>gain gate</b> blanks{step.summary.gainGated ? " — it is on" : ""}.
-              Raw amplitude, no AGC table, matching the board and the Hybrid tab.
-            </p>
+            <dl className="text-[11px] text-muted-foreground leading-relaxed grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              <dt className="font-medium text-foreground">Fold</dt>
+              <dd>
+                One <b>d</b> per subcarrier per frame pair,{" "}
+                <b>(a<sub>t</sub> − a<sub>t−1</sub>)/(a<sub>t</sub> + a<sub>t−1</sub>)</b>,
+                then the <b>median</b> across the{" "}
+                {step.summary.liveMedian} live ones (of {step.nSubcarriers}) —
+                twice. <span style={{ color: "#2f7c5c" }}>Signed</span> keeps the
+                direction and so can cancel: a body brightens some subcarriers
+                and fades others, which reads near zero with a wide envelope.{" "}
+                <span style={{ color: "#a34a8f" }}>|step|</span> folds the
+                magnitudes and cannot. Median, not mean — two subcarriers moving
+                40 dB leave it at zero, which is the point. Bins that are dead or
+                in the guard band are dropped first — that is the{" "}
+                {step.nSubcarriers} − {step.summary.liveMedian} missing above —
+                and a pair with fewer than 4 live ones reports nothing rather
+                than a median of two.
+              </dd>
+
+              <dt className="font-medium text-foreground">AGC correction</dt>
+              <dd>
+                <b>Off</b> — raw amplitude, matching the board and the Hybrid
+                tab. Measured over 21 captures, applying the per-gain-state
+                correction leaves the median within 2 % and raises the 99th
+                percentile by <b>12–125 %</b>: it is a per-frame, shape-only
+                correction, so differencing two differently-corrected frames
+                adds a step that was not there. The crossings are counted
+                instead —{" "}
+                {step.summary.nGainCrossed} of {step.summary.steps} pairs here (
+                {((step.summary.nGainCrossed / Math.max(1, step.summary.steps)) * 100).toFixed(0)}
+                %) — and <b>gain gate</b> blanks them
+                {step.summary.gainGated ? ", which is on" : ", currently off"}.
+              </dd>
+            </dl>
           )}
 
           <Chart

@@ -448,6 +448,9 @@ def test_the_summary_reports_the_range_in_both_units(tmp_path: Path) -> None:
     s = out["summary"]
     assert s["steps"] == 3999
     assert s["steps_measured"] <= s["steps"]
+    # The fold runs over the live subcarriers, not the array width: the guard
+    # band and the dead bins never carry a step.
+    assert 0 < s["live_median"] <= out["n_subcarriers"]
     assert 0.0 < s["median"] < s["max"] < 1.0
     assert s["median_db"] == pytest.approx(float(framediff.unit_to_db(s["median"])))
 

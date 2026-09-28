@@ -1398,6 +1398,9 @@ export interface FrameDiff {
   summary: {
     steps: number;
     stepsMeasured: number;
+    /** Subcarriers a typical step was folded over — the array width less the
+     *  guard band and the dead bins. */
+    liveMedian: number;
     nBridged: number;
     /** Frame pairs that crossed a reported gain state. Always counted; blanked
      *  only when `gateGain` was asked for. 84-100% of the loudest 1% of steps
@@ -1470,6 +1473,7 @@ export async function fetchFrameDiff(
     summary: {
       steps: s.steps,
       stepsMeasured: s.steps_measured,
+      liveMedian: s.live_median,
       nBridged: s.n_bridged,
       nGainCrossed: s.n_gain_crossed,
       gainGated: s.gain_gated,

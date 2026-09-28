@@ -492,11 +492,16 @@ def compute_frame_diff(
 
     mag = np.asarray(steps["magnitude"], dtype=float)
     finite = mag[np.isfinite(mag)]
+    # How many subcarriers actually carried a step, which is not the array
+    # width: the guard band and the dead bins never do.
+    live = np.asarray(steps["live"], dtype=float)
+    live = live[live > 0]
     return {
         **binned,
         "summary": {
             "steps": int(mag.size),
             "steps_measured": int(finite.size),
+            "live_median": int(np.median(live)) if live.size else 0,
             "n_bridged": int(steps["n_bridged"]),
             "n_gain_crossed": int(steps["n_gain_crossed"]),
             "gain_gated": bool(steps["gain_gated"]),
