@@ -125,6 +125,77 @@ walking). Per frame at ~42 Hz the rotation a small movement produces is close to
 the ratio phase's own frame-to-frame noise, so the extra half of the signal is
 mostly not paying yet.
 
+### Against `|dr|/|r|` — it is the same metric (2026-09-28)
+
+Asked directly, and the answer is not the flattering one. `presence.fractional_motion`,
+the hybrid's motion channel, computes
+
+```
+|r − r′| / [½(|r| + |r′|)]        midpoint denominator
+```
+
+and `ratio_complex` computes
+
+```
+|r − r′| /  (|r| + |r′|)          sum denominator
+```
+
+**One formula, mine exactly half.** Verified per subcarrier over 14 captures:
+the ratio between them is 0.500000, min and max, every capture. So the
+boundedness is not an advantage this panel introduced — `fractional_motion` is
+bounded by 2 for exactly the same triangle-inequality reason, and reading its
+axis as ±1 is a rescale, not a new quantity.
+
+What actually differs:
+
+| | this panel | `fractional_motion` |
+|---|---|---|
+| fold over subcarriers | median | mean |
+| time base | native frame times, no resampling | uniform grid, interpolated |
+| a pair spanning a dropout | blanked | interpolated through |
+| frame set | one MAC, one MIMO mode, one width | whatever the caller filtered to |
+| decimation | envelopes, per-frame extremes kept | per-second median |
+| readback | dB, or degrees of rotation | none |
+
+The fold is a wash on this corpus: within-capture IQR/median 0.04–0.19 for the
+median fold against 0.04–0.26 for the mean, cross-capture spread 9.6× against
+10.5×, and identical recall. The rest are plumbing improvements — real, and they
+belong in both, but they are not a better metric.
+
+### Stable enough for detection? Calibratable?
+
+Per second, over camera-empty seconds:
+
+| capture | level | IQR / median |
+|---|---|---|
+| 20260921_020003 / _030003 / _050002 | 0.0104 | 0.04 |
+| 20260921_125836 | 0.0125 | 0.06 |
+| 20260915_202020 | 0.0102 | 0.07 |
+| 20260922_135920 | 0.0187 | 0.19 |
+| 20260916_140316 | 0.0849 | 0.18 |
+| 20260917_201323 | 0.0983 | 0.12 |
+
+**Stable within a capture, not across them.** An empty room's per-second level
+wanders 4–19 % of itself, which is steady enough to threshold against — but the
+level itself moves **9.6×** between captures.
+
+So an absolute threshold does not calibrate. Fitting one at the 99th percentile
+of one capture's empty seconds and applying it to the others: median specificity
+98.8 %, but **34 % of pairs fall below 90 %, and the worst is 0 %**. Most pairs
+are fine and a third are catastrophic, which is the worst possible shape for a
+fixed number.
+
+The relative rule the hybrid already uses — 2× the range's own 20th percentile —
+gives **100 % empty specificity and 9 % occupied recall** per second on this set
+(both folds, identically). That recall is the motion channel alone with no burst
+rule, no hold and no breathing channel; it is why the hybrid has all three.
+
+**Conclusion.** This panel is a better *instrument* for reading the motion
+quantity — bounded axis, honest frame set, no interpolation, per-frame detail,
+an angle readback — and not a better detector input. Anyone reaching for it as
+one should use the hybrid's own-floor rule, because the number itself calibrates
+no better than `|dr|/|r|` does, being the same number.
+
 ### AGC immunity, measured rather than assumed
 
 Median `|d|` at a gain crossing over the same-state level:
