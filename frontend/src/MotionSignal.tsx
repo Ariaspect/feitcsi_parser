@@ -110,9 +110,10 @@ export interface MotionSignalProps {
  *  the scalar meant to be handed to a back-end classifier, drawn so the
  *  windows it gets right and the windows it misses are both visible. */
 export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolate, dark }: MotionSignalProps) {
-  const [windowS, setWindowS] = useState(2);
+  const [varianceWindowS, setVarianceWindowS] = useState(4);
+  const [lag1WindowS, setLag1WindowS] = useState(15);
   const [hopS, setHopS] = useState(0.5);
-  const [highpassHz, setHighpassHz] = useState(0.3);
+  const [highpassHz, setHighpassHz] = useState(0.05);
   const [marginS, setMarginS] = useState(5);
   const [featureMode, setFeatureMode] = useState<MotionSignalMode>("label");
   const [data, setData] = useState<MotionSignalData | null>(null);
@@ -148,7 +149,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
     setLoading(true);
     fetchMotionSignal(
       path, range[0], range[1],
-      { windowS, hopS, highpassHz, marginS, mimo, sourceMac, interpolate },
+      { varianceWindowS, lag1WindowS, hopS, highpassHz, marginS, mimo, sourceMac, interpolate },
       controller.signal,
     )
       .then((result) => { setData(result); setError(null); })
@@ -159,7 +160,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [path, range, windowS, hopS, highpassHz, marginS, mimo, sourceMac, interpolate]);
+  }, [path, range, varianceWindowS, lag1WindowS, hopS, highpassHz, marginS, mimo, sourceMac, interpolate]);
 
   const domain = useMemo<[number, number]>(() => {
     if (!data || data.timeS.length === 0) return range;
@@ -194,12 +195,14 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-3">
           <SectionLabel>Motion signal</SectionLabel>
-          <NumberField id="ms-win" label="Window (s)" value={windowS} onChange={setWindowS} min={0.25} max={60} step={0.25}
-            title="Feature window. The experiment fixed 2 s: long enough for a 0.3 Hz high-pass to have something to remove, short enough that a two-second fidget is not averaged into a five-second calm." />
+          <NumberField id="ms-vwin" label="Var window (s)" value={varianceWindowS} onChange={setVarianceWindowS} min={0.25} max={120} step={0.25}
+            title="Window the variance is taken over. Measured to peak near 4 s and fall away after: variance is a spread, not a rhythm, so a longer window averages a burst into a calm." />
+          <NumberField id="ms-lwin" label="Lag-1 window (s)" value={lag1WindowS} onChange={setLag1WindowS} min={0.25} max={120} step={0.25}
+            title="Window lag-1 is taken over. Rises monotonically with length in every condition, most on still posture (AUC 0.624 at 2 s, 0.756 at 15 s): a 2 s window resolves only 0.5 Hz and a still occupant moves far below that." />
           <NumberField id="ms-hop" label="Hop (s)" value={hopS} onChange={setHopS} min={0.05} max={30} step={0.05}
             title="Step between windows. At 0.5 s with a 2 s window, neighbouring windows share three quarters of their samples — they are not independent evidence." />
           <NumberField id="ms-hp" label="High-pass (Hz)" value={highpassHz} onChange={setHighpassHz} min={0.01} max={5} step={0.05}
-            title="DC removal before the variance. Lag-1 is deliberately taken before this filter: a high-pass leaves neighbouring noise samples anticorrelated, and lag-1 would read that as structure." />
+            title="DC removal before the variance. Must stay below the variance window's first non-DC bin (1/window) — at 0.3 Hz under a 2 s window the corner sat beneath it and threw away a band the window could not resolve anyway. Lag-1 is deliberately taken before this filter: a high-pass leaves neighbouring noise samples anticorrelated, and lag-1 would read that as structure." />
           <NumberField id="ms-margin" label="Label margin (s)" value={marginS} onChange={setMarginS} min={0} max={60} width="w-16"
             title="Empty camera frames within this many seconds of a transition are not scored" />
           <Button
@@ -260,7 +263,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
             times={data.timeS}
             domain={domain}
             yDomain={varDomain}
-            yLabel={`variance (${MODE_SHORT[shown]} z)`}
+            yLabel={`variance · ${data.windows.variance} s window (${MODE_SHORT[shown]} z)`}
             dark={dark}
             height={110}
             series={[{ values: feat.variance, color: VAR_COLOR, width: 1.1, label: "variance" }]}
@@ -271,7 +274,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
             times={data.timeS}
             domain={domain}
             yDomain={lagDomain}
-            yLabel={`lag-1 autocorrelation (${MODE_SHORT[shown]} z)`}
+            yLabel={`lag-1 autocorrelation · ${data.windows.lag1} s window (${MODE_SHORT[shown]} z)`}
             dark={dark}
             height={110}
             series={[{ values: feat.lag1, color: LAG_COLOR, width: 1.1, label: "lag1" }]}
@@ -329,9 +332,12 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
           <p className="text-[11px] text-muted-foreground leading-relaxed">
             The source is <b>RATIO</b>, the magnitude of the complex ratio along the AP&apos;s transmit chains —
             the same grid the presence detector rides on, so a change of decode cannot read as motion.
-            Each {data.windowSeconds} s window gives two numbers, reduced over {data.streams} subcarriers by the
-            median: the <b>variance</b> of the {data.highpassHz} Hz high-passed window, and the{" "}
-            <b>lag-1 autocorrelation</b> of the window <i>before</i> that filter. Both are then divided by this
+            Each instant gives two numbers, reduced over {data.streams} subcarriers by the median and measured
+            over <b>different spans</b>: the <b>variance</b> of a {data.windows.variance} s window after a{" "}
+            {data.highpassHz} Hz high-pass, and the <b>lag-1 autocorrelation</b> of a {data.windows.lag1} s window{" "}
+            <i>before</i> that filter. The spans differ because the features do: lag-1 improves with every second
+            of window (still posture, AUC 0.624 at 2 s against 0.756 at 15 s — a 2 s window resolves only 0.5 Hz
+            and a still occupant moves well below that), while variance peaks near 4 s and falls away. Both are then divided by this
             capture&apos;s own scale — nothing here is comparable across captures before that, because empty-room
             variance spans 36× between links and pooling captures measures the link rather than the room.
           </p>

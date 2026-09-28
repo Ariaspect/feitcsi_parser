@@ -311,10 +311,36 @@ def test_endpoint_returns_both_modes_scored(tmp_path: Path) -> None:
 def test_endpoint_rejects_a_window_longer_than_the_range(tmp_path: Path) -> None:
     p = _capture_with_a_visit(tmp_path)
     r = TestClient(app).get(
-        "/api/motion-signal", params={"path": str(p), "t0": 0.0, "t1": 4.0, "window_s": 30},
+        "/api/motion-signal",
+        params={"path": str(p), "t0": 0.0, "t1": 4.0, "lag1_window_s": 30},
     )
     assert r.status_code == 400
     assert "window" in r.json()["detail"]
+
+
+def test_each_feature_rides_its_own_window_on_one_grid(tmp_path: Path) -> None:
+    """The two features are measured over different spans at the same instant."""
+    p = _capture_with_a_visit(tmp_path)
+    out = motionsig.capture_features(p, 0.0, 200.0)
+    assert out["windows"] == {"variance": motionsig.VARIANCE_WINDOW_SECONDS,
+                              "lag1": motionsig.LAG1_WINDOW_SECONDS}
+    t = np.asarray(out["time_s"])
+    longest = max(out["windows"].values())
+    # The grid is the longest window's: it cannot start before that window can.
+    assert t[0] == pytest.approx(longest / 2, abs=0.2)
+    assert np.allclose(np.diff(t), motionsig.HOP_SECONDS, atol=1e-6)
+    for f in motionsig.FEATURES:
+        assert np.asarray(out["raw"][f]).shape == t.shape
+
+
+def test_the_highpass_stays_below_the_variance_window_first_bin() -> None:
+    """The bug the sweep found: a 0.3 Hz corner under a 2 s window.
+
+    A window of T seconds resolves nothing below 1/T. A high-pass corner
+    beneath that is discarding a band the window could not have reported
+    anyway, and with it every slow occupant.
+    """
+    assert motionsig.HIGHPASS_HZ < 1.0 / motionsig.VARIANCE_WINDOW_SECONDS
 
 
 def test_endpoint_without_a_sidecar_returns_no_confusion(tmp_path: Path) -> None:

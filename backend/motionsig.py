@@ -66,13 +66,32 @@ from scipy.signal import butter, filtfilt
 
 from backend import truth as truthmod
 
-# Window geometry, fixed by the experiment plan and not swept.
-WINDOW_SECONDS = 2.0
+# Each feature gets the window that suits it, both emitted on one 0.5 s grid.
+#
+# The plan fixed 2 s for everything, and a sweep over 2/4/8/10/15 s said that
+# was wrong in two different ways. **lag-1 rises monotonically with window
+# length in every condition** -- most on the one that matters, still posture,
+# where it goes 0.624 -> 0.756 -- because a short window cannot resolve slow
+# motion at all: 2 s is 0.5 Hz of frequency resolution, and a person sitting
+# still moves well below that. **Variance does not**: it peaks at 4 s and
+# falls away, being a spread rather than a rhythm. So they are computed on
+# separate windows; the cumulative-sum machinery means the second window is
+# nearly free.
+VARIANCE_WINDOW_SECONDS = 4.0
+LAG1_WINDOW_SECONDS = 15.0
 HOP_SECONDS = 0.5
-# DC removal before the variance. The plan's value; at 20 Hz it is already
-# 1.5% of Nyquist, so it is a DC notch rather than a band choice.
-HIGHPASS_HZ = 0.3
+# DC removal before the variance. Was 0.3 Hz, from the plan, and at a 2 s
+# window that put the corner BELOW the window's first non-DC bin (0.5 Hz) --
+# the filter was discarding a band the window could not resolve either way,
+# and with it every slow occupant. Measured at 4 s: still posture 0.766 ->
+# 0.796, perched breathing 0.888 -> 0.942. lag-1 is taken before the filter
+# and is unaffected by this number, which the sweep confirms digit for digit.
+HIGHPASS_HZ = 0.05
 HIGHPASS_ORDER = 4
+# Longest window in play; what a labelled cell has to span.
+WINDOW_SECONDS = max(VARIANCE_WINDOW_SECONDS, LAG1_WINDOW_SECONDS)
+# Which window each feature rides on.
+FEATURE_WINDOWS = {"variance": VARIANCE_WINDOW_SECONDS, "lag1": LAG1_WINDOW_SECONDS}
 # Hampel outlier replacement, half-width in samples and the MAD multiple.
 HAMPEL_HALF = 5
 HAMPEL_NSIG = 3.0
@@ -80,7 +99,15 @@ HAMPEL_NSIG = 3.0
 # nothing rather than reporting the interpolator's own smoothness as calm.
 MAX_GAP_FRACTION = 0.5
 # Percentile pair for the label-free scale. Both must sit below the occupant.
-FREE_PERCENTILES = (10.0, 40.0)
+# 20/80 first, which a capture 40% occupied defeats outright (the occupant is
+# inside its own 80th percentile and scales their own signal away: walking
+# recall 100% -> 25.8%). Then 10/40 at a 2 s window. At 15 s the pair has to
+# come down again for a second reason: neighbouring windows share 97% of
+# their samples, every transition smears 7.5 s either side, and the middle of
+# the distribution now holds transition windows that used to be a thin tail.
+# Measured over the corpus at the current geometry, median balanced accuracy:
+# 10/40 69.7%, 5/30 87.7%, 5/25 88.8%, 5/20 87.7%, 10/30 78.3%.
+FREE_PERCENTILES = (5.0, 25.0)
 # Empty windows a capture needs before its own empty statistics are trusted.
 MIN_REFERENCE_WINDOWS = 10
 
@@ -91,16 +118,16 @@ FEATURES = ("variance", "lag1")
 # ``scripts/fit_motionsig.py``.
 COEFFICIENTS: dict[str, dict[str, float]] = {
     "label": {
-        "variance": 0.135084,
-        "lag1": 0.629663,
-        "intercept": -0.578889,
-        "threshold": 0.321564,
+        "variance": 0.139027,
+        "lag1": 0.696336,
+        "intercept": -0.835234,
+        "threshold": 0.298824,
     },
     "free": {
-        "variance": 0.003270,
-        "lag1": 0.630147,
-        "intercept": -1.059958,
-        "threshold": 0.439962,
+        "variance": 0.008012,
+        "lag1": 0.396872,
+        "intercept": -1.232109,
+        "threshold": 0.350190,
     },
 }
 
@@ -257,15 +284,19 @@ def capture_features(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    window_seconds: float = WINDOW_SECONDS,
+    variance_window_seconds: float = VARIANCE_WINDOW_SECONDS,
+    lag1_window_seconds: float = LAG1_WINDOW_SECONDS,
     hop_seconds: float = HOP_SECONDS,
     highpass_hz: float = HIGHPASS_HZ,
     max_gap_fraction: float = MAX_GAP_FRACTION,
 ) -> dict[str, Any]:
-    """Decode a range and reduce it to the two raw features per window, cached.
+    """Decode a range and reduce it to the two raw features, cached.
 
-    Window centres are on the capture's clock, so they line up with the
-    camera sidecar and with every other tab.
+    The two features ride different window lengths (see the constants) and
+    are returned on one grid: the longer window's centres, with the shorter
+    feature taken from the window centred at the same instant. Centres are on
+    the capture's clock, so they line up with the camera sidecar and with
+    every other tab.
     """
     from backend.tiles import _presence_grid
 
@@ -273,8 +304,8 @@ def capture_features(
     st = path.stat()
     key = (str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
            mimo, source_mac, bool(interpolate),
-           float(window_seconds), float(hop_seconds), float(highpass_hz),
-           float(max_gap_fraction))
+           float(variance_window_seconds), float(lag1_window_seconds),
+           float(hop_seconds), float(highpass_hz), float(max_gap_fraction))
     with _cache_lock:
         hit = _cache.get(key)
         if hit is not None:
@@ -284,12 +315,15 @@ def capture_features(
     grid, fabricated, fs, grid_times, times, _times_all, n_no_ratio = _presence_grid(
         path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
     )
-    n = int(round(window_seconds * fs))
+    windows = {"variance": float(variance_window_seconds), "lag1": float(lag1_window_seconds)}
+    lengths = {k: int(round(v * fs)) for k, v in windows.items()}
     hop = max(1, int(round(hop_seconds * fs)))
-    if n < 8:
-        raise ValueError(f"{window_seconds} s is {n} samples at {fs:.1f} Hz; too few for a window")
-    if grid.shape[0] < n:
-        raise ValueError(f"range holds {grid.shape[0]} samples, one window needs {n}")
+    for k, n in lengths.items():
+        if n < 8:
+            raise ValueError(f"{k}: {windows[k]} s is {n} samples at {fs:.1f} Hz; too few for a window")
+    longest = max(lengths.values())
+    if grid.shape[0] < longest + 1:
+        raise ValueError(f"range holds {grid.shape[0]} samples, the longest window needs {longest}")
 
     # RATIO: the magnitude of the complex ratio. Dead subcarriers out, then
     # each stream divided by its own median so the 245 of them are one
@@ -308,31 +342,43 @@ def capture_features(
     b, a = butter(HIGHPASS_ORDER, highpass_hz / (fs / 2.0), btype="high")
     post = filtfilt(b, a, pre, axis=0)
 
-    starts = np.arange(0, pre.shape[0] - n + 1, hop)
-    raw = features(pre, post, starts, n)
-
-    # Median over subcarriers, and a window mostly interpolated says nothing.
     fab = np.asarray(fabricated, dtype=float)
-    c = np.concatenate([[0.0], np.cumsum(fab)])
-    gap = (c[starts + n] - c[starts]) / n
-    blank = gap > max_gap_fraction
+    cfab = np.concatenate([[0.0], np.cumsum(fab)])
+    origin = float(grid_times[0])
+
+    # The master grid is the longest window's centres; a shorter feature is
+    # read from its own window centred on the same instant, so the two never
+    # describe different moments.
+    master_key = max(lengths, key=lambda k: lengths[k])
+    n_master = lengths[master_key]
+    master_starts = np.arange(0, pre.shape[0] - n_master + 1, hop)
+    centres_i = master_starts + (n_master - 1) / 2.0
+    out_raw: dict[str, np.ndarray] = {}
+    gap_out = np.zeros(master_starts.size)
+    for f in FEATURES:
+        n = lengths[f]
+        starts = np.rint(centres_i - (n - 1) / 2.0).astype(int)
+        starts = np.clip(starts, 0, pre.shape[0] - n)
+        v = np.median(features(pre, post, starts, n)[f], axis=1)
+        gap = (cfab[starts + n] - cfab[starts]) / n
+        v[gap > max_gap_fraction] = np.nan
+        out_raw[f] = v
+        gap_out = np.maximum(gap_out, gap)
+
     out: dict[str, Any] = {
-        "time_s": float(grid_times[0]) + (starts + (n - 1) / 2.0) / fs,
+        "time_s": origin + centres_i / fs,
         "fs": float(fs),
-        "n_samples": int(n),
+        "n_samples": int(n_master),
         "streams": int(alive.sum()),
-        "gap_fraction": gap,
+        "gap_fraction": gap_out,
         "frames_used": int(times.size),
         "frames_without_ratio": int(n_no_ratio),
-        "window_seconds": float(window_seconds),
+        "windows": {f: windows[f] for f in FEATURES},
+        "window_seconds": float(max(windows.values())),
         "hop_seconds": float(hop_seconds),
         "highpass_hz": float(highpass_hz),
-        "raw": {},
+        "raw": out_raw,
     }
-    for f in FEATURES:
-        v = np.median(raw[f], axis=1)
-        v[blank] = np.nan
-        out["raw"][f] = v
 
     with _cache_lock:
         _cache[key] = out
@@ -349,7 +395,8 @@ def compute_motion_signal(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    window_seconds: float = WINDOW_SECONDS,
+    variance_window_seconds: float = VARIANCE_WINDOW_SECONDS,
+    lag1_window_seconds: float = LAG1_WINDOW_SECONDS,
     hop_seconds: float = HOP_SECONDS,
     highpass_hz: float = HIGHPASS_HZ,
     max_gap_fraction: float = MAX_GAP_FRACTION,
@@ -367,11 +414,15 @@ def compute_motion_signal(
     """
     feat = capture_features(
         path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
-        window_seconds=window_seconds, hop_seconds=hop_seconds,
+        variance_window_seconds=variance_window_seconds,
+        lag1_window_seconds=lag1_window_seconds, hop_seconds=hop_seconds,
         highpass_hz=highpass_hz, max_gap_fraction=max_gap_fraction,
     )
     centres = np.asarray(feat["time_s"], dtype=float)
-    half = float(window_seconds) / 2.0
+    # The cell spans the LONGEST window: that is what the features actually
+    # saw, so a cell straddling a transition has to be excluded on that span
+    # rather than on the shorter one's.
+    half = float(feat["window_seconds"]) / 2.0
 
     cells = excluded = None
     empty = None
