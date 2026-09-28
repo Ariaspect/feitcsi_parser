@@ -64,7 +64,7 @@ from typing import Any
 import numpy as np
 from scipy.signal import butter, filtfilt
 
-from backend import truth as truthmod
+from backend import phase as phasemod, truth as truthmod
 
 # Each feature gets the window that suits it, both emitted on one 0.5 s grid.
 #
@@ -111,6 +111,26 @@ FREE_PERCENTILES = (5.0, 25.0)
 # Empty windows a capture needs before its own empty statistics are trusted.
 MIN_REFERENCE_WINDOWS = 10
 
+# Which half of the complex ratio each feature is taken from.
+#
+# The ratio is a complex number and this pipeline used only its magnitude for
+# most of the work. Phase is the sensitive half -- 2.87 cm of path change is a
+# full 2*pi at 5.24 GHz, so a chest moving millimetres turns it while leaving
+# the magnitude flat -- and a held-out comparison says lag-1 belongs there.
+# Over 200 capture-level stratified splits, swapping lag-1 from magnitude to
+# phase won 75% of them on balanced accuracy (+1.90) and 84.5% on accuracy
+# (+3.52), label-free. The in-corpus comparison said the opposite, which is
+# what a 9.4-point overfit on magnitude looks like beside 6.6 on phase: the
+# ranking of two feature sets can invert when both are scored on the captures
+# they were fitted to.
+#
+# It is a SWAP, not an addition. Magnitude lag-1 and phase lag-1 are two
+# views of one thing -- fitted together the weight splits between them
+# (+0.156/+0.255) and the held-out result is worse than the swap alone.
+# Variance stays on the magnitude: phase variance is dominated by noise when
+# nobody moves (still-posture AUC 0.595 against 0.766) and its fitted weight
+# came out at zero.
+FEATURE_SOURCES = {"variance": "amp", "lag1": "phase"}
 FEATURES = ("variance", "lag1")
 
 # Fitted on CORPUS, class-weight balanced, C = 1, threshold at the 90th
@@ -118,16 +138,16 @@ FEATURES = ("variance", "lag1")
 # ``scripts/fit_motionsig.py``.
 COEFFICIENTS: dict[str, dict[str, float]] = {
     "label": {
-        "variance": 0.139027,
-        "lag1": 0.696336,
-        "intercept": -0.835234,
-        "threshold": 0.298824,
+        "variance": 0.142381,
+        "lag1": 0.746296,
+        "intercept": -0.882194,
+        "threshold": 0.224398,
     },
     "free": {
-        "variance": 0.008012,
-        "lag1": 0.396872,
-        "intercept": -1.232109,
-        "threshold": 0.350190,
+        "variance": 0.008124,
+        "lag1": 0.372754,
+        "intercept": -1.181105,
+        "threshold": 0.206971,
     },
 }
 
@@ -191,26 +211,33 @@ def _window_moments(x: np.ndarray, starts: np.ndarray, n: int) -> tuple[np.ndarr
     return w1, w2, wp
 
 
-def features(pre: np.ndarray, post: np.ndarray, starts: np.ndarray, n: int) -> dict[str, np.ndarray]:
+def features(pre: np.ndarray, post: np.ndarray, starts: np.ndarray, n: int,
+             keys: tuple[str, ...] = FEATURES) -> dict[str, np.ndarray]:
     """Variance and lag-1 per window per stream, each ``(n_windows, n_streams)``.
 
     Variance comes off the high-passed signal, lag-1 off the signal before
     it -- a high-pass leaves neighbouring noise samples anticorrelated, so
     lag-1 on a filtered empty room reads as structure that is the filter's.
-    """
-    w1p, w2p, _ = _window_moments(post, starts, n)
-    mu_post = w1p / n
-    variance = np.maximum(w2p / n - mu_post * mu_post, 0.0)
 
-    w1, w2, wp = _window_moments(pre, starts, n)
-    mu = w1 / n
-    # sum (x_t - mu)^2 over the window, and sum (x_t - mu)(x_{t+1} - mu) over
-    # its n-1 adjacent pairs, both expanded so only the sums above are needed.
-    den = w2 - n * mu * mu
-    edge = pre[starts] + pre[starts + n - 1]
-    num = wp - mu * (2.0 * w1 - edge) + (n - 1) * mu * mu
-    lag1 = num / np.maximum(den, 1e-30)
-    return {"variance": variance, "lag1": lag1}
+    ``keys`` restricts the work: the two features now sit on different
+    sources as well as different windows, so a caller wants one at a time.
+    """
+    out: dict[str, np.ndarray] = {}
+    if "variance" in keys:
+        w1p, w2p, _ = _window_moments(post, starts, n)
+        mu_post = w1p / n
+        out["variance"] = np.maximum(w2p / n - mu_post * mu_post, 0.0)
+    if "lag1" in keys:
+        w1, w2, wp = _window_moments(pre, starts, n)
+        mu = w1 / n
+        # sum (x_t - mu)^2 over the window, and sum (x_t - mu)(x_{t+1} - mu)
+        # over its n-1 adjacent pairs, both expanded so only those sums are
+        # needed and no window is ever materialised.
+        den = w2 - n * mu * mu
+        edge = pre[starts] + pre[starts + n - 1]
+        num = wp - mu * (2.0 * w1 - edge) + (n - 1) * mu * mu
+        out["lag1"] = num / np.maximum(den, 1e-30)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -325,22 +352,35 @@ def capture_features(
     if grid.shape[0] < longest + 1:
         raise ValueError(f"range holds {grid.shape[0]} samples, the longest window needs {longest}")
 
-    # RATIO: the magnitude of the complex ratio. Dead subcarriers out, then
-    # each stream divided by its own median so the 245 of them are one
-    # population before the median over streams reduces them.
-    amp = np.abs(grid).astype(np.float64)
-    # `alive` first, so the median never runs over an all-NaN dead subcarrier.
-    alive = np.isfinite(amp).all(axis=0)
+    # Both halves of the complex ratio. Dead subcarriers out first, so no
+    # median ever runs over an all-NaN column.
+    mag = np.abs(grid).astype(np.float64)
+    alive = np.isfinite(mag).all(axis=0)
     if alive.any():
-        alive[alive] &= np.median(amp[:, alive], axis=0) > 0
+        alive[alive] &= np.median(mag[:, alive], axis=0) > 0
     if alive.sum() < 4:
         raise ValueError(f"only {int(alive.sum())} subcarriers carry a usable ratio")
-    amp = amp[:, alive]
-    amp /= np.median(amp, axis=0)
 
-    pre = hampel(amp)
+    # Magnitude: each stream divided by its own median, so the 245 of them are
+    # one population before the median over streams reduces them.
+    mag = mag[:, alive]
+    mag /= np.median(mag, axis=0)
+    # Phase: unwrapped along TIME, not subcarrier. The ratio has already
+    # cancelled the per-packet offset its two chains share, so what is left to
+    # undo is the 2*pi sawtooth as the path length changes.
+    # ``phase.unwrap_time`` restarts at every dropout rather than guessing how
+    # many turns went unobserved, and anchors each segment at its own start.
+    # lag-1 removes the window mean, so that offset is harmless, and a window
+    # straddling a segment boundary sits in a fabricated run long enough for
+    # the gap rule below to blank it.
+    ang = phasemod.unwrap_time(
+        np.angle(grid[:, alive]).astype(np.float64), np.asarray(grid_times, dtype=float),
+    ).astype(np.float64)
+    ang -= np.median(ang, axis=0)
+
     b, a = butter(HIGHPASS_ORDER, highpass_hz / (fs / 2.0), btype="high")
-    post = filtfilt(b, a, pre, axis=0)
+    pre = {"amp": hampel(mag), "phase": hampel(ang)}
+    post = {k: filtfilt(b, a, v, axis=0) for k, v in pre.items()}
 
     fab = np.asarray(fabricated, dtype=float)
     cfab = np.concatenate([[0.0], np.cumsum(fab)])
@@ -351,15 +391,16 @@ def capture_features(
     # describe different moments.
     master_key = max(lengths, key=lambda k: lengths[k])
     n_master = lengths[master_key]
-    master_starts = np.arange(0, pre.shape[0] - n_master + 1, hop)
+    master_starts = np.arange(0, mag.shape[0] - n_master + 1, hop)
     centres_i = master_starts + (n_master - 1) / 2.0
     out_raw: dict[str, np.ndarray] = {}
     gap_out = np.zeros(master_starts.size)
     for f in FEATURES:
         n = lengths[f]
+        src = FEATURE_SOURCES[f]
         starts = np.rint(centres_i - (n - 1) / 2.0).astype(int)
-        starts = np.clip(starts, 0, pre.shape[0] - n)
-        v = np.median(features(pre, post, starts, n)[f], axis=1)
+        starts = np.clip(starts, 0, mag.shape[0] - n)
+        v = np.median(features(pre[src], post[src], starts, n, keys=(f,))[f], axis=1)
         gap = (cfab[starts + n] - cfab[starts]) / n
         v[gap > max_gap_fraction] = np.nan
         out_raw[f] = v
@@ -374,6 +415,7 @@ def capture_features(
         "frames_used": int(times.size),
         "frames_without_ratio": int(n_no_ratio),
         "windows": {f: windows[f] for f in FEATURES},
+        "sources": dict(FEATURE_SOURCES),
         "window_seconds": float(max(windows.values())),
         "hop_seconds": float(hop_seconds),
         "highpass_hz": float(highpass_hz),
