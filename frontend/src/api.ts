@@ -1349,3 +1349,127 @@ export async function fetchMotionSignal(
     truthExcluded: body.truth_excluded,
   };
 }
+
+// --------------------------------------------------------------------------- #
+//  Frame-to-frame amplitude step (/api/frame-diff)
+// --------------------------------------------------------------------------- #
+
+/** One column of the decimated per-step series. Columns are equal in time, and
+ *  each carries a median and the extremes it spans — see `bandPath` for why the
+ *  extremes are what gets drawn. */
+export interface FrameDiff {
+  /** Column centres, on the capture's clock. */
+  timeS: number[];
+  /** Median of the signed fold: + the array brightening, − fading. */
+  signed: (number | null)[];
+  /** The column's extremes of the signed fold. A single frame survives here. */
+  signedLo: (number | null)[];
+  signedHi: (number | null)[];
+  /** Median of |d|, which cannot cancel when subcarriers disagree in sign.
+   *  This is `hybrid.amplitude_diff` on the bounded axis, exactly. */
+  magnitude: (number | null)[];
+  magnitudeHi: (number | null)[];
+  /** Largest share of live subcarriers past the threshold in this column.
+   *  Near 1 means the whole array moved together — a gain step, not a body. */
+  fractionAbove: (number | null)[];
+  /** Frames behind each column, blanked ones included. */
+  count: number[];
+  binSeconds: number;
+  /** False when the range held fewer steps than columns asked for, so every
+   *  column is one frame pair and the envelope is the value itself. */
+  decimated: boolean;
+  /** The reference line, in dB and mapped onto the axis. */
+  thresholdDb: number;
+  thresholdUnit: number;
+  framesUsed: number;
+  nSubcarriers: number;
+  captureTMin: number;
+  captureTMax: number;
+  summary: {
+    steps: number;
+    stepsMeasured: number;
+    nBridged: number;
+    /** Frame pairs that crossed a reported gain state. Always counted; blanked
+     *  only when `gateGain` was asked for. 84-100% of the loudest 1% of steps
+     *  are these, so the number is owed to the reader either way. */
+    nGainCrossed: number;
+    gainGated: boolean;
+    gapLimit: number;
+    median: number | null;
+    p99: number | null;
+    max: number | null;
+    aboveThreshold: number;
+    medianDb: number | null;
+    maxDb: number | null;
+  };
+}
+
+export interface FrameDiffOptions {
+  thresholdDb?: number;
+  /** Blank the frame pairs that cross a gain state. Off by default. */
+  gateGain?: boolean;
+  maxPoints?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchFrameDiff(
+  path: string,
+  t0: number,
+  t1: number,
+  options: FrameDiffOptions = {},
+  signal?: AbortSignal,
+): Promise<FrameDiff> {
+  const {
+    thresholdDb = 26, gateGain = false, maxPoints = 2000, mimo, sourceMac, interpolate,
+  } = options;
+
+  const url =
+    `/api/frame-diff?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&threshold_db=${thresholdDb}&max_points=${maxPoints}` +
+    (gateGain ? "&gate_gain=true" : "") +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `frame diff: ${res.status}`);
+  }
+  const body = await res.json();
+  const s = body.summary;
+  return {
+    timeS: body.time_s,
+    signed: body.signed,
+    signedLo: body.signed_lo,
+    signedHi: body.signed_hi,
+    magnitude: body.magnitude,
+    magnitudeHi: body.magnitude_hi,
+    fractionAbove: body.fraction_above,
+    count: body.count,
+    binSeconds: body.bin_seconds,
+    decimated: body.decimated,
+    thresholdDb: body.threshold_db,
+    thresholdUnit: body.threshold_unit,
+    framesUsed: body.frames_used,
+    nSubcarriers: body.n_subcarriers,
+    captureTMin: body.capture_t_min,
+    captureTMax: body.capture_t_max,
+    summary: {
+      steps: s.steps,
+      stepsMeasured: s.steps_measured,
+      nBridged: s.n_bridged,
+      nGainCrossed: s.n_gain_crossed,
+      gainGated: s.gain_gated,
+      gapLimit: s.gap_limit,
+      median: s.median,
+      p99: s.p99,
+      max: s.max,
+      aboveThreshold: s.above_threshold,
+      medianDb: s.median_db,
+      maxDb: s.max_db,
+    },
+  };
+}

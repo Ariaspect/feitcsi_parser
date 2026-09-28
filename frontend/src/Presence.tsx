@@ -11,15 +11,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  fetchFrameDiff,
   fetchLabels,
   fetchPresence,
+  type FrameDiff,
   type Labels,
   type Meta,
   type Presence as PresenceData,
   type PresenceChannel,
   type PresenceState,
 } from "./api";
-import { formatTime, linePath, linearScale, runs, ticks } from "./series";
+import { bandPath, formatTime, linePath, linearScale, runs, ticks } from "./series";
 import type { TimeLink } from "./timelink";
 
 // Longest stretch analysed before the user asks for more. Presence needs
@@ -60,11 +62,22 @@ interface ChartSeries {
   dashed?: boolean;
 }
 
+/** A filled region between two series. Drawn for a decimated per-frame signal,
+ *  where the extremes of a column are the signal and its median is not. */
+interface ChartBand {
+  lo: (number | null)[];
+  hi: (number | null)[];
+  color: string;
+  label: string;
+  opacity?: number;
+}
+
 interface ChartProps {
   times: number[];
   domain: [number, number];
   yDomain: [number, number];
   series: ChartSeries[];
+  bands?: ChartBand[];
   guides?: { value: number; color: string; label: string }[];
   height?: number;
   yLabel: string;
@@ -81,6 +94,7 @@ function Chart({
   domain,
   yDomain,
   series,
+  bands = [],
   guides = [],
   height = 120,
   yLabel,
@@ -119,6 +133,17 @@ function Chart({
           >
             {formatTime(v, span)}
           </text>
+        ))}
+        {/* Under the guides and the lines: the band is context, and a guide
+            hidden behind a fill is a threshold the reader cannot place. */}
+        {bands.map((b) => (
+          <path
+            key={b.label}
+            d={bandPath(times, b.lo, b.hi, x, y)}
+            fill={b.color}
+            fillOpacity={b.opacity ?? 0.25}
+            stroke="none"
+          />
         ))}
         {guides.map((g) => (
           <line
@@ -285,6 +310,18 @@ export function Presence({
   }, [emptyRefs]);
   const [threshold, setThreshold] = useState(0.25);
   const [motionFracHi, setMotionFracHi] = useState(0.25);
+  // The frame-to-frame amplitude step, fetched separately from the detector.
+  // Its own request because it is a different decode (raw amplitude, not the
+  // ratio grid) and because it is evidence rather than a vote: nothing in the
+  // verdict above depends on it, so it must not be able to slow the verdict
+  // down or fail it.
+  const [showStep, setShowStep] = useState(true);
+  const [stepThresholdDb, setStepThresholdDb] = useState(26);
+  // Off by default: it was measured after the panel shipped, and a measurement
+  // does not get to change what the panel showed. See docs/frame_step.md.
+  const [gateGain, setGateGain] = useState(false);
+  const [step, setStep] = useState<FrameDiff | null>(null);
+  const [stepError, setStepError] = useState<string | null>(null);
   const [data, setData] = useState<PresenceData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -357,6 +394,44 @@ export function Presence({
     mimo, sourceMac, interpolate,
   ]);
 
+  useEffect(() => {
+    if (!showStep) {
+      setStep(null);
+      setStepError(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetchFrameDiff(
+      path,
+      range[0],
+      range[1],
+      {
+        thresholdDb: stepThresholdDb,
+        gateGain,
+        // One column per pixel. Fewer would average away the single frame this
+        // signal exists to show; more would be columns the panel cannot draw.
+        maxPoints: Math.max(200, Math.min(4000, width)),
+        mimo,
+        sourceMac,
+        interpolate,
+      },
+      controller.signal,
+    )
+      .then((result) => {
+        setStep(result);
+        setStepError(null);
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setStep(null);
+        setStepError(err instanceof Error ? err.message : String(err));
+      });
+    return () => controller.abort();
+  }, [
+    path, range, showStep, stepThresholdDb, gateGain, width, mimo, sourceMac,
+    interpolate,
+  ]);
+
   const domain = useMemo<[number, number]>(() => {
     if (!data || data.timeS.length === 0) return range;
     return [data.timeS[0], data.timeS[data.timeS.length - 1]];
@@ -391,6 +466,20 @@ export function Presence({
     // the trace can be read against the line that classifies it.
     return Math.max(motionFracHi * 1.3, ...finite.map((v) => v * 1.2), 0.05);
   }, [data, motionFracHi]);
+
+  // The axis is bounded at +-1 by construction, and on a real link nothing
+  // comes close: measured over 21 captures the loudest *median* step was 0.675
+  // and an empty room's median sits at 0.005-0.077, so a fixed +-1 axis draws
+  // every trace as a flat line on zero. So the view is a symmetric zoom on the
+  // data, in the same shape as devCeiling/motionCeiling above, and the caption
+  // says where the bound and the board's line actually sit.
+  const stepCeiling = useMemo(() => {
+    if (!step) return 0.05;
+    const finite = [...step.signedLo, ...step.signedHi, ...step.magnitudeHi].filter(
+      (v): v is number => v !== null && Number.isFinite(v),
+    );
+    return Math.min(1, Math.max(0.02, ...finite.map((v) => Math.abs(v) * 1.2)));
+  }, [step]);
 
   const stripHeight = 26;
   const innerWidth = Math.max(1, width - MARGIN.left - MARGIN.right);
@@ -469,6 +558,48 @@ export function Presence({
               if (Number.isFinite(v) && v >= 0.01 && v <= 2) setMotionFracHi(v);
             }}
           />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            variant={showStep ? "default" : "outline"}
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            title="The frame-to-frame amplitude step, as (a_t - a_t-1)/(a_t + a_t-1) — the raw dB difference on a bounded -1..1 axis. Evidence only; it does not vote on the verdict above."
+            onClick={() => setShowStep((v) => !v)}
+          >
+            frame step {showStep ? "on" : "off"}
+          </Button>
+          {showStep && (
+            <>
+              <Label htmlFor="presence-step-db" className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                Line (dB)
+              </Label>
+              <Input
+                id="presence-step-db"
+                type="number"
+                min={1}
+                max={60}
+                step={1}
+                className="w-16"
+                title="Where to draw the reference line, in dB. 26 is the LG board's own change-detection threshold, which the Phase 1 tab scores."
+                value={stepThresholdDb}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v >= 1 && v <= 60) setStepThresholdDb(v);
+                }}
+              />
+              <Button
+                variant={gateGain ? "default" : "outline"}
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                title="Blank the frame pairs that cross a reported receiver gain state, the way a pair spanning a dropout is blanked. Measured: costs 12-52% of the steps, halves the tail (p99 down ~50%), and changes neither the empty/occupied separation nor the 15.5x spread of the empty level across captures."
+                onClick={() => setGateGain((v) => !v)}
+              >
+                gain gate {gateGain ? "on" : "off"}
+              </Button>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -661,6 +792,154 @@ export function Presence({
             ]}
             guides={[{ value: motionFracHi, color: "#d62728", label: "gross motion" }]}
           />
+
+          {showStep && (stepError !== null || step !== null) && (
+            <div className="space-y-1">
+              {stepError !== null ? (
+                <p className="text-[11px] text-red-500">
+                  frame step: {stepError}
+                </p>
+              ) : step !== null && (
+                <>
+                  <Chart
+                    width={width}
+                    times={step.timeS}
+                    domain={domain}
+                    yDomain={[-stepCeiling, stepCeiling]}
+                    yLabel="frame step (a−a′)/(a+a′)"
+                    dark={dark}
+                    height={150}
+                    bands={[
+                      {
+                        lo: step.signedLo,
+                        hi: step.signedHi,
+                        color: "#5a8f7b",
+                        label: "signed envelope",
+                        opacity: dark ? 0.32 : 0.22,
+                      },
+                    ]}
+                    series={[
+                      { values: step.signed, color: "#2f7c5c", width: 1.4, label: "signed median" },
+                      // The median of |d| is the quantity the Hybrid tab's
+                      // amplitude channel reports, exactly. The column peak is
+                      // drawn beside it only when columns hold more than one
+                      // frame pair -- otherwise it is the same line twice.
+                      { values: step.magnitude, color: "#a34a8f", width: 1.4, label: "|step| median" },
+                      ...(step.decimated
+                        ? [{
+                            values: step.magnitudeHi,
+                            color: "#a34a8f",
+                            width: 1,
+                            label: "|step| peak",
+                            dashed: true,
+                          }]
+                        : []),
+                    ]}
+                    guides={
+                      // Drawn only when it is inside the view. A guide clamped
+                      // to the top edge would read as a threshold the trace is
+                      // about to cross, when it is 12x above the whole panel.
+                      step.thresholdUnit <= stepCeiling
+                        ? [
+                            { value: step.thresholdUnit, color: "#d62728", label: "board threshold" },
+                            { value: -step.thresholdUnit, color: "#d62728", label: "board threshold, fading" },
+                          ]
+                        : []
+                    }
+                  />
+                  <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+                    <span style={{ color: "#2f7c5c" }}>signed median</span>
+                    <span style={{ color: "#5a8f7b" }}>
+                      {step.decimated
+                        ? `envelope of ${step.binSeconds.toFixed(2)} s columns`
+                        : "one column per frame pair"}
+                    </span>
+                    <span style={{ color: "#a34a8f" }}>
+                      |step| median{step.decimated && " (dashed: column peak)"}
+                    </span>
+                    {step.thresholdUnit <= stepCeiling ? (
+                      <span style={{ color: "#d62728" }}>
+                        ±{step.thresholdUnit.toFixed(3)} = {step.thresholdDb} dB
+                      </span>
+                    ) : (
+                      <span>
+                        axis ±{stepCeiling.toFixed(3)} of a ±1 scale · the{" "}
+                        {step.thresholdDb} dB line sits at{" "}
+                        {step.thresholdUnit.toFixed(3)},{" "}
+                        {(step.thresholdUnit / stepCeiling).toFixed(0)}× above
+                        this view
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground leading-relaxed tabular-nums">
+                    {step.summary.stepsMeasured} of {step.summary.steps} steps
+                    measured over {step.nSubcarriers} subcarriers
+                    {step.summary.nBridged > 0 && (
+                      <>
+                        {" "}· {step.summary.nBridged} dropped for spanning a gap
+                        wider than {step.summary.gapLimit.toFixed(2)} s
+                      </>
+                    )}
+                    {" "}· {step.summary.nGainCrossed} cross a gain state
+                    {step.summary.gainGated ? " (blanked)" : " (kept)"}
+                    {step.summary.median !== null && (
+                      <>
+                        {" "}· median {step.summary.median.toFixed(4)} (
+                        {(step.summary.medianDb ?? 0).toFixed(2)} dB), peak{" "}
+                        {(step.summary.max ?? 0).toFixed(3)} (
+                        {(step.summary.maxDb ?? 0).toFixed(1)} dB)
+                      </>
+                    )}
+                    {" "}· {step.summary.aboveThreshold} past the line
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+
+          {showStep && step !== null && (
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              The <b>frame step</b> is the oldest signal here and the only
+              per-frame one: the raw per-subcarrier amplitude differenced
+              against the frame before, as{" "}
+              <b>(a<sub>t</sub> − a<sub>t−1</sub>)/(a<sub>t</sub> + a<sub>t−1</sub>)</b>.
+              That is <b>tanh(ΔdB · ln10/40)</b> exactly, so it is the dB
+              difference the LG board thresholds at {step.thresholdDb} dB, read
+              on an axis bounded by ±1 that needs no per-room constant. Where
+              the board&apos;s line sits is itself the finding: measured over 21
+              captures the loudest median step anywhere was 0.675 (22.5 dB), so
+              the 26 dB trigger is <i>above every step ever recorded here</i> —
+              it cannot fire on this fold at all. What does fire it is the
+              per-subcarrier count, and that is the trouble: 14–26 % of the
+              array crosses 26 dB in a single step, in empty rooms as readily as
+              occupied ones, which is where the Phase 1 tab&apos;s false
+              positives come from. Because a median commutes with a
+              monotone map, the |step| trace <i>is</i> the Hybrid tab&apos;s
+              amplitude channel, on a different scale rather than a different
+              measurement. Two things to read it with. The{" "}
+              <b>signed median can cancel</b> — a body brightens some
+              subcarriers and fades others, so strong motion can sit near zero
+              while the envelope is wide. And this is the one panel the{" "}
+              <b>receiver&apos;s gain control</b> reaches intact, since there is
+              no per-second median to absorb it:{" "}
+              {step.summary.nGainCrossed > 0 && (
+                <>
+                  {step.summary.nGainCrossed} of {step.summary.steps} pairs here
+                  cross a gain state (
+                  {((step.summary.nGainCrossed / Math.max(1, step.summary.steps)) * 100).toFixed(0)}
+                  %), and{" "}
+                </>
+              )}
+              measured over 21 captures <b>84–100 % of the loudest 1 % of steps
+              are gain crossings</b>, against a 10–52 % base rate — the tail of
+              this trace belongs to the radio, not the room. Neither the AGC
+              correction (it makes the tail worse, +12–125 % at p99) nor the
+              shape of the fold can be used to tell them apart; what can is that
+              the gain state is <i>reported</i>, which is what{" "}
+              <b>gain gate</b> blanks{step.summary.gainGated ? " — it is on" : ""}.
+              Raw amplitude, no AGC table, matching the board and the Hybrid tab.
+            </p>
+          )}
 
           <Chart
             width={width}

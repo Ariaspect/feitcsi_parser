@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatTime, linePath, linearScale, runs, ticks } from "./series";
+import { bandPath, formatTime, linePath, linearScale, runs, ticks } from "./series";
 
 describe("linearScale", () => {
   it("maps the domain onto the range", () => {
@@ -48,6 +48,37 @@ describe("linePath", () => {
 
   it("returns an empty path when nothing is finite", () => {
     expect(linePath([0, 1], [null, null], x, y)).toBe("");
+  });
+});
+
+describe("bandPath", () => {
+  const x = linearScale([0, 4], [0, 400]);
+  const y = linearScale([-1, 1], [100, 0]);
+
+  it("closes one filled region over a run of columns", () => {
+    const path = bandPath([0, 1, 2], [-0.2, -0.3, -0.1], [0.2, 0.4, 0.1], x, y);
+    expect(path.match(/M/g)).toHaveLength(1);
+    expect(path.match(/Z/g)).toHaveLength(1);
+  });
+
+  it("splits the band at a blank column instead of filling across it", () => {
+    const path = bandPath(
+      [0, 1, 2, 3, 4],
+      [-0.2, -0.2, null, -0.2, -0.2],
+      [0.2, 0.2, null, 0.2, 0.2],
+      x,
+      y,
+    );
+    expect(path.match(/Z/g)).toHaveLength(2);
+  });
+
+  it("skips a lone column, which has no width to fill", () => {
+    expect(bandPath([0], [-0.2], [0.2], x, y)).toBe("");
+  });
+
+  it("treats a NaN edge as a break", () => {
+    const path = bandPath([0, 1, 2], [-0.2, NaN, -0.2], [0.2, 0.2, 0.2], x, y);
+    expect(path).toBe("");
   });
 });
 

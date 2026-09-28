@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchDoppler, fetchMeta, fetchPresence, fetchTile, truncateCaptureName } from "./api";
+import { fetchDoppler, fetchFrameDiff, fetchMeta, fetchPresence, fetchTile, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -332,6 +332,66 @@ describe("fetchDoppler", () => {
   it("throws with the server status on an error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("too short", { status: 400 })));
     await expect(fetchDoppler("c.dat", 0, 1, "amplitude", 600)).rejects.toThrow(/400/);
+  });
+});
+
+describe("fetchFrameDiff", () => {
+  const body = {
+    time_s: [1, 2],
+    signed: [0.01, null],
+    signed_lo: [-0.2, null],
+    signed_hi: [0.3, null],
+    magnitude: [0.05, null],
+    magnitude_hi: [0.31, null],
+    fraction_above: [0.0, null],
+    count: [12, 12],
+    bin_seconds: 0.6,
+    decimated: true,
+    threshold_db: 26,
+    threshold_unit: 0.904547,
+    frames_used: 11100,
+    n_subcarriers: 242,
+    capture_t_min: 0,
+    capture_t_max: 600,
+    summary: {
+      steps: 11099, steps_measured: 11090, n_bridged: 9, gap_limit: 0.12,
+      median: 0.04, p99: 0.4, max: 0.7, above_threshold: 0,
+      median_db: 0.7, max_db: 15.1,
+    },
+  };
+
+  function stub() {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ json: body }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("maps the snake_case payload onto the camelCase series", async () => {
+    stub();
+    const out = await fetchFrameDiff("c.dat", 0, 600);
+    expect(out.signedHi).toEqual([0.3, null]);
+    expect(out.magnitudeHi).toEqual([0.31, null]);
+    expect(out.thresholdUnit).toBeCloseTo(0.904547);
+    expect(out.summary.nBridged).toBe(9);
+    expect(out.summary.maxDb).toBe(15.1);
+  });
+
+  it("sends the threshold and the column budget", async () => {
+    const fetchMock = stub();
+    await fetchFrameDiff("c.dat", 0, 600, { thresholdDb: 6, maxPoints: 880 });
+    expect(fetchMock.mock.calls[0][0]).toContain("threshold_db=6");
+    expect(fetchMock.mock.calls[0][0]).toContain("max_points=880");
+  });
+
+  it("surfaces the server's own reason for a refusal", async () => {
+    // A range with one frame has no step to take, and the endpoint says so.
+    // Swallowing that for a bare status code would leave the panel blank.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse({
+      ok: false, status: 400, json: { detail: "fewer than 2 frames in range" },
+    })));
+    await expect(fetchFrameDiff("c.dat", 0, 0.01)).rejects.toThrow(
+      "fewer than 2 frames in range",
+    );
   });
 });
 
