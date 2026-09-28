@@ -1252,6 +1252,9 @@ export interface MotionSignal {
   nSamples: number;
   /** Each feature's own window length, seconds — they differ on purpose. */
   windows: Record<string, number>;
+  /** Which half of the complex ratio each feature comes off: "amp" or
+   *  "phase". They differ on purpose too — see `backend.motionsig`. */
+  sources: Record<string, string>;
   /** The longest of them: what a labelled cell has to span. */
   windowSeconds: number;
   hopSeconds: number;
@@ -1345,6 +1348,7 @@ export async function fetchMotionSignal(
     streams: body.streams,
     nSamples: body.n_samples,
     windows: body.windows,
+    sources: body.sources,
     windowSeconds: body.window_seconds,
     hopSeconds: body.hop_seconds,
     highpassHz: body.highpass_hz,
