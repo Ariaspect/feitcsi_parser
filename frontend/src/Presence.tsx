@@ -1006,7 +1006,7 @@ export function Presence({
                   times={signal.timeS}
                   domain={domain}
                   yDomain={signalDomain}
-                  yLabel="motion var+lag1 (label-free score)"
+                  yLabel="motion var(magnitude) + lag1(phase) — label-free score"
                   dark={dark}
                   series={[
                     { values: signal.modes.free.score, color: "#0d8a94", width: 1.4, label: "var+lag1" },

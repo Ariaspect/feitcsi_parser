@@ -365,3 +365,18 @@ def test_a_sidecar_flagged_exclude_from_eval_yields_no_truth(tmp_path: Path) -> 
     ).json()
     assert body["truth"] is None and body["modes"]["label"]["confusion"] is None
     assert body["truth_excluded"] == "people walking past outside the room"
+
+
+def test_the_endpoint_says_which_half_each_feature_came_off(tmp_path: Path) -> None:
+    """The panel cannot label the source it is drawing unless it is told.
+
+    The features moved onto different halves of the complex ratio while the
+    UI still said "amplitude", which is indistinguishable from the swap not
+    having happened.
+    """
+    p = _capture_with_a_visit(tmp_path)
+    body = TestClient(app).get(
+        "/api/motion-signal", params={"path": str(p), "t0": 0.0, "t1": 200.0},
+    ).json()
+    assert body["sources"] == {"variance": "amp", "lag1": "phase"}
+    assert set(body["windows"]) == set(body["sources"]) == set(motionsig.FEATURES)

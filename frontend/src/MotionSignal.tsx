@@ -26,6 +26,11 @@ const MODE_SHORT: Record<MotionSignalMode, string> = {
   free: "label-free",
 };
 
+const SOURCE_LABEL: Record<string, string> = {
+  amp: "magnitude",
+  phase: "phase",
+};
+
 const VAR_COLOR = "#0d8a94";
 const LAG_COLOR = "#c2701d";
 const THRESHOLD_COLOR = "#d62728";
@@ -102,9 +107,10 @@ export interface MotionSignalProps {
   dark: boolean;
 }
 
-/** The amplitude-motion signal the stage-1/2 experiment settled on: the
- *  ratio's variance and lag-1 autocorrelation per 2 s window, normalised
- *  against this capture's own quiet level, combined by fixed weights.
+/** The motion signal the stage-1/2 experiment settled on: the complex
+ *  ratio's variance (magnitude, 4 s) and lag-1 autocorrelation (phase, 15 s),
+ *  each normalised against this capture's own quiet level and combined by
+ *  fixed weights.
  *
  *  Not a presence detector — no hold, no breathing, no second chance. It is
  *  the scalar meant to be handed to a back-end classifier, drawn so the
@@ -263,7 +269,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
             times={data.timeS}
             domain={domain}
             yDomain={varDomain}
-            yLabel={`variance · ${data.windows.variance} s window (${MODE_SHORT[shown]} z)`}
+            yLabel={`variance · ${SOURCE_LABEL[data.sources.variance] ?? data.sources.variance} · ${data.windows.variance} s window (${MODE_SHORT[shown]} z)`}
             dark={dark}
             height={110}
             series={[{ values: feat.variance, color: VAR_COLOR, width: 1.1, label: "variance" }]}
@@ -274,7 +280,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
             times={data.timeS}
             domain={domain}
             yDomain={lagDomain}
-            yLabel={`lag-1 autocorrelation · ${data.windows.lag1} s window (${MODE_SHORT[shown]} z)`}
+            yLabel={`lag-1 autocorrelation · ${SOURCE_LABEL[data.sources.lag1] ?? data.sources.lag1} · ${data.windows.lag1} s window (${MODE_SHORT[shown]} z)`}
             dark={dark}
             height={110}
             series={[{ values: feat.lag1, color: LAG_COLOR, width: 1.1, label: "lag1" }]}
@@ -330,14 +336,20 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
           })}
 
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            The source is <b>RATIO</b>, the magnitude of the complex ratio along the AP&apos;s transmit chains —
-            the same grid the presence detector rides on, so a change of decode cannot read as motion.
-            Each instant gives two numbers, reduced over {data.streams} subcarriers by the median and measured
-            over <b>different spans</b>: the <b>variance</b> of a {data.windows.variance} s window after a{" "}
-            {data.highpassHz} Hz high-pass, and the <b>lag-1 autocorrelation</b> of a {data.windows.lag1} s window{" "}
-            <i>before</i> that filter. The spans differ because the features do: lag-1 improves with every second
-            of window (still posture, AUC 0.624 at 2 s against 0.756 at 15 s — a 2 s window resolves only 0.5 Hz
-            and a still occupant moves well below that), while variance peaks near 4 s and falls away. Both are then divided by this
+            The source is <b>RATIO</b>, the complex ratio along the AP&apos;s transmit chains — the same grid the
+            presence detector rides on, so a change of decode cannot read as motion. <b>Both halves of it are
+            used.</b> Each instant gives two numbers, reduced over {data.streams} subcarriers by the median, and
+            they differ in span <i>and</i> in which half they come off: the <b>variance</b> of the{" "}
+            <b>{SOURCE_LABEL[data.sources.variance] ?? data.sources.variance}</b> over {data.windows.variance} s
+            after a {data.highpassHz} Hz high-pass, and the <b>lag-1 autocorrelation</b> of the{" "}
+            <b>{SOURCE_LABEL[data.sources.lag1] ?? data.sources.lag1}</b> over {data.windows.lag1} s{" "}
+            <i>before</i> that filter. Phase is the sensitive half — 2.87 cm of path change is a full 2π at
+            5.24 GHz, so a chest moving millimetres turns it while leaving the magnitude flat — and held out over
+            200 capture-level splits, moving lag-1 there beat keeping it on the magnitude in 75–85% of them.
+            Variance stays on the magnitude: phase variance is noise-dominated when nobody moves. The spans
+            differ for a separate reason — lag-1 improves with every second of window (still posture, AUC 0.624
+            at 2 s against 0.756 at 15 s, since a 2 s window resolves only 0.5 Hz and a still occupant moves well
+            below that), while variance peaks near 4 s and falls away. Both are then divided by this
             capture&apos;s own scale — nothing here is comparable across captures before that, because empty-room
             variance spans 36× between links and pooling captures measures the link rather than the room.
           </p>

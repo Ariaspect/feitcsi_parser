@@ -1502,6 +1502,7 @@ def motion_signal(
         "streams": result["streams"],
         "n_samples": result["n_samples"],
         "windows": result["windows"],
+        "sources": result["sources"],
         "window_seconds": result["window_seconds"],
         "hop_seconds": result["hop_seconds"],
         "highpass_hz": result["highpass_hz"],
