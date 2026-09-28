@@ -22,6 +22,44 @@ bounded in (−1, 1) by construction — +1 a subcarrier appearing from nothing,
 −1 one vanishing into it, 0 no change — with no reference, no floor and no
 per-room constant.
 
+## The frame set: one transmitter, one mode, one bandwidth
+
+A step is only a step between two frames of the **same shape**, so the frame set
+is made uniform before anything is differenced. Left alone it resolves to the
+capture's dominant peer and `STRICT_MIMO = (2, 1)` at full width — on the lg
+captures, `08:bf:b8:95:80:04`, 2x1, 80 MHz — and an explicit `mimo` or
+`source_mac` from the caller is honoured instead. What was used comes back as
+`source_mac` / `mimo` / `selection_note` and is printed under the chart.
+
+Why it is not optional (measured over three captures):
+
+| | steps | median `\|d\|` | live subcarriers |
+|---|---|---|---|
+| both frames 80 MHz | 5 593–12 655 | **0.012–0.044** | 245 |
+| across a bandwidth change | 54–91 (0.6–0.9 %) | **0.220–0.385** | 57 |
+
+Nine to eighteen times the level, judged on a quarter of the array, because a
+narrow frame is centred and NaN-padded into the wide row so only the middle bins
+overlap at all. They are rare, and they are the **extreme tail**: on
+20260916_143259 every single bandwidth-change pair exceeds the whole same-width
+series' maximum. That is a larger per-step artifact than the AGC, and unlike the
+AGC it is pure bookkeeping — those pairs are two bandwidths, not two moments.
+
+What the rule costs and buys, per capture:
+
+| capture | frames kept | p99 | max |
+|---|---|---|---|
+| 20260921_121406 | 12 653 / 12 967 | 0.1989 → **0.1386** | 0.6748 → 0.6748 |
+| 20260916_143259 | 5 621 / 5 737 | 0.2644 → **0.2008** | 0.5454 → **0.2922** |
+| 20260921_030003 | 12 517 / 12 831 | 0.1702 → 0.1689 | 0.4923 → **0.1950** |
+| 20260915_202020 | 5 656 / 5 669 | 0.1135 → 0.1116 | 0.3870 → **0.1518** |
+
+The loudest step in the series drops 46–61 % on three of four captures. The
+mode is the load-bearing filter: every (2, 1) frame measured is full width,
+while 43–51 frames per capture are full width at (1, 1), so the width check is a
+guard rather than the filter. A capture that never used 2x1 falls back to its own
+most common mode and says so, rather than coming back empty.
+
 ## It is the same measurement, not a different one
 
 Substituting `a_t / a_{t−1} = 10^(ΔdB/20) = e^u`, `u = ΔdB·ln10/20`:
@@ -113,11 +151,13 @@ What the table says, in order:
    channel-offset panel above is for.
 
 4. **The empty level spans 15.5× across captures** (0.0050 to 0.0768, 0.09 to
-   1.34 dB) — and 7.3× *within the night group alone*, where 05:00 reads 0.0768
-   against 0.0106 at 02:00 in the same room on the same link. So no absolute
+   1.34 dB) — and ~7× *within the night group alone*, where 05:00 reads 0.077
+   against 0.010 at 02:00 in the same room on the same link. So no absolute
    threshold on this axis transfers, exactly as
    [the hybrid's floor note](hybrid.md) found for `|Δr|/|r|`. Bounded is not the
-   same as calibrated.
+   same as calibrated. **Re-checked with the gain gate on** (see the bimodality
+   note below, which is why): 0.0047 to 0.0765, **16.4×**. The conclusion is not
+   an AGC artifact.
 
 5. **The fidgeting sitters sit at 0.035–0.043**, which is above the daytime
    empties (0.005–0.010) but inside the range of the *noisy* empties
@@ -174,6 +214,31 @@ One capture of four separates; the rest do not. `fraction_above` is no help
 either — at 26 dB its median is 0.0000 on every capture and class, since the
 median step is nowhere near the line. **An earlier version of this panel's
 caption claimed both diagnostics worked. They do not, and it no longer says so.**
+
+### The 42 Hz captures are bimodal, and a median can land in the void
+
+Found while checking the frame-set change, and it revises how these numbers
+should be read. On the 09-21 night captures the receiver changes gain state on
+**~52 % of consecutive pairs**, which splits the step series into two clusters
+about six times apart — same-state pairs near 0.009–0.010 and crossings near
+0.05–0.08 — with almost nothing in between:
+
+| capture | p25 | **p50** | p75 | share < 0.02 | share > 0.05 | p50 gated |
+|---|---|---|---|---|---|---|
+| 20260921_020003 | 0.0039 | 0.0110 | 0.0808 | 51.4 % | 47.8 % | 0.0098 |
+| 20260921_030003 | 0.0040 | **0.0443** | 0.0810 | 49.7 % | 49.4 % | **0.0112** |
+| 20260921_050002 | 0.0059 | 0.0771 | 0.0917 | 37.7 % | 61.6 % | 0.0765 |
+
+With the mass split ~50/50 the median sits in the empty gap between the
+clusters, so a few percent of composition swings it four-fold: 20260921_030003
+reads 0.0443 ungated and 0.0112 gated, while its neighbour an hour earlier
+reads 0.0110 either way. **The 0.0443 in the table above is that instability,
+not a noisier room.** The extremes of the night group (02:00 and 05:00) are
+stable and their ~7× difference survives gating at 7.8×, so the spread finding
+stands; it is the middle value that could not be read off a whole-series median.
+
+For a capture whose gain dithers like this, read the gated median or the
+quartiles — not the ungated median.
 
 **What works is not an inference.** The gain state is reported per frame, so the
 crossings can simply be blanked, the way a pair spanning a dropout already is —

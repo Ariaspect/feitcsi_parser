@@ -409,6 +409,11 @@ def test_it_is_the_hybrid_amplitude_channel_on_the_bounded_axis(tmp_path: Path) 
 
     If these ever disagree, one of the two panels has changed what it reads
     and the docstring's claim that they are one series is stale.
+
+    The fixture is uniform -- one MAC, one mode, one width -- so the two
+    selections coincide. On a real capture they do not: this module enforces a
+    uniform frame set and hybrid takes whatever it was filtered to, which is
+    the point of test_the_frame_set_is_made_uniform below.
     """
     from backend.tiles import get_index
 
@@ -445,6 +450,82 @@ def test_the_summary_reports_the_range_in_both_units(tmp_path: Path) -> None:
     assert s["steps_measured"] <= s["steps"]
     assert 0.0 < s["median"] < s["max"] < 1.0
     assert s["median_db"] == pytest.approx(float(framediff.unit_to_db(s["median"])))
+
+
+# --------------------------------------------------------------------------- #
+#  The frame set                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def _mixed_capture(tmp_path: Path) -> Path:
+    """One room, three frame shapes, as a real capture has.
+
+    100 s at 20 Hz of the wanted set -- the dominant MAC at both tpi slots --
+    with every 20th frame carrying only one slot. A step between those two
+    shapes is a different measurement, not a quieter room.
+    """
+    tpi0 = band(seed=1)
+    tpi1 = band(seed=2)
+    rng = np.random.default_rng(5)
+    blob = []
+    for g in range(2000):
+        mod = 1.0 + 0.01 * rng.standard_normal()
+        cells = {(0, 0): tpi0 * mod}
+        if g % 20:                     # every 20th frame has no second slot
+            cells[(1, 0)] = tpi1
+        blob.append(group_records(g, cells, ts=1000 + 50 * g))
+    return write(tmp_path, b"".join(blob), "mixed.bin")
+
+
+def test_the_frame_set_is_made_uniform(tmp_path: Path) -> None:
+    """One transmitter, one MIMO mode, one width -- and it says which."""
+    from backend.tiles import get_index
+
+    framediff.reset_cache()
+    p = _mixed_capture(tmp_path)
+    index = get_index(p)
+    out = framediff.capture_steps(p, 0.0, 200.0)
+
+    assert out["mimo"] == list(framediff.STRICT_MIMO)
+    assert out["source_mac"] == index.dominant_peer()
+    assert out["frames_dropped"] == 100          # every 20th of 2000
+    assert out["frames_used"] == 1900
+    assert "2x1" in out["selection_note"]
+
+
+def test_an_explicit_filter_is_honoured_over_the_default(tmp_path: Path) -> None:
+    """The reader asking for one mode outranks the module's own choice."""
+    framediff.reset_cache()
+    p = _mixed_capture(tmp_path)
+    out = framediff.capture_steps(p, 0.0, 200.0, mimo=(1, 1))
+    assert out["mimo"] == [1, 1]
+    assert out["frames_used"] == 100             # only the single-slot frames
+
+
+def test_a_capture_without_the_strict_mode_still_yields_a_uniform_set(tmp_path: Path) -> None:
+    """Falls back to the capture's most common mode rather than to nothing.
+
+    A capture recorded some other way must not come back empty just because it
+    never used the mode this module prefers.
+    """
+    tpi0 = band(seed=3)
+    blob = [group_records(g, {(0, 0): tpi0}, ts=1000 + 50 * g) for g in range(400)]
+    p = write(tmp_path, b"".join(blob), "onlyone.bin")
+    framediff.reset_cache()
+    out = framediff.capture_steps(p, 0.0, 200.0)
+    assert out["mimo"] == [1, 1]
+    assert out["frames_used"] == 400
+    assert "no 2x1 frames" in out["selection_note"]
+
+
+def test_the_endpoint_reports_the_frame_set_it_used(tmp_path: Path) -> None:
+    p = _mixed_capture(tmp_path)
+    client = TestClient(app)
+    body = client.get("/api/frame-diff", params={
+        "path": str(p), "t0": 0.0, "t1": 200.0}).json()
+    assert body["mimo"] == [2, 1]
+    assert body["frames_dropped"] == 100
+    assert "full width" in body["selection_note"]
 
 
 # --------------------------------------------------------------------------- #

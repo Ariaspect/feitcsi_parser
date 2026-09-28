@@ -113,6 +113,25 @@ DEFAULT_MAX_POINTS = 2000
 # a median of one.
 MIN_LIVE_SUBCARRIERS = 4
 
+# The frame set this metric is defined on, when the caller names none.
+#
+# A step is only a step between two frames of the SAME SHAPE. Measured over
+# three captures, 0.6-0.9 % of consecutive pairs change bandwidth, and those
+# pairs read a median |d| of 0.220-0.385 against 0.012-0.044 for the 80 MHz
+# ones -- 9-18x, on 57 live subcarriers instead of 245, because a narrow frame
+# is centred and NaN-padded into the wide row so only the middle bins overlap.
+# On 20260916_143259 EVERY such pair exceeds the entire same-width series'
+# maximum. That is a bigger per-step artifact than the AGC, and unlike the AGC
+# it is pure bookkeeping: those pairs are two different bandwidths, not two
+# moments in one room.
+#
+# ``(num_rx, num_tx)`` as ``index.filter_mask`` reads them, which on a MediaTek
+# capture means "both tpi slots present" -- the UI writes it "2x1". Measured on
+# four captures, every (2, 1) frame is full width, while 43-51 frames per
+# capture are full width at (1, 1), so the mode is the load-bearing filter and
+# the width check below is the belt to its braces.
+STRICT_MIMO = (2, 1)
+
 
 def db_to_unit(step_db: np.ndarray | float) -> np.ndarray | float:
     """Map a dB step onto the bounded axis. ``tanh(dB * ln10 / 40)``."""
@@ -327,6 +346,59 @@ def reset_cache() -> None:
         _cache.clear()
 
 
+def _uniform_selection(
+    index, mimo: tuple[int, int] | None, source_mac: str | None
+) -> dict[str, Any]:
+    """One transmitter, one MIMO mode, one bandwidth -- and say which.
+
+    The MAC defaults to the capture's dominant peer, the same choice
+    ``tiles.get_gain_table`` makes and for the same reason: a frame from
+    another sender differs from its neighbours by the channel to that sender.
+    The mode defaults to ``STRICT_MIMO`` when the capture has it and to its
+    most common mode when it does not, so a capture recorded some other way
+    still yields a uniform set rather than an empty one.
+    """
+    mac = source_mac or (index.dominant_peer() if hasattr(index, "dominant_peer") else None)
+    note_parts = []
+
+    mode = mimo
+    if mode is None:
+        base = index.filter_mask(source_mac=mac)
+        if index.filter_mask(mimo=STRICT_MIMO, source_mac=mac).any():
+            mode = STRICT_MIMO
+        else:
+            rx = np.asarray(getattr(index, "num_rx_arr", np.zeros(0)))
+            tx = np.asarray(getattr(index, "num_tx_arr", np.zeros(0)))
+            if rx.size and tx.size and base.any():
+                pairs, counts = np.unique(
+                    np.stack([rx[base], tx[base]], axis=1), axis=0, return_counts=True
+                )
+                mode = tuple(int(v) for v in pairs[counts.argmax()])
+                note_parts.append(f"no {STRICT_MIMO[0]}x{STRICT_MIMO[1]} frames")
+    mask = index.filter_mask(mimo=mode, source_mac=mac)
+
+    # Width, as a guard rather than as the filter: every STRICT_MIMO frame
+    # measured so far is full width, but a link that dropped to 20 MHz while
+    # keeping both slots would sail through the mode test.
+    bins = getattr(index, "_bins", None)
+    narrow = np.zeros(mask.shape, dtype=bool)
+    if bins is not None:
+        bins = np.asarray(bins)
+        if bins.shape == mask.shape:
+            narrow = mask & (bins != index.num_subcarriers)
+            mask = mask & ~narrow
+            if narrow.any():
+                note_parts.append(f"{int(narrow.sum())} narrow frames dropped")
+
+    mode_label = "any" if mode is None else f"{mode[0]}x{mode[1]}"
+    note = f"{mac or 'any MAC'}, {mode_label}, full width"
+    if note_parts:
+        note += " (" + "; ".join(note_parts) + ")"
+    return {"mask": mask, "narrow": narrow, "source_mac": mac,
+            "mimo": None if mode is None else [int(mode[0]), int(mode[1])],
+            "note": note}
+
+
 def capture_steps(
     path,
     t0: float,
@@ -339,10 +411,14 @@ def capture_steps(
 ) -> dict[str, Any]:
     """Decode a range and reduce it to the per-step series, cached.
 
-    Frames are selected exactly as ``hybrid.capture_evidence`` selects them for
-    its amplitude channel -- same mask, same range, same decode -- so the two
-    are comparable step for step and a difference between the panels is never
-    the decode.
+    **One transmitter, one MIMO mode, one bandwidth.** Unlike
+    ``hybrid.capture_evidence``, which takes whatever the caller filtered to,
+    this enforces a uniform frame set, because a difference between two frames
+    of different shape is bookkeeping rather than motion -- see
+    ``STRICT_MIMO``. Left to themselves the filters resolve to the capture's
+    dominant peer and ``STRICT_MIMO``; an explicit *mimo* or *source_mac* is
+    honoured instead, and full width is required either way. What was actually
+    used comes back in the result, so the panel never has to assume.
 
     The gain state comes from the index's ``rssi_1``, which is what
     ``backend.agc`` uses as its own state proxy. Taken for the *selected*
@@ -362,16 +438,28 @@ def capture_steps(
 
     index = get_index(path)
     times_all = np.asarray(index.times, dtype=float)
-    mask = index.filter_mask(mimo=mimo, source_mac=source_mac)
-    ids = np.flatnonzero(mask & (times_all >= t0) & (times_all <= t1))
+    sel = _uniform_selection(index, mimo, source_mac)
+    in_range = (times_all >= t0) & (times_all <= t1)
+    ids = np.flatnonzero(sel["mask"] & in_range)
     if ids.size < 2:
-        raise ValueError("fewer than 2 frames in range, so there is no step to take")
+        raise ValueError(
+            f"fewer than 2 frames in range once the set was made uniform "
+            f"({sel['note']}), so there is no step to take"
+        )
 
     amp_db = _decode_for_doppler(path, index, ids, "amplitude", None, interpolate)
     rssi = np.asarray(getattr(index, "rssi_1", None))
     gain_state = rssi[ids] if rssi.ndim == 1 and rssi.size > int(ids[-1]) else None
     out = frame_steps(amp_db, times_all[ids],
                       gain_state=gain_state, gate_gain=gate_gain)
+    out["source_mac"] = sel["source_mac"]
+    out["mimo"] = sel["mimo"]
+    out["selection_note"] = sel["note"]
+    # Frames the uniformity rule removed from this range, so the reader can see
+    # the price of it rather than a silently shorter series.
+    dropped = int((in_range & ~sel["mask"]).sum())
+    out["frames_dropped"] = dropped
+    out["frames_dropped_narrow"] = int((in_range & sel["narrow"]).sum())
     out["frames_used"] = int(ids.size)
     out["n_subcarriers"] = int(amp_db.shape[1])
     out["t_min"] = float(times_all[0]) if times_all.size else 0.0
@@ -420,6 +508,11 @@ def compute_frame_diff(
             "max_db": float(unit_to_db(finite.max())) if finite.size else None,
         },
         "frames_used": steps["frames_used"],
+        "frames_dropped": steps["frames_dropped"],
+        "frames_dropped_narrow": steps["frames_dropped_narrow"],
+        "source_mac": steps["source_mac"],
+        "mimo": steps["mimo"],
+        "selection_note": steps["selection_note"],
         "n_subcarriers": steps["n_subcarriers"],
         "t_min": steps["t_min"],
         "t_max": steps["t_max"],

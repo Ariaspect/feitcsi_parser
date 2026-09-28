@@ -1530,6 +1530,12 @@ def frame_diff(
     an axis that needs no per-room constant. No threshold is drawn or counted:
     measured, the board's 26 dB sits above every step this fold produces.
 
+    One transmitter, one MIMO mode, one bandwidth: left alone the filters
+    resolve to the capture's dominant peer and 2x1 at full width, because a
+    step between two frames of different shape is bookkeeping rather than
+    motion (measured: those pairs read 9-18x the same-width level). What was
+    used comes back as ``source_mac``/``mimo``/``selection_note``.
+
     No AGC table and no reference, matching ``hybrid.amplitude_diff``. Unlike
     that per-second median, this is per frame and the receiver's gain control
     reaches it intact -- 84-100 % of the loudest 1 % of steps are gain
@@ -1568,6 +1574,11 @@ def frame_diff(
         "bin_seconds": result["bin_seconds"],
         "decimated": bool(result["decimated"]),
         "frames_used": result["frames_used"],
+        "frames_dropped": result["frames_dropped"],
+        "frames_dropped_narrow": result["frames_dropped_narrow"],
+        "source_mac": result["source_mac"],
+        "mimo": result["mimo"],
+        "selection_note": result["selection_note"],
         "n_subcarriers": result["n_subcarriers"],
         "capture_t_min": result["t_min"],
         "capture_t_max": result["t_max"],

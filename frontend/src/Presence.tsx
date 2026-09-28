@@ -989,7 +989,11 @@ export function Presence({
                   </div>
                   <p className="text-[11px] text-muted-foreground leading-relaxed tabular-nums">
                     {step.summary.stepsMeasured} of {step.summary.steps} steps
-                    measured over {step.nSubcarriers} subcarriers
+                    measured over {step.nSubcarriers} subcarriers ·{" "}
+                    <b>{step.selectionNote}</b>
+                    {step.framesDropped > 0 && (
+                      <> · {step.framesDropped} frames of another shape dropped</>
+                    )}
                     {step.summary.nBridged > 0 && (
                       <>
                         {" "}· {step.summary.nBridged} dropped for spanning a gap

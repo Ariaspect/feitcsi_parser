@@ -1376,6 +1376,15 @@ export interface FrameDiff {
    *  column is one frame pair and the envelope is the value itself. */
   decimated: boolean;
   framesUsed: number;
+  /** Frames in range the uniformity rule removed: another transmitter, another
+   *  MIMO mode, or a narrower bandwidth. A step between two frame shapes is
+   *  bookkeeping, not motion. */
+  framesDropped: number;
+  framesDroppedNarrow: number;
+  /** The frame set actually used, so the panel never has to assume. */
+  sourceMac: string | null;
+  mimo: [number, number] | null;
+  selectionNote: string;
   nSubcarriers: number;
   captureTMin: number;
   captureTMax: number;
@@ -1443,6 +1452,11 @@ export async function fetchFrameDiff(
     binSeconds: body.bin_seconds,
     decimated: body.decimated,
     framesUsed: body.frames_used,
+    framesDropped: body.frames_dropped,
+    framesDroppedNarrow: body.frames_dropped_narrow,
+    sourceMac: body.source_mac,
+    mimo: body.mimo,
+    selectionNote: body.selection_note,
     nSubcarriers: body.n_subcarriers,
     captureTMin: body.capture_t_min,
     captureTMax: body.capture_t_max,

@@ -347,6 +347,11 @@ describe("fetchFrameDiff", () => {
     bin_seconds: 0.6,
     decimated: true,
     frames_used: 11100,
+    frames_dropped: 314,
+    frames_dropped_narrow: 0,
+    source_mac: "08:bf:b8:95:80:04",
+    mimo: [2, 1],
+    selection_note: "08:bf:b8:95:80:04, 2x1, full width",
     n_subcarriers: 242,
     capture_t_min: 0,
     capture_t_max: 600,
@@ -371,6 +376,9 @@ describe("fetchFrameDiff", () => {
     expect(out.magnitudeHi).toEqual([0.31, null]);
     expect(out.summary.nBridged).toBe(9);
     expect(out.summary.nGainCrossed).toBe(2628);
+    expect(out.mimo).toEqual([2, 1]);
+    expect(out.framesDropped).toBe(314);
+    expect(out.selectionNote).toContain("full width");
     expect(out.summary.maxDb).toBe(15.1);
   });
 
