@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,7 +21,16 @@ import {
   type PresenceChannel,
   type PresenceState,
 } from "./api";
-import { bandPath, formatTime, linePath, linearScale, runs, ticks } from "./series";
+import {
+  bandPath,
+  clampWindow,
+  formatTime,
+  linePath,
+  linearScale,
+  runs,
+  ticks,
+  zoomWindow,
+} from "./series";
 import type { TimeLink } from "./timelink";
 
 // Longest stretch analysed before the user asks for more. Presence needs
@@ -31,6 +40,16 @@ import type { TimeLink } from "./timelink";
 // every frame it holds. Ten minutes is long enough to hold dozens of windows
 // and short enough to come back promptly.
 const DEFAULT_SPAN_SECONDS = 600;
+
+// Narrowest window the frame step's wheel may reach. At 42 Hz half a second is
+// about 20 frame pairs, which is as far in as a per-frame trace has anything
+// left to resolve -- past it the panel is drawing the same steps wider.
+const MIN_STEP_SPAN_SECONDS = 0.5;
+
+// How long the frame step waits before refetching a window the reader is still
+// moving. Long enough that one drag is one or two requests rather than one per
+// pointer move, short enough to feel like the panel is keeping up.
+const STEP_FETCH_DEBOUNCE_MS = 180;
 
 const STATE_LABEL: Record<PresenceState, string> = {
   present: "still occupant",
@@ -83,6 +102,15 @@ interface ChartProps {
   yLabel: string;
   dark: boolean;
   width: number;
+  /** Given, the plot pans on drag and zooms on the wheel, reporting the window
+   *  it wants. The caller owns the window, so a chart is never zoomed to
+   *  something the caller cannot fetch. */
+  onWindow?: (next: [number, number]) => void;
+  /** Outer bound the window may not leave. Required with `onWindow`. */
+  limit?: [number, number];
+  /** Narrowest window the wheel may reach. Below a frame or two there is
+   *  nothing left to resolve. */
+  minSpan?: number;
 }
 
 // Top margin holds the axis label clear of the highest tick label; at 8 the
@@ -100,6 +128,9 @@ function Chart({
   yLabel,
   dark,
   width,
+  onWindow,
+  limit,
+  minSpan = 0.5,
 }: ChartProps) {
   const inner = {
     w: Math.max(1, width - MARGIN.left - MARGIN.right),
@@ -111,8 +142,77 @@ function Chart({
   const text = dark ? "#8b95a3" : "#6b7480";
   const span = domain[1] - domain[0];
 
+  // One clip per instance. Without it a series whose times reach past the
+  // domain draws outside the plot box -- which is what the frame step does by
+  // construction, since its steps cover the whole decoded range while the
+  // window-centre series above it start half a window in.
+  const clipId = `plot-${useId()}`;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const drag = useRef<{ clientX: number; from: [number, number] } | null>(null);
+  const interactive = Boolean(onWindow && limit);
+
+  // Wheel zoom needs preventDefault, and React's onWheel is passive, so the
+  // listener is attached by hand. Anchored on the cursor: see zoomWindow.
+  useEffect(() => {
+    const node = svgRef.current;
+    if (!node || !onWindow || !limit) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = node.getBoundingClientRect();
+      const anchor = (event.clientX - rect.left - MARGIN.left) / inner.w;
+      // Up/away zooms in. The exponent keeps a trackpad's many small deltas and
+      // a mouse's few large ones on the same scale.
+      const factor = Math.exp(event.deltaY * 0.002);
+      onWindow(zoomWindow(domain, anchor, factor, limit, minSpan));
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [onWindow, limit, domain, inner.w, minSpan]);
+
+  const onPointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!interactive || event.button !== 0) return;
+    drag.current = { clientX: event.clientX, from: [domain[0], domain[1]] };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onPointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    const held = drag.current;
+    if (!held || !onWindow || !limit) return;
+    // Measured from where the drag started, not from the last event, so the
+    // window cannot accumulate drift over a long drag.
+    const moved = ((event.clientX - held.clientX) / inner.w)
+      * (held.from[1] - held.from[0]);
+    onWindow(clampWindow(
+      [held.from[0] - moved, held.from[1] - moved], limit, minSpan,
+    ));
+  };
+  const endDrag = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!drag.current) return;
+    drag.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   return (
-    <svg width={width} height={height} role="img" aria-label={yLabel}>
+    <svg
+      ref={svgRef}
+      width={width}
+      height={height}
+      role="img"
+      aria-label={yLabel}
+      style={interactive ? { cursor: "ew-resize", touchAction: "none" } : undefined}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+    >
+      <defs>
+        <clipPath id={clipId}>
+          {/* A little headroom above and below so a 1.8 px stroke sitting on
+              the top gridline is not shaved in half by its own clip. */}
+          <rect x={0} y={-2} width={inner.w} height={inner.h + 4} />
+        </clipPath>
+      </defs>
       <g transform={`translate(${MARGIN.left},${MARGIN.top})`}>
         {ticks(yDomain[0], yDomain[1], 4).map((v) => (
           <g key={v}>
@@ -134,40 +234,42 @@ function Chart({
             {formatTime(v, span)}
           </text>
         ))}
-        {/* Under the guides and the lines: the band is context, and a guide
-            hidden behind a fill is a threshold the reader cannot place. */}
-        {bands.map((b) => (
-          <path
-            key={b.label}
-            d={bandPath(times, b.lo, b.hi, x, y)}
-            fill={b.color}
-            fillOpacity={b.opacity ?? 0.25}
-            stroke="none"
-          />
-        ))}
-        {guides.map((g) => (
-          <line
-            key={g.label}
-            x1={0}
-            x2={inner.w}
-            y1={y(g.value)}
-            y2={y(g.value)}
-            stroke={g.color}
-            strokeWidth={1}
-            strokeDasharray="4 3"
-          />
-        ))}
-        {series.map((s) => (
-          <path
-            key={s.label}
-            d={linePath(times, s.values, x, y)}
-            fill="none"
-            stroke={s.color}
-            strokeWidth={s.width ?? 1}
-            strokeDasharray={s.dashed ? "3 2" : undefined}
-            strokeLinejoin="round"
-          />
-        ))}
+        <g clipPath={`url(#${clipId})`}>
+          {/* Under the guides and the lines: the band is context, and a guide
+              hidden behind a fill is a threshold the reader cannot place. */}
+          {bands.map((b) => (
+            <path
+              key={b.label}
+              d={bandPath(times, b.lo, b.hi, x, y)}
+              fill={b.color}
+              fillOpacity={b.opacity ?? 0.25}
+              stroke="none"
+            />
+          ))}
+          {guides.map((g) => (
+            <line
+              key={g.label}
+              x1={0}
+              x2={inner.w}
+              y1={y(g.value)}
+              y2={y(g.value)}
+              stroke={g.color}
+              strokeWidth={1}
+              strokeDasharray="4 3"
+            />
+          ))}
+          {series.map((s) => (
+            <path
+              key={s.label}
+              d={linePath(times, s.values, x, y)}
+              fill="none"
+              stroke={s.color}
+              strokeWidth={s.width ?? 1}
+              strokeDasharray={s.dashed ? "3 2" : undefined}
+              strokeLinejoin="round"
+            />
+          ))}
+        </g>
         <text x={-MARGIN.left + 2} y={-8} fontSize={9} fill={text}>
           {yLabel}
         </text>
@@ -316,10 +418,16 @@ export function Presence({
   // verdict above depends on it, so it must not be able to slow the verdict
   // down or fail it.
   const [showStep, setShowStep] = useState(true);
-  const [stepThresholdDb, setStepThresholdDb] = useState(26);
   // Off by default: it was measured after the panel shipped, and a measurement
   // does not get to change what the panel showed. See docs/frame_step.md.
   const [gateGain, setGateGain] = useState(false);
+  // The frame step's own view. `null` follows the panel, so the trace sits on
+  // the shared time axis with the charts above it until the reader zooms; a
+  // zoom then REFETCHES over the narrower window, because decimation happens
+  // server-side and stretching existing columns would magnify nothing. At full
+  // zoom each column is one frame pair, which is the only way a per-frame
+  // signal can actually be read.
+  const [stepWindow, setStepWindow] = useState<[number, number] | null>(null);
   const [step, setStep] = useState<FrameDiff | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
   const [data, setData] = useState<PresenceData | null>(null);
@@ -394,41 +502,54 @@ export function Presence({
     mimo, sourceMac, interpolate,
   ]);
 
+  // A zoom belongs to the range it was taken in. Keeping it across a pan of the
+  // shared axis would leave the panel showing a window the reader did not pick.
+  useEffect(() => setStepWindow(null), [path, range]);
+
   useEffect(() => {
     if (!showStep) {
       setStep(null);
       setStepError(null);
       return;
     }
+    const [from, to] = stepWindow ?? range;
     const controller = new AbortController();
-    fetchFrameDiff(
-      path,
-      range[0],
-      range[1],
-      {
-        thresholdDb: stepThresholdDb,
-        gateGain,
-        // One column per pixel. Fewer would average away the single frame this
-        // signal exists to show; more would be columns the panel cannot draw.
-        maxPoints: Math.max(200, Math.min(4000, width)),
-        mimo,
-        sourceMac,
-        interpolate,
-      },
-      controller.signal,
-    )
-      .then((result) => {
-        setStep(result);
-        setStepError(null);
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setStep(null);
-        setStepError(err instanceof Error ? err.message : String(err));
-      });
-    return () => controller.abort();
+    // Debounced, because a drag sets the window on every pointer move and each
+    // fetch decodes a range server-side. The chart follows the pointer the whole
+    // time on the data it already has -- stretched, and clipped at the edges --
+    // and the finer columns arrive once the pointer settles.
+    const timer = setTimeout(() => {
+      fetchFrameDiff(
+        path,
+        from,
+        to,
+        {
+          gateGain,
+          // One column per pixel. Fewer would average away the single frame this
+          // signal exists to show; more would be columns the panel cannot draw.
+          maxPoints: Math.max(200, Math.min(4000, width)),
+          mimo,
+          sourceMac,
+          interpolate,
+        },
+        controller.signal,
+      )
+        .then((result) => {
+          setStep(result);
+          setStepError(null);
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return;
+          setStep(null);
+          setStepError(err instanceof Error ? err.message : String(err));
+        });
+    }, STEP_FETCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [
-    path, range, showStep, stepThresholdDb, gateGain, width, mimo, sourceMac,
+    path, range, stepWindow, showStep, gateGain, width, mimo, sourceMac,
     interpolate,
   ]);
 
@@ -572,23 +693,6 @@ export function Presence({
           </Button>
           {showStep && (
             <>
-              <Label htmlFor="presence-step-db" className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                Line (dB)
-              </Label>
-              <Input
-                id="presence-step-db"
-                type="number"
-                min={1}
-                max={60}
-                step={1}
-                className="w-16"
-                title="Where to draw the reference line, in dB. 26 is the LG board's own change-detection threshold, which the Phase 1 tab scores."
-                value={stepThresholdDb}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v >= 1 && v <= 60) setStepThresholdDb(v);
-                }}
-              />
               <Button
                 variant={gateGain ? "default" : "outline"}
                 size="sm"
@@ -598,6 +702,17 @@ export function Presence({
               >
                 gain gate {gateGain ? "on" : "off"}
               </Button>
+              {stepWindow && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-[11px]"
+                  title="Back to the panel's own range, on the shared time axis"
+                  onClick={() => setStepWindow(null)}
+                >
+                  reset zoom
+                </Button>
+              )}
             </>
           )}
         </div>
@@ -804,7 +919,14 @@ export function Presence({
                   <Chart
                     width={width}
                     times={step.timeS}
-                    domain={domain}
+                    // The shared axis until the reader zooms, then its own. Drag
+                    // pans, the wheel zooms about the cursor, and both are
+                    // bounded by the panel's range because that is what the
+                    // detector above was computed over.
+                    domain={stepWindow ?? domain}
+                    limit={range}
+                    onWindow={setStepWindow}
+                    minSpan={MIN_STEP_SPAN_SECONDS}
                     yDomain={[-stepCeiling, stepCeiling]}
                     yLabel="frame step (a−a′)/(a+a′)"
                     dark={dark}
@@ -835,17 +957,6 @@ export function Presence({
                           }]
                         : []),
                     ]}
-                    guides={
-                      // Drawn only when it is inside the view. A guide clamped
-                      // to the top edge would read as a threshold the trace is
-                      // about to cross, when it is 12x above the whole panel.
-                      step.thresholdUnit <= stepCeiling
-                        ? [
-                            { value: step.thresholdUnit, color: "#d62728", label: "board threshold" },
-                            { value: -step.thresholdUnit, color: "#d62728", label: "board threshold, fading" },
-                          ]
-                        : []
-                    }
                   />
                   <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
                     <span style={{ color: "#2f7c5c" }}>signed median</span>
@@ -857,19 +968,24 @@ export function Presence({
                     <span style={{ color: "#a34a8f" }}>
                       |step| median{step.decimated && " (dashed: column peak)"}
                     </span>
-                    {step.thresholdUnit <= stepCeiling ? (
-                      <span style={{ color: "#d62728" }}>
-                        ±{step.thresholdUnit.toFixed(3)} = {step.thresholdDb} dB
-                      </span>
-                    ) : (
-                      <span>
-                        axis ±{stepCeiling.toFixed(3)} of a ±1 scale · the{" "}
-                        {step.thresholdDb} dB line sits at{" "}
-                        {step.thresholdUnit.toFixed(3)},{" "}
-                        {(step.thresholdUnit / stepCeiling).toFixed(0)}× above
-                        this view
-                      </span>
-                    )}
+                    <span>
+                      axis ±{stepCeiling.toFixed(3)} of a bounded ±1 scale
+                      {step.summary.max !== null && (
+                        <> · peak {(step.summary.maxDb ?? 0).toFixed(1)} dB</>
+                      )}
+                    </span>
+                    <span>
+                      {stepWindow ? (
+                        <>
+                          zoomed to {stepWindow[0].toFixed(1)}–
+                          {stepWindow[1].toFixed(1)} s (
+                          {((range[1] - range[0]) / (stepWindow[1] - stepWindow[0])).toFixed(0)}×,
+                          off the shared axis) · drag to pan, wheel to zoom
+                        </>
+                      ) : (
+                        "drag to pan · wheel to zoom"
+                      )}
+                    </span>
                   </div>
                   <p className="text-[11px] text-muted-foreground leading-relaxed tabular-nums">
                     {step.summary.stepsMeasured} of {step.summary.steps} steps
@@ -890,7 +1006,6 @@ export function Presence({
                         {(step.summary.maxDb ?? 0).toFixed(1)} dB)
                       </>
                     )}
-                    {" "}· {step.summary.aboveThreshold} past the line
                   </p>
                 </>
               )}
@@ -903,17 +1018,15 @@ export function Presence({
               per-frame one: the raw per-subcarrier amplitude differenced
               against the frame before, as{" "}
               <b>(a<sub>t</sub> − a<sub>t−1</sub>)/(a<sub>t</sub> + a<sub>t−1</sub>)</b>.
-              That is <b>tanh(ΔdB · ln10/40)</b> exactly, so it is the dB
-              difference the LG board thresholds at {step.thresholdDb} dB, read
-              on an axis bounded by ±1 that needs no per-room constant. Where
-              the board&apos;s line sits is itself the finding: measured over 21
-              captures the loudest median step anywhere was 0.675 (22.5 dB), so
-              the 26 dB trigger is <i>above every step ever recorded here</i> —
-              it cannot fire on this fold at all. What does fire it is the
-              per-subcarrier count, and that is the trouble: 14–26 % of the
-              array crosses 26 dB in a single step, in empty rooms as readily as
-              occupied ones, which is where the Phase 1 tab&apos;s false
-              positives come from. Because a median commutes with a
+              That is <b>tanh(ΔdB · ln10/40)</b> exactly — the same dB
+              difference the board reads, on an axis bounded by ±1 that needs no
+              per-room constant, and any step can be read back in dB. No
+              threshold is drawn: measured over 21 captures the loudest median
+              step anywhere was 0.675 = 22.5 dB, so the board&apos;s 26 dB line
+              sits above everything this fold can produce (what fires the board
+              is its per-subcarrier count, and 14–26 % of the array crosses
+              26 dB in a single step in empty rooms as readily as occupied ones
+              — see <code>docs/frame_step.md</code>). Because a median commutes with a
               monotone map, the |step| trace <i>is</i> the Hybrid tab&apos;s
               amplitude channel, on a different scale rather than a different
               measurement. Two things to read it with. The{" "}

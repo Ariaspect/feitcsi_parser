@@ -60,6 +60,50 @@ export function linePath(
   return path;
 }
 
+/** Fit a window inside `limit`, never narrower than `minSpan` and never wider
+ *  than `limit` itself, by clamping the span and then sliding it in.
+ *
+ *  Slid rather than cropped: a pan that runs into the end of the capture should
+ *  stop moving, not shrink the view the reader is holding.
+ */
+export function clampWindow(
+  window: [number, number],
+  limit: [number, number],
+  minSpan: number,
+): [number, number] {
+  const outer = Math.max(0, limit[1] - limit[0]);
+  const span = Math.min(Math.max(window[1] - window[0], minSpan), outer || minSpan);
+  let t0 = window[0];
+  if (t0 + span > limit[1]) t0 = limit[1] - span;
+  if (t0 < limit[0]) t0 = limit[0];
+  return [t0, t0 + span];
+}
+
+/** Zoom a window about a fraction of its own width, keeping that point fixed.
+ *
+ *  `anchor` is where the cursor sits, 0 at the left edge and 1 at the right, so
+ *  the time under the pointer does not move while the wheel turns — the only
+ *  zoom that feels like the view is being scaled rather than jumped.
+ *  `factor` above 1 widens (zooms out), below 1 narrows.
+ */
+export function zoomWindow(
+  window: [number, number],
+  anchor: number,
+  factor: number,
+  limit: [number, number],
+  minSpan: number,
+): [number, number] {
+  const span = window[1] - window[0];
+  const a = Math.min(1, Math.max(0, anchor));
+  const at = window[0] + a * span;
+  // The span is clamped BEFORE the window is positioned. The other order lets
+  // clampWindow widen the window by moving its right edge, which walks the
+  // anchored time out to the left edge exactly when the wheel hits the floor.
+  const outer = Math.max(0, limit[1] - limit[0]);
+  const next = Math.min(Math.max(span * factor, minSpan), outer || minSpan);
+  return clampWindow([at - a * next, at - a * next + next], limit, minSpan);
+}
+
 /** SVG path for a filled band between a low and a high series.
  *
  * Drawn for a decimated per-frame signal, where one column spans many frames

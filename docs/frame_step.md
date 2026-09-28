@@ -54,6 +54,26 @@ them. Columns are equal in time, one per pixel, and carry **envelopes rather
 than averages**: the point of a per-frame signal is the single frame that
 moved, and a mean over twelve neighbours is exactly what hides it.
 
+**No threshold line.** The board's 26 dB was drawn here at first and measuring
+it removed the reason to — see below: it sits above every step this fold can
+produce. A step is still reported in dB (`median_db`, `max_db`), which needs no
+threshold.
+
+**Pan and zoom.** Drag pans, the wheel zooms about the cursor, down to a 0.5 s
+floor (≈20 frame pairs at 42 Hz), bounded by the panel's own range because that
+is what the detector above it was computed over. A zoom **refetches** rather
+than stretching: at 300 s the response is 880 decimated columns, at 10 s it is
+429 columns of one frame pair each, and at the floor it is 21 individual pairs.
+That is the only way a per-frame trace can actually be read. The refetch is
+debounced 180 ms so a drag costs one or two requests, and while zoomed the chart
+carries its own time axis and says so — it is off the shared axis the charts
+above it share, and `reset zoom` puts it back.
+
+The plot is clipped to its own box. Without that the step trace overflows it by
+design: the steps cover the whole decoded range while the window-centre series
+above start half a window in, which on a 300 s range with a 30 s window is
+14.8 s (46 px) past the left edge and 15.7 s (49 px) past the right.
+
 Steps spanning a dropout are blanked, not bridged — `doppler.gap_limit_for`,
 the same limit the spectrogram and the presence grid use.
 
@@ -176,11 +196,15 @@ absolute threshold from working.
 the measurement arrived after the panel did, and a measurement does not get to
 silently change what the panel showed.
 
-## The board's 26 dB line
+## The board's 26 dB line, and why the panel no longer draws it
 
 The loudest **median** step anywhere in the 21 captures is 0.675 = **22.5 dB**,
 so the 26 dB trigger is above every step recorded here and cannot fire on this
-fold at all.
+fold at all. A line at 0.9045 on an axis whose data never leaves ±0.7 marks
+nothing, and the per-subcarrier share crossing it (`fraction_above`) had a
+median of 0.0000 on every capture and class — a counter that only ever read
+zero. Both were removed from the module, the endpoint and the panel; the finding
+below is why, and it is kept here rather than in the UI.
 
 What fires the live detector is its per-subcarrier count (`≥ 2` subcarriers past
 the threshold), and that is the trouble: **14–26 % of the array crosses 26 dB

@@ -25,9 +25,8 @@ two amplitudes as ``a_t / a_{t-1} = 10^(dB/20)`` and substituting,
 
 so ``d = tanh(dB * ln10 / 40)`` exactly. The bounded axis is a monotone
 squash of the dB step and nothing else: no information is added and none is
-lost, the ordering of steps is preserved, and every threshold carries across.
-Phase 1's 26 dB lands at d = 0.9045, which is why that line can be drawn on
-this axis and mean what it means there.
+lost, the ordering of steps is preserved, and a step can always be read back in
+dB (``unit_to_db``). Phase 1's 26 dB, for the record, lands at d = 0.9045.
 
 The consequence worth stating is that ``median`` commutes with a monotone map,
 so the median fold over subcarriers *here* is the tanh of the median fold in
@@ -41,13 +40,15 @@ Two folds over the subcarrier axis are returned, and the difference matters:
   some subcarriers and fades others, so a *signed* median can sit near zero
   through strong motion.
 * ``magnitude`` is the median of ``|d|``, which cannot cancel, and is the one
-  comparable to the 26 dB line and to the hybrid's amplitude channel.
+  that equals the hybrid's amplitude channel.
 
-``fraction_above`` is the share of live subcarriers whose step exceeds the
-threshold. The board's own detector has the same guard
-(``min_absence_subcarriers``) -- a step that moved two subcarriers is not a
-room changing. At the board's 26 dB it is zero for the median step and speaks
-only in the tail, which is exactly where the board fires.
+No threshold is drawn or reported. The board's 26 dB line was carried here at
+first, and measuring it removed the reason to: the loudest median step over 21
+captures is 0.675 (22.5 dB), so the line sits above everything this fold can
+produce, and the per-subcarrier share that does cross it has a median of 0.0000
+-- an axis marking nothing and a counter reading zero. The dB equivalent of a
+step is still reported (``median_db``, ``max_db``) because that needs no
+threshold; ``docs/frame_step.md`` keeps the finding about the board.
 
 **The receiver's gain control is not negligible here** (measured 2026-09-28
 over 21 captures, ``docs/frame_step.md``). The reported gain state changes
@@ -103,11 +104,6 @@ import numpy as np
 # d = tanh(dB * ln10 / 40). The whole identity between this axis and a dB step.
 DB_TO_UNIT = math.log(10.0) / 40.0
 
-# The LG board's change-detection threshold, in dB (``vendor/csi_dump_parsing``
-# and the Phase 1 tab). Kept here so the line drawn on this axis and the one
-# scored on that tab cannot drift apart.
-LG_THRESHOLD_DB = 26.0
-
 # Enough columns for a wide panel with room to spare, and small enough that the
 # response stays a few hundred kB rather than a few megabytes: 600 s at 42 Hz is
 # 25 000 steps, which no plot has pixels for.
@@ -146,15 +142,12 @@ def relative_step(amp_db: np.ndarray) -> np.ndarray:
         return np.tanh(np.diff(amp_db, axis=0) * DB_TO_UNIT)
 
 
-def fold(
-    steps: np.ndarray, *, threshold_db: float = LG_THRESHOLD_DB
-) -> dict[str, np.ndarray]:
+def fold(steps: np.ndarray) -> dict[str, np.ndarray]:
     """Reduce ``(n_steps, n_sc)`` to one row of numbers per step.
 
-    ``signed`` and ``magnitude`` are the two median folds; ``fraction_above``
-    is the share of live subcarriers past *threshold_db*, and ``live`` how many
-    there were. A step with too few live subcarriers reports NaN rather than a
-    median of one or two: a dead array is not a quiet room.
+    ``signed`` and ``magnitude`` are the two median folds and ``live`` is how
+    many subcarriers carried them. A step with too few live subcarriers reports
+    NaN rather than a median of one or two: a dead array is not a quiet room.
     """
     steps = np.asarray(steps, dtype=float)
     if steps.ndim != 2:
@@ -163,7 +156,6 @@ def fold(
     out = {
         "signed": np.full(n, np.nan),
         "magnitude": np.full(n, np.nan),
-        "fraction_above": np.full(n, np.nan),
         "live": np.zeros(n, dtype=int),
     }
     if n == 0:
@@ -179,10 +171,6 @@ def fold(
     rows = steps[usable]
     out["signed"][usable] = np.nanmedian(rows, axis=1)
     out["magnitude"][usable] = np.nanmedian(np.abs(rows), axis=1)
-    over = float(db_to_unit(threshold_db))
-    # A NaN subcarrier compares False, so this counts only live ones -- which
-    # is what the denominator is.
-    out["fraction_above"][usable] = (np.abs(rows) > over).sum(axis=1) / live[usable]
     return out
 
 
@@ -191,7 +179,6 @@ def frame_steps(
     times: np.ndarray,
     *,
     gap_limit: float | None = None,
-    threshold_db: float = LG_THRESHOLD_DB,
     gain_state: np.ndarray | None = None,
     gate_gain: bool = False,
 ) -> dict[str, Any]:
@@ -216,7 +203,7 @@ def frame_steps(
         )
 
     steps = relative_step(amp_db)
-    folded = fold(steps, threshold_db=threshold_db)
+    folded = fold(steps)
     dt = np.diff(times) if times.size >= 2 else np.zeros(0)
     limit = gap_limit_for(times) if gap_limit is None else float(gap_limit)
 
@@ -237,7 +224,7 @@ def frame_steps(
         if gate_gain:
             blank = blank | crossed
 
-    for key in ("signed", "magnitude", "fraction_above"):
+    for key in ("signed", "magnitude"):
         folded[key][blank] = np.nan
 
     return {
@@ -247,8 +234,6 @@ def frame_steps(
         "n_bridged": n_bridged,
         "n_gain_crossed": int(crossed.sum()),
         "gain_gated": bool(gate_gain and gain_state is not None),
-        "threshold_db": float(threshold_db),
-        "threshold_unit": float(db_to_unit(threshold_db)),
         **folded,
     }
 
@@ -268,7 +253,7 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
         empty = np.zeros(0)
         return {
             "time_s": empty, "signed": empty, "signed_lo": empty, "signed_hi": empty,
-            "magnitude": empty, "magnitude_hi": empty, "fraction_above": empty,
+            "magnitude": empty, "magnitude_hi": empty,
             "count": np.zeros(0, dtype=int), "bin_seconds": 0.0, "decimated": False,
         }
 
@@ -281,7 +266,6 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
             "signed_hi": np.asarray(series["signed"], dtype=float),
             "magnitude": np.asarray(series["magnitude"], dtype=float),
             "magnitude_hi": np.asarray(series["magnitude"], dtype=float),
-            "fraction_above": np.asarray(series["fraction_above"], dtype=float),
             "count": np.ones(n, dtype=int),
             "bin_seconds": float(np.median(np.diff(t))) if n >= 2 else 0.0,
             "decimated": False,
@@ -295,10 +279,9 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
 
     signed = np.asarray(series["signed"], dtype=float)
     magnitude = np.asarray(series["magnitude"], dtype=float)
-    fraction = np.asarray(series["fraction_above"], dtype=float)
 
     keys = ("time_s", "signed", "signed_lo", "signed_hi", "magnitude",
-            "magnitude_hi", "fraction_above")
+            "magnitude_hi")
     out: dict[str, Any] = {k: np.full(max_points, np.nan) for k in keys}
     out["count"] = np.zeros(max_points, dtype=int)
 
@@ -322,10 +305,6 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
         if mg.size:
             out["magnitude"][i] = np.median(mg)
             out["magnitude_hi"][i] = mg.max()
-        fr = fraction[lo:hi]
-        fr = fr[np.isfinite(fr)]
-        if fr.size:
-            out["fraction_above"][i] = fr.max()
 
     out["bin_seconds"] = float(edges[1] - edges[0])
     out["decimated"] = True
@@ -356,7 +335,6 @@ def capture_steps(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    threshold_db: float = LG_THRESHOLD_DB,
     gate_gain: bool = False,
 ) -> dict[str, Any]:
     """Decode a range and reduce it to the per-step series, cached.
@@ -375,7 +353,7 @@ def capture_steps(
     path = Path(path)
     st = path.stat()
     key = (str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
-           mimo, source_mac, bool(interpolate), float(threshold_db), bool(gate_gain))
+           mimo, source_mac, bool(interpolate), bool(gate_gain))
     with _cache_lock:
         hit = _cache.get(key)
         if hit is not None:
@@ -392,7 +370,7 @@ def capture_steps(
     amp_db = _decode_for_doppler(path, index, ids, "amplitude", None, interpolate)
     rssi = np.asarray(getattr(index, "rssi_1", None))
     gain_state = rssi[ids] if rssi.ndim == 1 and rssi.size > int(ids[-1]) else None
-    out = frame_steps(amp_db, times_all[ids], threshold_db=threshold_db,
+    out = frame_steps(amp_db, times_all[ids],
                       gain_state=gain_state, gate_gain=gate_gain)
     out["frames_used"] = int(ids.size)
     out["n_subcarriers"] = int(amp_db.shape[1])
@@ -414,20 +392,18 @@ def compute_frame_diff(
     mimo: tuple[int, int] | None = None,
     source_mac: str | None = None,
     interpolate: bool = True,
-    threshold_db: float = LG_THRESHOLD_DB,
     gate_gain: bool = False,
     max_points: int = DEFAULT_MAX_POINTS,
 ) -> dict[str, Any]:
     """The per-step series, decimated for a plot, with its summary."""
     steps = capture_steps(
         path, t0, t1, mimo=mimo, source_mac=source_mac,
-        interpolate=interpolate, threshold_db=threshold_db, gate_gain=gate_gain,
+        interpolate=interpolate, gate_gain=gate_gain,
     )
     binned = decimate(steps, max_points)
 
     mag = np.asarray(steps["magnitude"], dtype=float)
     finite = mag[np.isfinite(mag)]
-    over = float(db_to_unit(threshold_db))
     return {
         **binned,
         "summary": {
@@ -440,12 +416,9 @@ def compute_frame_diff(
             "median": float(np.median(finite)) if finite.size else None,
             "p99": float(np.percentile(finite, 99)) if finite.size else None,
             "max": float(finite.max()) if finite.size else None,
-            "above_threshold": int((finite > over).sum()),
             "median_db": float(unit_to_db(np.median(finite))) if finite.size else None,
             "max_db": float(unit_to_db(finite.max())) if finite.size else None,
         },
-        "threshold_db": float(threshold_db),
-        "threshold_unit": over,
         "frames_used": steps["frames_used"],
         "n_subcarriers": steps["n_subcarriers"],
         "t_min": steps["t_min"],

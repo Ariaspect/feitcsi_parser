@@ -1516,7 +1516,6 @@ def frame_diff(
     path: str = Query(..., description="Path to capture file"),
     t0: float = Query(..., description="Start of requested time window (seconds)"),
     t1: float = Query(..., description="End of requested time window (seconds)"),
-    threshold_db: float = Query(framediff.LG_THRESHOLD_DB, gt=0, le=200, description="Reference line in dB, drawn on the bounded axis as tanh(dB*ln10/40); the default is the LG board's own change-detection threshold"),
     gate_gain: bool = Query(False, description="Blank the frame pairs that cross a reported gain state, the way a pair spanning a dropout is blanked. Costs 12-52% of the steps and halves the tail; does not change the empty/occupied separation or the 15.5x spread of the empty level across captures. Off by default"),
     max_points: int = Query(framediff.DEFAULT_MAX_POINTS, ge=16, le=20000, description="Columns returned; the per-step series is reduced to this many with a median and its envelope, never averaged"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
@@ -1528,8 +1527,8 @@ def frame_diff(
     See ``backend.framediff``. This is the raw per-subcarrier dB difference the
     board's detector reads, expressed as ``(a_t - a_(t-1))/(a_t + a_(t-1))`` --
     which is ``tanh(dB * ln10 / 40)`` exactly, so it is the same measurement on
-    an axis that needs no per-room constant, and the 26 dB trigger has a fixed
-    place on it.
+    an axis that needs no per-room constant. No threshold is drawn or counted:
+    measured, the board's 26 dB sits above every step this fold produces.
 
     No AGC table and no reference, matching ``hybrid.amplitude_diff``. Unlike
     that per-second median, this is per frame and the receiver's gain control
@@ -1552,7 +1551,6 @@ def frame_diff(
             mimo=mimo_filter,
             source_mac=mac_filter,
             interpolate=interpolate,
-            threshold_db=threshold_db,
             gate_gain=gate_gain,
             max_points=max_points,
         )
@@ -1566,12 +1564,9 @@ def frame_diff(
         "signed_hi": _nullable(result["signed_hi"]),
         "magnitude": _nullable(result["magnitude"]),
         "magnitude_hi": _nullable(result["magnitude_hi"]),
-        "fraction_above": _nullable(result["fraction_above"]),
         "count": [int(v) for v in result["count"]],
         "bin_seconds": result["bin_seconds"],
         "decimated": bool(result["decimated"]),
-        "threshold_db": result["threshold_db"],
-        "threshold_unit": result["threshold_unit"],
         "frames_used": result["frames_used"],
         "n_subcarriers": result["n_subcarriers"],
         "capture_t_min": result["t_min"],

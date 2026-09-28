@@ -56,11 +56,25 @@ def test_an_absurd_step_saturates_at_the_bound_rather_than_passing_it() -> None:
     assert np.all(np.abs(d) <= 1.0)
 
 
-def test_the_board_threshold_lands_where_the_docstring_says() -> None:
-    """26 dB -> 0.9045. The line the Phase 1 tab scores, on this axis."""
-    assert framediff.LG_THRESHOLD_DB == 26.0
+def test_a_step_reads_back_in_the_dB_it_was_measured_in() -> None:
+    """No threshold is drawn any more, but the dB equivalence is the axis's
+    whole justification and every reported step still carries it.
+
+    26 dB -> 0.9045 is kept as the worked value because it is the board's
+    trigger, which docs/frame_step.md measures this fold against.
+    """
     assert float(framediff.db_to_unit(26.0)) == pytest.approx(0.904547, abs=1e-6)
-    assert float(framediff.unit_to_db(framediff.db_to_unit(26.0))) == pytest.approx(26.0)
+    for db in (0.05, 1.0, 6.0, 22.5, 26.0):
+        assert float(framediff.unit_to_db(framediff.db_to_unit(db))) == pytest.approx(db)
+
+
+def test_no_threshold_survives_in_the_module() -> None:
+    """Removed rather than defaulted: the board's line sat above every step this
+    fold produces, so an axis marking it marked nothing."""
+    assert not hasattr(framediff, "LG_THRESHOLD_DB")
+    assert "fraction_above" not in framediff.fold(
+        framediff.relative_step(_amp_db(4, 20))
+    )
 
 
 def test_the_inverse_saturates_rather_than_returning_infinity_off_the_end() -> None:
@@ -115,27 +129,28 @@ def test_a_signed_median_cancels_when_the_subcarriers_disagree() -> None:
     )
 
 
-def test_a_common_gain_step_moves_the_whole_array_one_way() -> None:
-    """How a receiver gain step is told from a body: every subcarrier agrees.
+def test_a_whole_array_moving_together_carries_into_the_signed_fold() -> None:
+    """A common shift -- which is what a gain step is -- survives both folds.
 
-    ``fraction_above`` reaches 1 and the signed fold carries the full step,
-    where a body leaves subcarriers disagreeing (the test above).
+    Kept as arithmetic, NOT as a diagnostic: measured, |signed|/|d| does not
+    separate a gain crossing from a body (docs/frame_step.md), which is why the
+    gate reads the reported state instead of guessing from this.
     """
     amp = np.full((2, 50), -30.0)
     amp[1] += 30.0
     folded = framediff.fold(framediff.relative_step(amp))
-    assert float(folded["fraction_above"][0]) == 1.0
-    assert float(folded["signed"][0]) == pytest.approx(
-        float(framediff.db_to_unit(30.0)), abs=1e-9
-    )
+    want = float(framediff.db_to_unit(30.0))
+    assert float(folded["signed"][0]) == pytest.approx(want, abs=1e-9)
+    assert float(folded["magnitude"][0]) == pytest.approx(want, abs=1e-9)
 
 
 def test_two_loud_subcarriers_are_not_a_room_changing() -> None:
+    """The median is what makes this true, and the reason it is a median."""
     amp = np.full((2, 100), -30.0)
     amp[1, :2] += 40.0
     folded = framediff.fold(framediff.relative_step(amp))
-    assert float(folded["fraction_above"][0]) == pytest.approx(0.02)
     assert abs(float(folded["magnitude"][0])) < 1e-9
+    assert abs(float(folded["signed"][0])) < 1e-9
 
 
 def test_a_dead_array_reports_nothing_rather_than_a_median_of_two() -> None:
@@ -284,7 +299,6 @@ def _series(n: int, seed: int = 3) -> dict:
         "time_s": np.arange(n) * 0.05,
         "signed": d,
         "magnitude": np.abs(d),
-        "fraction_above": np.zeros(n),
     }
 
 
@@ -431,7 +445,6 @@ def test_the_summary_reports_the_range_in_both_units(tmp_path: Path) -> None:
     assert s["steps_measured"] <= s["steps"]
     assert 0.0 < s["median"] < s["max"] < 1.0
     assert s["median_db"] == pytest.approx(float(framediff.unit_to_db(s["median"])))
-    assert out["threshold_unit"] == pytest.approx(0.904547, abs=1e-6)
 
 
 # --------------------------------------------------------------------------- #
@@ -450,10 +463,10 @@ def test_the_endpoint_serves_one_column_per_point(tmp_path: Path) -> None:
     n = len(body["time_s"])
     assert n == 300
     for key in ("signed", "signed_lo", "signed_hi", "magnitude",
-                "magnitude_hi", "fraction_above", "count"):
+                "magnitude_hi", "count"):
         assert len(body[key]) == n, key
     assert body["decimated"] is True
-    assert body["threshold_db"] == 26.0
+    assert "threshold_db" not in body
     assert body["frames_used"] == 4000
     assert body["n_subcarriers"] > 0
 
@@ -476,13 +489,16 @@ def test_the_endpoint_refuses_a_range_with_no_step(tmp_path: Path) -> None:
     assert "fewer than 2 frames" in res.json()["detail"]
 
 
-def test_the_threshold_line_follows_the_query(tmp_path: Path) -> None:
-    p = _capture_with_a_visit(tmp_path, n=400)
+def test_the_endpoint_serves_a_sub_range_for_a_zoom(tmp_path: Path) -> None:
+    """The panel zooms by refetching, so a narrower range must come back with
+    the same column budget over fewer steps -- finer, not stretched."""
+    p = _capture_with_a_visit(tmp_path)
     client = TestClient(app)
-    res = client.get("/api/frame-diff", params={
-        "path": str(p), "t0": 0.0, "t1": 200.0, "threshold_db": 6.0,
-    })
-    assert res.status_code == 200
-    body = res.json()
-    assert body["threshold_db"] == 6.0
-    assert body["threshold_unit"] == pytest.approx(float(framediff.db_to_unit(6.0)))
+    whole = client.get("/api/frame-diff", params={
+        "path": str(p), "t0": 0.0, "t1": 200.0, "max_points": 300}).json()
+    zoomed = client.get("/api/frame-diff", params={
+        "path": str(p), "t0": 100.0, "t1": 110.0, "max_points": 300}).json()
+    assert zoomed["summary"]["steps"] < whole["summary"]["steps"] / 10
+    assert zoomed["bin_seconds"] < whole["bin_seconds"] / 10
+    assert zoomed["time_s"][0] >= 100.0
+    assert zoomed["time_s"][-1] <= 110.0

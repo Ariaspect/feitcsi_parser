@@ -343,19 +343,17 @@ describe("fetchFrameDiff", () => {
     signed_hi: [0.3, null],
     magnitude: [0.05, null],
     magnitude_hi: [0.31, null],
-    fraction_above: [0.0, null],
     count: [12, 12],
     bin_seconds: 0.6,
     decimated: true,
-    threshold_db: 26,
-    threshold_unit: 0.904547,
     frames_used: 11100,
     n_subcarriers: 242,
     capture_t_min: 0,
     capture_t_max: 600,
     summary: {
-      steps: 11099, steps_measured: 11090, n_bridged: 9, gap_limit: 0.12,
-      median: 0.04, p99: 0.4, max: 0.7, above_threshold: 0,
+      steps: 11099, steps_measured: 11090, n_bridged: 9, n_gain_crossed: 2628,
+      gain_gated: false, gap_limit: 0.12,
+      median: 0.04, p99: 0.4, max: 0.7,
       median_db: 0.7, max_db: 15.1,
     },
   };
@@ -371,16 +369,20 @@ describe("fetchFrameDiff", () => {
     const out = await fetchFrameDiff("c.dat", 0, 600);
     expect(out.signedHi).toEqual([0.3, null]);
     expect(out.magnitudeHi).toEqual([0.31, null]);
-    expect(out.thresholdUnit).toBeCloseTo(0.904547);
     expect(out.summary.nBridged).toBe(9);
+    expect(out.summary.nGainCrossed).toBe(2628);
     expect(out.summary.maxDb).toBe(15.1);
   });
 
-  it("sends the threshold and the column budget", async () => {
+  it("sends the column budget and the gate only when asked", async () => {
     const fetchMock = stub();
-    await fetchFrameDiff("c.dat", 0, 600, { thresholdDb: 6, maxPoints: 880 });
-    expect(fetchMock.mock.calls[0][0]).toContain("threshold_db=6");
+    await fetchFrameDiff("c.dat", 0, 600, { maxPoints: 880 });
     expect(fetchMock.mock.calls[0][0]).toContain("max_points=880");
+    expect(fetchMock.mock.calls[0][0]).not.toContain("gate_gain");
+
+    const gated = stub();
+    await fetchFrameDiff("c.dat", 0, 600, { gateGain: true });
+    expect(gated.mock.calls[0][0]).toContain("gate_gain=true");
   });
 
   it("surfaces the server's own reason for a refusal", async () => {

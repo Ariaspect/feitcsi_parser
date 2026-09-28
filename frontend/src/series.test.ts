@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { bandPath, formatTime, linePath, linearScale, runs, ticks } from "./series";
+import {
+  bandPath,
+  clampWindow,
+  formatTime,
+  linePath,
+  linearScale,
+  runs,
+  ticks,
+  zoomWindow,
+} from "./series";
 
 describe("linearScale", () => {
   it("maps the domain onto the range", () => {
@@ -48,6 +57,54 @@ describe("linePath", () => {
 
   it("returns an empty path when nothing is finite", () => {
     expect(linePath([0, 1], [null, null], x, y)).toBe("");
+  });
+});
+
+describe("clampWindow", () => {
+  it("leaves a window that already fits", () => {
+    expect(clampWindow([10, 20], [0, 100], 1)).toEqual([10, 20]);
+  });
+
+  it("slides a window back inside instead of cropping it", () => {
+    // A pan that hits the end should stop, not shrink the view in the reader's
+    // hands.
+    expect(clampWindow([95, 115], [0, 100], 1)).toEqual([80, 100]);
+    expect(clampWindow([-30, -10], [0, 100], 1)).toEqual([0, 20]);
+  });
+
+  it("refuses to go narrower than the floor", () => {
+    expect(clampWindow([50, 50.01], [0, 100], 0.5)).toEqual([50, 50.5]);
+  });
+
+  it("refuses to go wider than the limit", () => {
+    expect(clampWindow([-50, 150], [0, 100], 1)).toEqual([0, 100]);
+  });
+});
+
+describe("zoomWindow", () => {
+  const limit: [number, number] = [0, 100];
+
+  it("keeps the anchored time under the cursor", () => {
+    const [t0, t1] = zoomWindow([0, 100], 0.25, 0.5, limit, 1);
+    // 25 s was a quarter in and must still be a quarter in.
+    expect(t0 + 0.25 * (t1 - t0)).toBeCloseTo(25);
+    expect(t1 - t0).toBeCloseTo(50);
+  });
+
+  it("zooms out to the limit and no further", () => {
+    expect(zoomWindow([40, 60], 0.5, 100, limit, 1)).toEqual([0, 100]);
+  });
+
+  it("stops at the floor when zooming in", () => {
+    const out = zoomWindow([40, 60], 0.5, 1e-6, limit, 0.5);
+    expect(out[1] - out[0]).toBeCloseTo(0.5);
+    expect(out[0]).toBeCloseTo(49.75);
+  });
+
+  it("treats an out-of-range anchor as an edge", () => {
+    expect(zoomWindow([0, 100], 5, 0.5, limit, 1)).toEqual(
+      zoomWindow([0, 100], 1, 0.5, limit, 1),
+    );
   });
 });
 

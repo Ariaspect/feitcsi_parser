@@ -1369,18 +1369,12 @@ export interface FrameDiff {
    *  This is `hybrid.amplitude_diff` on the bounded axis, exactly. */
   magnitude: (number | null)[];
   magnitudeHi: (number | null)[];
-  /** Largest share of live subcarriers past the threshold in this column.
-   *  Near 1 means the whole array moved together — a gain step, not a body. */
-  fractionAbove: (number | null)[];
   /** Frames behind each column, blanked ones included. */
   count: number[];
   binSeconds: number;
   /** False when the range held fewer steps than columns asked for, so every
    *  column is one frame pair and the envelope is the value itself. */
   decimated: boolean;
-  /** The reference line, in dB and mapped onto the axis. */
-  thresholdDb: number;
-  thresholdUnit: number;
   framesUsed: number;
   nSubcarriers: number;
   captureTMin: number;
@@ -1398,14 +1392,12 @@ export interface FrameDiff {
     median: number | null;
     p99: number | null;
     max: number | null;
-    aboveThreshold: number;
     medianDb: number | null;
     maxDb: number | null;
   };
 }
 
 export interface FrameDiffOptions {
-  thresholdDb?: number;
   /** Blank the frame pairs that cross a gain state. Off by default. */
   gateGain?: boolean;
   maxPoints?: number;
@@ -1422,13 +1414,13 @@ export async function fetchFrameDiff(
   signal?: AbortSignal,
 ): Promise<FrameDiff> {
   const {
-    thresholdDb = 26, gateGain = false, maxPoints = 2000, mimo, sourceMac, interpolate,
+    gateGain = false, maxPoints = 2000, mimo, sourceMac, interpolate,
   } = options;
 
   const url =
     `/api/frame-diff?path=${encodeURIComponent(path)}` +
     `&t0=${t0}&t1=${t1}` +
-    `&threshold_db=${thresholdDb}&max_points=${maxPoints}` +
+    `&max_points=${maxPoints}` +
     (gateGain ? "&gate_gain=true" : "") +
     filterParams(mimo, sourceMac) +
     (interpolate === false ? "&interpolate=false" : "");
@@ -1447,12 +1439,9 @@ export async function fetchFrameDiff(
     signedHi: body.signed_hi,
     magnitude: body.magnitude,
     magnitudeHi: body.magnitude_hi,
-    fractionAbove: body.fraction_above,
     count: body.count,
     binSeconds: body.bin_seconds,
     decimated: body.decimated,
-    thresholdDb: body.threshold_db,
-    thresholdUnit: body.threshold_unit,
     framesUsed: body.frames_used,
     nSubcarriers: body.n_subcarriers,
     captureTMin: body.capture_t_min,
@@ -1467,7 +1456,6 @@ export async function fetchFrameDiff(
       median: s.median,
       p99: s.p99,
       max: s.max,
-      aboveThreshold: s.above_threshold,
       medianDb: s.median_db,
       maxDb: s.max_db,
     },
