@@ -34,6 +34,29 @@ DEFAULT_MARGIN_S = 5.0
 # A cell is occupied when more than this fraction of its trusted frames are;
 # empty when none are; anything between is not scored.
 OCCUPIED_FRACTION = 0.5
+# Detection confidence a box must reach before the camera is taken at its word.
+OCCUPIED_CONF = 0.5
+
+
+def frame_occupied(frame: dict, conf: float = OCCUPIED_CONF) -> bool:
+    """Did the camera say someone was there, in this one frame.
+
+    One rule, because there were three. The detector's own answer is a box
+    inside the ROI at or above *conf*; a bare `boxes` test counts a 0.1
+    detection the scorers reject, and the two disagreeing meant the strip a
+    reader looks at was not the truth the numbers were computed against.
+
+    An explicit ``occupied`` wins over the detector. That key is how a manual
+    adjudication is recorded -- alongside ``occupied_source``, ``manual`` and
+    the file's ``manual_override`` block -- and the point of recording it that
+    way is that ``n`` and ``max_conf`` keep saying exactly what YOLO saw. A
+    camera loses a subject who bends out of frame or lies flat on a desk, and
+    the frame itself cannot show that it was wrong; the operator's correction
+    has to travel with the file, visible as a correction.
+    """
+    if "occupied" in frame:
+        return bool(frame["occupied"])
+    return bool(frame.get("n", 0) > 0 and float(frame.get("max_conf") or 0.0) >= conf)
 
 
 def transition_times(times: np.ndarray, present: np.ndarray) -> np.ndarray:
