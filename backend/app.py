@@ -791,8 +791,8 @@ def _camera_truth(capture: Path) -> np.ndarray | None:
         e = f.get("epoch")
         if e is None:
             continue
-        present = bool(f.get("n", 0) > 0 and float(f.get("max_conf") or 0.0) >= 0.5)
-        rows.append([float(e) - float(base), 1.0 if present else 0.0])
+        rows.append([float(e) - float(base),
+                     1.0 if truthmod.frame_occupied(f) else 0.0])
     return np.asarray(rows) if rows else None
 
 
@@ -1039,8 +1039,11 @@ def labels(
                     if e is None:
                         continue
                     times.append(float(e) - float(base))
-                    boxes = f.get("boxes") or []
-                    present.append(bool(boxes))
+                    # The same rule the scorers use, so the strip a reader
+                    # looks at is the truth the numbers came from -- manual
+                    # corrections included. `maxConf` still reports what the
+                    # detector saw, so a forced frame is visible as one.
+                    present.append(truthmod.frame_occupied(f))
                     conf.append(float(f.get("max_conf") or 0.0))
                 out["present"] = {
                     "timeS": times,

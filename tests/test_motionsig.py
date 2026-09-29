@@ -380,3 +380,51 @@ def test_the_endpoint_says_which_half_each_feature_came_off(tmp_path: Path) -> N
     ).json()
     assert body["sources"] == {"variance": "amp", "lag1": "phase"}
     assert set(body["windows"]) == set(body["sources"]) == set(motionsig.FEATURES)
+
+
+def test_a_manual_occupied_key_overrides_the_detector(tmp_path: Path) -> None:
+    """A camera that loses the subject is corrected by the operator, not by YOLO.
+
+    The correction is recorded as `occupied` while `n` and `max_conf` keep
+    reporting what the detector actually saw, so it stays visible as a
+    correction. Every reader has to honour it -- one of them did not, and
+    silently discarded four captures' worth of adjudication.
+    """
+    from backend.app import _camera_truth
+
+    p = _capture_with_a_visit(tmp_path)
+    cv = p.with_name("visit_cv.json")
+    data = json.loads(cv.read_text())
+    # Punch a hole in the middle of the visit, as a camera does when the
+    # subject steps out of frame, then fill it the way the operator does.
+    for f in data["frames"][100:105]:
+        f["n"], f["max_conf"] = 0, 0.0
+    cv.write_text(json.dumps(data))
+    holed = _camera_truth(p)
+    assert not holed[100:105, 1].any()
+
+    for f in data["frames"]:
+        det = f.get("n", 0) > 0 and float(f.get("max_conf") or 0.0) >= 0.5
+        f["occupied"] = det
+    for f in data["frames"][100:105]:
+        f["occupied"], f["occupied_source"], f["manual"] = True, "manual", True
+    cv.write_text(json.dumps(data))
+
+    filled = _camera_truth(p)
+    assert filled[100:105, 1].all()
+    # The detector's own numbers are untouched, so the edit stays legible.
+    again = json.loads(cv.read_text())
+    assert all(f["n"] == 0 and f["max_conf"] == 0.0 for f in again["frames"][100:105])
+    assert all(f["manual"] for f in again["frames"][100:105])
+
+
+def test_the_label_rule_gates_on_confidence_not_on_a_box_existing() -> None:
+    """A 0.1 detection is not a person; `boxes` alone said it was."""
+    from backend import truth as truthmod
+
+    assert truthmod.frame_occupied({"n": 1, "max_conf": 0.9, "boxes": [[0, 0, 1, 1, 0.9]]})
+    assert not truthmod.frame_occupied({"n": 1, "max_conf": 0.1, "boxes": [[0, 0, 1, 1, 0.1]]})
+    assert not truthmod.frame_occupied({"n": 0, "max_conf": 0.0, "boxes": []})
+    # …and the override wins either way.
+    assert truthmod.frame_occupied({"n": 0, "max_conf": 0.0, "occupied": True})
+    assert not truthmod.frame_occupied({"n": 1, "max_conf": 0.99, "occupied": False})
