@@ -90,11 +90,18 @@ function extent(values: (number | null)[], pad = 0.08, floor = 1): [number, numb
   return [lo - m, hi + m];
 }
 
-/** Contiguous spans where `flag` is true, as time bands for the chart. */
-function bandsOf(times: number[], flag: boolean[], half: number): ChartBand[] {
+/** Contiguous spans where `flag` is true, as time bands for the chart.
+ *
+ *  Bounded by `runs`' own midpoints between window centres, and NOT widened
+ *  to the window length. The window really does span 15 s, but the score and
+ *  the threshold line are both drawn at its CENTRE, so padding the shading
+ *  by half a window puts colour where the curve is visibly below the line —
+ *  it reads as "present here" exactly where the panel shows it is not. The
+ *  shading has to agree with the curve the reader is looking at. */
+function bandsOf(times: number[], flag: boolean[]): ChartBand[] {
   return runs(times, flag)
     .filter((r) => r.value)
-    .map((r) => ({ t0: r.t0 - half, t1: r.t1 + half }));
+    .map((r) => ({ t0: r.t0, t1: r.t1 }));
 }
 
 export interface MotionSignalProps {
@@ -194,7 +201,6 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
   const cam = dark ? "#4f7fd4" : "#3f6fc4";
   const vacant = dark ? "#2a2f37" : "#e6e9ee";
   const ink = dark ? "#e8eaed" : "#1b1f25";
-  const half = (data?.windowSeconds ?? 2) / 2;
 
   return (
     <div className="space-y-4" ref={holder}>
@@ -303,7 +309,7 @@ export function MotionSignal({ path, meta, timeLink, mimo, sourceMac, interpolat
                   height={130}
                   series={[{ values: m.score, color: ink, width: 1.1, label: `score-${mode}` }]}
                   guides={[{ value: m.threshold, color: THRESHOLD_COLOR, label: "threshold" }]}
-                  bands={bandsOf(data.timeS, m.present, half)}
+                  bands={bandsOf(data.timeS, m.present)}
                   bandColor={THRESHOLD_COLOR}
                 />
                 <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[11px] text-muted-foreground tabular-nums">
