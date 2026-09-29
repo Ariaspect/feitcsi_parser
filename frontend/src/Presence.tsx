@@ -548,6 +548,7 @@ export function Presence({
         from,
         to,
         {
+          signal: stepSignal,
           gateGain,
           // One column per pixel. Fewer would average away the single frame this
           // signal exists to show; more would be columns the panel cannot draw.
@@ -1048,6 +1049,10 @@ export function Presence({
                     </span>
                   </div>
                   <p className="text-[11px] text-muted-foreground leading-relaxed tabular-nums">
+                    {/* The signal the SERVER used, not the one the control
+                        says: the two silently disagreed once, and a panel that
+                        names what it drew cannot do that again. */}
+                    <b>{step.signal.replace("_", " ")}</b> ·{" "}
                     {step.summary.stepsMeasured} of {step.summary.steps} steps
                     measured over {step.nSubcarriers} subcarriers ·{" "}
                     <b>{step.selectionNote}</b>
