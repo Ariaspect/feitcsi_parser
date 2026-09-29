@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
+import { ChartBusy, Spinner } from "@/components/ChartBusy";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -447,6 +448,10 @@ export function Presence({
   const [stepWindow, setStepWindow] = useState<[number, number] | null>(null);
   const [step, setStep] = useState<FrameDiff | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
+  // Set the moment anything changes, not when the request finally goes: the
+  // fetch is debounced, so between the change and the request there is a
+  // stretch where the chart is stale and nothing would say so.
+  const [stepBusy, setStepBusy] = useState(false);
   const [data, setData] = useState<PresenceData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -527,8 +532,10 @@ export function Presence({
     if (!showStep) {
       setStep(null);
       setStepError(null);
+      setStepBusy(false);
       return;
     }
+    setStepBusy(true);
     const [from, to] = stepWindow ?? range;
     const controller = new AbortController();
     // Debounced, because a drag sets the window on every pointer move and each
@@ -560,6 +567,9 @@ export function Presence({
           if (controller.signal.aborted) return;
           setStep(null);
           setStepError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setStepBusy(false);
         });
     }, STEP_FETCH_DEBOUNCE_MS);
     return () => {
@@ -786,7 +796,11 @@ export function Presence({
             {data.fsHz.toFixed(1)} Hz · {data.timeS.length} windows ·{" "}
             {data.windowSeconds.toFixed(1)} s each · floor{" "}
             {data.rpmFloorEff.toFixed(0)} rpm
-            {loading && " · refreshing"}
+            {loading && (
+              <span className="ml-1 inline-flex items-center gap-1 align-middle">
+                <Spinner /> refreshing
+              </span>
+            )}
           </span>
         )}
       </div>
@@ -800,8 +814,12 @@ export function Presence({
         // presence panel the first one is a verdict. A range this size can
         // take seconds to decode at full rate, and saying the room is empty
         // for that whole time is the failure this panel exists to avoid.
-        <div className="text-muted-foreground p-8 text-sm">
-          {loading ? "Analysing this range…" : "Nothing to analyse yet."}
+        <div className="text-muted-foreground text-sm">
+          {loading ? (
+            <ChartBusy busy empty height={150} label="analysing this range" />
+          ) : (
+            <div className="p-8">Nothing to analyse yet.</div>
+          )}
         </div>
       ) : data.timeS.length === 0 ? (
         <div className="text-muted-foreground p-8 text-sm">
@@ -879,25 +897,27 @@ export function Presence({
               know was empty and press <b>Use this view</b>.
             </div>
           ) : (
-            <Chart
-              width={width}
-              times={data.timeS}
-              domain={domain}
-              yDomain={[0, devCeiling]}
-              yLabel="channel offset (dB)"
-              dark={dark}
-              height={150}
-              series={[
-                { values: data.baselineDev, color: "#7b5ea7", width: 1.8, label: "offset from empty" },
-              ]}
-              guides={[
-                {
-                  value: data.baselineDevThreshold,
-                  color: "#d62728",
-                  label: "occupied",
-                },
-              ]}
-            />
+            <ChartBusy busy={loading} height={150} label="analysing">
+              <Chart
+                width={width}
+                times={data.timeS}
+                domain={domain}
+                yDomain={[0, devCeiling]}
+                yLabel="channel offset (dB)"
+                dark={dark}
+                height={150}
+                series={[
+                  { values: data.baselineDev, color: "#7b5ea7", width: 1.8, label: "offset from empty" },
+                ]}
+                guides={[
+                  {
+                    value: data.baselineDevThreshold,
+                    color: "#d62728",
+                    label: "occupied",
+                  },
+                ]}
+              />
+            </ChartBusy>
           )}
 
           {data.reference && (
@@ -912,18 +932,26 @@ export function Presence({
             </p>
           )}
 
-          <Chart
-            width={width}
-            times={data.timeS}
-            domain={domain}
-            yDomain={[0, motionCeiling]}
-            yLabel="motion |Δr|/|r|"
-            dark={dark}
-            series={[
-              { values: data.motionLevel, color: "#d97a2f", width: 1.6, label: "motion" },
-            ]}
-            guides={[{ value: motionFracHi, color: "#d62728", label: "gross motion" }]}
-          />
+          <ChartBusy busy={loading} height={120} label="analysing">
+  <Chart
+              width={width}
+              times={data.timeS}
+              domain={domain}
+              yDomain={[0, motionCeiling]}
+              yLabel="motion |Δr|/|r|"
+              dark={dark}
+              series={[
+                { values: data.motionLevel, color: "#d97a2f", width: 1.6, label: "motion" },
+              ]}
+              guides={[{ value: motionFracHi, color: "#d62728", label: "gross motion" }]}
+            />
+          </ChartBusy>
+
+          {showStep && step === null && stepError === null && (
+            <ChartBusy busy empty height={150} label="decoding">
+              <div />
+            </ChartBusy>
+          )}
 
           {showStep && (stepError !== null || step !== null) && (
             <div className="space-y-1">
@@ -933,52 +961,54 @@ export function Presence({
                 </p>
               ) : step !== null && (
                 <>
-                  <Chart
-                    width={width}
-                    times={step.timeS}
-                    // The shared axis until the reader zooms, then its own. Drag
-                    // pans, the wheel zooms about the cursor, and both are
-                    // bounded by the panel's range because that is what the
-                    // detector above was computed over.
-                    domain={stepWindow ?? domain}
-                    limit={range}
-                    onWindow={setStepWindow}
-                    minSpan={MIN_STEP_SPAN_SECONDS}
-                    yDomain={[-stepScale, stepScale]}
-                    yLabel="frame step (a−a′)/(a+a′)"
-                    dark={dark}
-                    height={150}
-                    bands={[
-                      {
-                        lo: step.signedLo,
-                        hi: step.signedHi,
-                        color: "#5a8f7b",
-                        label: "signed envelope",
-                        opacity: dark ? 0.32 : 0.22,
-                      },
-                    ]}
-                    series={[
-                      { values: step.signed, color: "#2f7c5c", width: 1.4, label: "signed median" },
-                      // The median of |d| is the quantity the Hybrid tab's
-                      // amplitude channel reports, exactly. The column peak is
-                      // drawn beside it only when columns hold more than one
-                      // frame pair -- otherwise it is the same line twice.
-                      { values: step.magnitude, color: "#a34a8f", width: 1.4, label: "|step| median" },
-                      ...(step.decimated
-                        ? [{
-                            values: step.magnitudeHi,
-                            color: "#a34a8f",
-                            width: 1,
-                            label: "|step| peak",
-                            dashed: true,
-                          }]
-                        : []),
-                      // The mean fold. Drawn last so it sits over the medians:
-                      // on the ratio it is the sharpest of the three, and on
-                      // the raw amplitude it is mostly the receiver's gain.
-                      { values: step.common, color: "#b8862b", width: 1.4, label: "common mode" },
-                    ]}
-                  />
+                  <ChartBusy busy={stepBusy} height={150} label="decoding">
+                    <Chart
+                      width={width}
+                      times={step.timeS}
+                      // The shared axis until the reader zooms, then its own. Drag
+                      // pans, the wheel zooms about the cursor, and both are
+                      // bounded by the panel's range because that is what the
+                      // detector above was computed over.
+                      domain={stepWindow ?? domain}
+                      limit={range}
+                      onWindow={setStepWindow}
+                      minSpan={MIN_STEP_SPAN_SECONDS}
+                      yDomain={[-stepScale, stepScale]}
+                      yLabel="frame step (a−a′)/(a+a′)"
+                      dark={dark}
+                      height={150}
+                      bands={[
+                        {
+                          lo: step.signedLo,
+                          hi: step.signedHi,
+                          color: "#5a8f7b",
+                          label: "signed envelope",
+                          opacity: dark ? 0.32 : 0.22,
+                        },
+                      ]}
+                      series={[
+                        { values: step.signed, color: "#2f7c5c", width: 1.4, label: "signed median" },
+                        // The median of |d| is the quantity the Hybrid tab's
+                        // amplitude channel reports, exactly. The column peak is
+                        // drawn beside it only when columns hold more than one
+                        // frame pair -- otherwise it is the same line twice.
+                        { values: step.magnitude, color: "#a34a8f", width: 1.4, label: "|step| median" },
+                        ...(step.decimated
+                          ? [{
+                              values: step.magnitudeHi,
+                              color: "#a34a8f",
+                              width: 1,
+                              label: "|step| peak",
+                              dashed: true,
+                            }]
+                          : []),
+                        // The mean fold. Drawn last so it sits over the medians:
+                        // on the ratio it is the sharpest of the three, and on
+                        // the raw amplitude it is mostly the receiver's gain.
+                        { values: step.common, color: "#b8862b", width: 1.4, label: "common mode" },
+                      ]}
+                    />
+                  </ChartBusy>
                   <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
                     <span style={{ color: "#2f7c5c" }}>signed median</span>
                     <span style={{ color: "#5a8f7b" }}>
@@ -1138,22 +1168,24 @@ export function Presence({
             </dl>
           )}
 
-          <Chart
-            width={width}
-            times={data.timeS}
-            domain={domain}
-            yDomain={[0, 1]}
-            yLabel="breathing score"
-            dark={dark}
-            height={150}
-            series={[
-              { values: data.periodicity, color: "#9aa5b1", label: "periodicity" },
-              { values: data.tonality, color: "#c7a02f", label: "tonality" },
-              { values: data.motionGate, color: "#2f9c6f", label: "motion gate", dashed: true },
-              { values: data.score, color: "#2f6fed", width: 2, label: "score" },
-            ]}
-            guides={[{ value: threshold, color: "#d62728", label: "threshold" }]}
-          />
+          <ChartBusy busy={loading} height={150} label="analysing">
+  <Chart
+              width={width}
+              times={data.timeS}
+              domain={domain}
+              yDomain={[0, 1]}
+              yLabel="breathing score"
+              dark={dark}
+              height={150}
+              series={[
+                { values: data.periodicity, color: "#9aa5b1", label: "periodicity" },
+                { values: data.tonality, color: "#c7a02f", label: "tonality" },
+                { values: data.motionGate, color: "#2f9c6f", label: "motion gate", dashed: true },
+                { values: data.score, color: "#2f6fed", width: 2, label: "score" },
+              ]}
+              guides={[{ value: threshold, color: "#d62728", label: "threshold" }]}
+            />
+          </ChartBusy>
 
           <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
             <span style={{ color: "#2f6fed" }}>score</span>
@@ -1171,30 +1203,32 @@ export function Presence({
             </p>
           )}
 
-          <Chart
-            width={width}
-            times={data.timeS}
-            domain={domain}
-            yDomain={[data.params.rate_band_rpm[0], data.params.rate_band_rpm[1]]}
-            yLabel="rate (rpm)"
-            dark={dark}
-            height={110}
-            series={[
-              {
-                // Drawn only where a still occupant was actually claimed. A
-                // rate is the lag of the largest autocorrelation peak inside
-                // the band, and that exists in every window whether or not
-                // anything was breathing -- plotting it unconditionally shows
-                // a confident breathing rate for an empty room.
-                values: data.rateRpm.map((v, i) =>
-                  data.breathing[i] ? v : null,
-                ),
-                color: "#2f6fed",
-                width: 1.6,
-                label: "rate",
-              },
-            ]}
-          />
+          <ChartBusy busy={loading} height={110} label="analysing">
+            <Chart
+              width={width}
+              times={data.timeS}
+              domain={domain}
+              yDomain={[data.params.rate_band_rpm[0], data.params.rate_band_rpm[1]]}
+              yLabel="rate (rpm)"
+              dark={dark}
+              height={110}
+              series={[
+                {
+                  // Drawn only where a still occupant was actually claimed. A
+                  // rate is the lag of the largest autocorrelation peak inside
+                  // the band, and that exists in every window whether or not
+                  // anything was breathing -- plotting it unconditionally shows
+                  // a confident breathing rate for an empty room.
+                  values: data.rateRpm.map((v, i) =>
+                    data.breathing[i] ? v : null,
+                  ),
+                  color: "#2f6fed",
+                  width: 1.6,
+                  label: "rate",
+                },
+              ]}
+            />
+          </ChartBusy>
 
           {data.warnings.length > 0 && (
             <ul className="text-[11px] text-muted-foreground leading-relaxed list-disc pl-4">
