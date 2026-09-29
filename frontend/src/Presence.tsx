@@ -53,15 +53,14 @@ const MIN_STEP_SPAN_SECONDS = 0.5;
 // pointer move, short enough to feel like the panel is keeping up.
 const STEP_FETCH_DEBOUNCE_MS = 180;
 
-/** The symmetric y extent a frame-step response wants, from its envelopes. */
-function ceilingOf(step: FrameDiff): number {
-  const finite = [
-    ...step.signedLo, ...step.signedHi, ...step.magnitudeHi, ...step.commonHi,
-  ].filter(
-    (v): v is number => v !== null && Number.isFinite(v),
-  );
-  return Math.min(1, Math.max(0.02, ...finite.map((v) => Math.abs(v) * 1.2)));
-}
+// The frame step's y axis, the same on every capture and every zoom. Scaling
+// it to the data made two captures incomparable at a glance, which is the one
+// thing this panel is for -- and the axis is dimensionless, so a fixed one
+// means something. +-0.5 rather than the bounded +-1 because nothing measured
+// comes near the bound: over six captures across three signals the worst
+// clipping is 0.063% of steps on one of them, and zero on fifteen of eighteen.
+const STEP_AXIS = 0.5;
+
 
 const STATE_LABEL: Record<PresenceState, string> = {
   present: "still occupant",
@@ -433,12 +432,8 @@ export function Presence({
   // Off by default: it was measured after the panel shipped, and a measurement
   // does not get to change what the panel showed. See docs/frame_step.md.
   const [gateGain, setGateGain] = useState(false);
-  const [stepSignal, setStepSignal] = useState<FrameDiffSignal>("amplitude");
-  // The y scale, fixed at the panel range's own extent so zooming magnifies
-  // the trace in time and NOT in level. Recomputed only from an unzoomed
-  // fetch, which is a true upper bound on every zoom inside it: a column's
-  // envelope carries the per-frame extremes, so no sub-range can exceed it.
-  const [stepScale, setStepScale] = useState(0.05);
+  const [stepSignal, setStepSignal] = useState<FrameDiffSignal>("ratio_complex");
+
   // The frame step's own view. `null` follows the panel, so the trace sits on
   // the shared time axis with the charts above it until the reader zooms; a
   // zoom then REFETCHES over the narrower window, because decimation happens
@@ -562,7 +557,6 @@ export function Presence({
         .then((result) => {
           setStep(result);
           setStepError(null);
-          if (!stepWindow) setStepScale(ceilingOf(result));
         })
         .catch((err: unknown) => {
           if (controller.signal.aborted) return;
@@ -974,7 +968,7 @@ export function Presence({
                       limit={range}
                       onWindow={setStepWindow}
                       minSpan={MIN_STEP_SPAN_SECONDS}
-                      yDomain={[-stepScale, stepScale]}
+                      yDomain={[-STEP_AXIS, STEP_AXIS]}
                       yLabel="frame step (a−a′)/(a+a′)"
                       dark={dark}
                       height={150}
@@ -1003,10 +997,6 @@ export function Presence({
                               dashed: true,
                             }]
                           : []),
-                        // The mean fold. Drawn last so it sits over the medians:
-                        // on the ratio it is the sharpest of the three, and on
-                        // the raw amplitude it is mostly the receiver's gain.
-                        { values: step.common, color: "#b8862b", width: 1.4, label: "common mode" },
                       ]}
                     />
                   </ChartBusy>
@@ -1020,14 +1010,8 @@ export function Presence({
                     <span style={{ color: "#a34a8f" }}>
                       |step| median{step.decimated && " (dashed: column peak)"}
                     </span>
-                    <span style={{ color: "#b8862b" }}>
-                      common mode (mean fold)
-                      {step.summary.commonMedian !== null &&
-                        ` · ${step.summary.commonMedian.toFixed(4)}`}
-                    </span>
                     <span>
-                      axis ±{stepScale.toFixed(3)} of a bounded ±1 scale, fixed
-                      across zoom
+                      axis ±{STEP_AXIS} — fixed, so captures compare
                       {step.summary.max !== null && (
                         <>
                           {" "}· peak {(step.summary.maxNative ?? 0).toFixed(1)}
@@ -1103,13 +1087,7 @@ export function Presence({
                     rotation</b> — a body at fixed range walks the ratio round a
                     circle at constant magnitude, which the radial part alone
                     cannot see. At constant magnitude the total reads back as an
-                    angle, {step.summary.nativeUnit} above.{" "}
-                    <span style={{ color: "#b8862b" }}>Common mode</span> is the
-                    odd one out: the <b>mean</b> of the steps taken as vectors,
-                    so what the subcarriers agree about survives and what they
-                    disagree about cancels. Measured on the 09-21 sitting set it
-                    separates <b>13.2×</b> against 8.1× for the median fold —
-                    the sharpest of the three here.
+                    angle, {step.summary.nativeUnit} above.
                   </>
                 ) : (
                   <>
@@ -1122,24 +1100,15 @@ export function Presence({
                     the direction and so can cancel: a body brightens some
                     subcarriers and fades others, which reads near zero with a
                     wide envelope. <span style={{ color: "#a34a8f" }}>|step|</span>{" "}
-                    folds the magnitudes and cannot.{" "}
-                    <span style={{ color: "#b8862b" }}>Common mode</span> is the{" "}
-                    <b>mean</b> rather than a median: it keeps only what the
-                    subcarriers agree about.
-                    {step.signal === "amplitude" && (
-                      <>
-                        {" "}<b>On this signal treat it with suspicion</b> — a
-                        receiver gain step is pure common mode, so measured it
-                        inflates up to 68× at a gain crossing and its
-                        empty/occupied separation inverts to 0.22×. On the ratio,
-                        where the common gain divides out, it is the sharpest
-                        fold there is.
-                      </>
-                    )}
+                    folds the magnitudes and cannot.
                   </>
                 )}{" "}
                 Median, not mean — two subcarriers moving 40 dB leave it at zero,
-                which is the point. Bins that are dead or in the guard band are
+                which is the point. The <b>mean</b> (common-mode) fold is still
+                computed and still in the payload, but is no longer drawn: over
+                twelve empty captures its floor spans 48–73× between captures
+                against 10× for the median fold, so two captures cannot be read
+                against one another on it. Bins that are dead or in the guard band are
                 dropped first — that is the {step.nSubcarriers} −{" "}
                 {step.summary.liveMedian} missing above — and a pair with fewer
                 than 4 live ones reports nothing rather than a median of two.
