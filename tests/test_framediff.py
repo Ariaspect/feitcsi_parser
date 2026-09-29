@@ -299,6 +299,7 @@ def _series(n: int, seed: int = 3) -> dict:
         "time_s": np.arange(n) * 0.05,
         "signed": d,
         "magnitude": np.abs(d),
+        "common": np.abs(d) * 0.5,
     }
 
 
@@ -320,6 +321,7 @@ def test_decimation_keeps_the_single_frame_that_moved() -> None:
     s = _series(20000)
     s["signed"][12345] = 0.97
     s["magnitude"][12345] = 0.97
+    s["common"][12345] = 0.97
     out = framediff.decimate(s, 500)
     assert out["decimated"] is True
     assert out["time_s"].size == 500
@@ -344,6 +346,7 @@ def test_a_column_holding_only_blanked_steps_reports_null() -> None:
     s = _series(2000)
     s["signed"][:1000] = np.nan
     s["magnitude"][:1000] = np.nan
+    s["common"][:1000] = np.nan
     out = framediff.decimate(s, 100)
     assert np.isnan(out["signed"][:45]).all()
     assert np.isfinite(out["signed"][55:]).all()
@@ -546,7 +549,7 @@ def test_a_pure_rotation_is_invisible_to_the_radial_part_and_read_by_the_total()
     """
     for theta in (0.05, 0.3, 1.0, 2.5):
         r = np.array([[1 + 0j], [np.exp(1j * theta)]])
-        radial, total = framediff.relative_step_complex(r)
+        radial, total, _vec = framediff.relative_step_complex(r)
         assert abs(float(radial[0, 0])) < 1e-12
         assert float(total[0, 0]) == pytest.approx(np.sin(theta / 2), abs=1e-12)
         assert float(framediff.unit_to_radians(total[0, 0])) == pytest.approx(theta)
@@ -557,7 +560,7 @@ def test_without_rotation_the_complex_step_is_the_amplitude_step() -> None:
     it: with the phase held still the two agree to floating point."""
     rng = np.random.default_rng(4)
     a = rng.uniform(0.1, 10.0, (50, 8))
-    radial, total = framediff.relative_step_complex(a.astype(complex))
+    radial, total, _vec = framediff.relative_step_complex(a.astype(complex))
     from_db = framediff.relative_step(20.0 * np.log10(a))
     assert np.allclose(radial, from_db, atol=1e-12)
     assert np.allclose(total, np.abs(from_db), atol=1e-12)
@@ -568,7 +571,7 @@ def test_the_total_step_is_bounded_and_never_below_the_radial() -> None:
     the two traces is exactly the rotation the panel says it is."""
     rng = np.random.default_rng(6)
     r = (rng.standard_normal((200, 12)) + 1j * rng.standard_normal((200, 12)))
-    radial, total = framediff.relative_step_complex(r)
+    radial, total, _vec = framediff.relative_step_complex(r)
     ok = np.isfinite(total)
     assert (total[ok] >= -1e-12).all() and (total[ok] <= 1 + 1e-12).all()
     assert (total[ok] + 1e-12 >= np.abs(radial[ok])).all()
@@ -579,7 +582,7 @@ def test_two_dead_frames_are_no_step_rather_than_a_zero_one() -> None:
     zero has the largest step there is, and must keep it."""
     r = np.zeros((3, 6), dtype=complex)
     r[0] = 1 + 0j
-    radial, total = framediff.relative_step_complex(r)
+    radial, total, _vec = framediff.relative_step_complex(r)
     assert np.allclose(radial[0], -1.0) and np.allclose(total[0], 1.0)
     assert np.isnan(radial[1]).all() and np.isnan(total[1]).all()
 
@@ -633,6 +636,71 @@ def test_the_endpoint_serves_every_signal(tmp_path: Path) -> None:
     bad = client.get("/api/frame-diff", params={
         "path": str(p), "t0": 0.0, "t1": 200.0, "signal": "nope"})
     assert bad.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+#  The common-mode fold                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_common_fold_keeps_what_the_subcarriers_agree_about() -> None:
+    """A step every subcarrier makes together survives the mean untouched."""
+    amp = np.full((2, 40), -30.0)
+    amp[1] += 3.0
+    f = framediff.fold(framediff.relative_step(amp))
+    want = float(framediff.db_to_unit(3.0))
+    assert float(f["common"][0]) == pytest.approx(want, abs=1e-9)
+    assert float(f["signed"][0]) == pytest.approx(want, abs=1e-9)
+
+
+def test_the_common_fold_cancels_what_they_disagree_about() -> None:
+    """Half the array up and half down is loud, and common to nothing.
+
+    This is the whole point of the fold, and the reason it is the sharpest of
+    the three on the ratio and the worst on the raw amplitude: a receiver gain
+    step is pure common mode, a body is not.
+    """
+    amp = np.full((2, 40), -30.0)
+    amp[1, :20] += 3.0
+    amp[1, 20:] -= 3.0
+    f = framediff.fold(framediff.relative_step(amp))
+    assert abs(float(f["common"][0])) < 1e-12
+    assert float(f["magnitude"][0]) == pytest.approx(
+        float(framediff.db_to_unit(3.0)), abs=1e-9
+    )
+
+
+def test_on_a_complex_series_the_mean_is_taken_as_a_vector() -> None:
+    """Steps agreeing in direction add; opposing ones cancel though both are
+    the same size, which a fold over magnitudes could never show."""
+    n = 40
+    r = np.ones((2, n), dtype=complex)
+    r[1] = np.exp(1j * 0.2)                       # every subcarrier rotates alike
+    together = framediff.fold(*framediff.relative_step_complex(r))
+    r[1, : n // 2] = np.exp(1j * 0.2)
+    r[1, n // 2:] = np.exp(-1j * 0.2)             # half rotate the other way
+    opposed = framediff.fold(*framediff.relative_step_complex(r))
+    assert float(together["common"][0]) == pytest.approx(np.sin(0.1), abs=1e-9)
+    # Opposing rotations do not cancel to nothing, and the residue is real
+    # rather than sloppiness: +theta and -theta share a radial component,
+    # (1 - cos theta) / 2, since both chords pull toward the origin. What
+    # survives is a tenth of the coherent case.
+    assert float(opposed["common"][0]) == pytest.approx((1 - np.cos(0.2)) / 2, abs=1e-9)
+    assert float(opposed["common"][0]) < 0.15 * float(together["common"][0])
+    # ...while the magnitude fold cannot tell the two cases apart at all
+    assert float(opposed["magnitude"][0]) == pytest.approx(
+        float(together["magnitude"][0]), abs=1e-9
+    )
+
+
+def test_the_common_fold_reaches_the_payload(tmp_path: Path) -> None:
+    p = _capture_with_a_visit(tmp_path, n=400)
+    client = TestClient(app)
+    body = client.get("/api/frame-diff", params={
+        "path": str(p), "t0": 0.0, "t1": 200.0, "signal": "ratio_complex"}).json()
+    assert len(body["common"]) == len(body["time_s"])
+    assert len(body["common_hi"]) == len(body["time_s"])
+    assert body["summary"]["common_median"] is not None
 
 
 # --------------------------------------------------------------------------- #

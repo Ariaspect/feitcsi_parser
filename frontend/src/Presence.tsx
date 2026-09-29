@@ -54,7 +54,9 @@ const STEP_FETCH_DEBOUNCE_MS = 180;
 
 /** The symmetric y extent a frame-step response wants, from its envelopes. */
 function ceilingOf(step: FrameDiff): number {
-  const finite = [...step.signedLo, ...step.signedHi, ...step.magnitudeHi].filter(
+  const finite = [
+    ...step.signedLo, ...step.signedHi, ...step.magnitudeHi, ...step.commonHi,
+  ].filter(
     (v): v is number => v !== null && Number.isFinite(v),
   );
   return Math.min(1, Math.max(0.02, ...finite.map((v) => Math.abs(v) * 1.2)));
@@ -971,6 +973,10 @@ export function Presence({
                             dashed: true,
                           }]
                         : []),
+                      // The mean fold. Drawn last so it sits over the medians:
+                      // on the ratio it is the sharpest of the three, and on
+                      // the raw amplitude it is mostly the receiver's gain.
+                      { values: step.common, color: "#b8862b", width: 1.4, label: "common mode" },
                     ]}
                   />
                   <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
@@ -982,6 +988,11 @@ export function Presence({
                     </span>
                     <span style={{ color: "#a34a8f" }}>
                       |step| median{step.decimated && " (dashed: column peak)"}
+                    </span>
+                    <span style={{ color: "#b8862b" }}>
+                      common mode (mean fold)
+                      {step.summary.commonMedian !== null &&
+                        ` · ${step.summary.commonMedian.toFixed(4)}`}
                     </span>
                     <span>
                       axis ±{stepScale.toFixed(3)} of a bounded ±1 scale, fixed
@@ -1046,18 +1057,24 @@ export function Presence({
                     One step per subcarrier per frame pair on the{" "}
                     <b>complex ratio</b>, then the <b>median</b> across the{" "}
                     {step.summary.liveMedian} live ones (of {step.nSubcarriers}).
-                    A complex difference has a direction, not a sign, so the two
+                    A complex difference has a direction, not a sign, so the
                     traces are its decomposition:{" "}
                     <span style={{ color: "#2f7c5c" }}>signed</span> is the
                     radial part <b>(|r|−|r′|)/(|r|+|r′|)</b>, exactly what the
                     ratio |r| channel shows, and{" "}
                     <span style={{ color: "#a34a8f" }}>|step|</span> is the total{" "}
                     <b>|r−r′|/(|r|+|r′|)</b>. The total is never below the
-                    radial, so <b>the gap between the traces is the phase
+                    radial, so <b>the gap between them is the phase
                     rotation</b> — a body at fixed range walks the ratio round a
                     circle at constant magnitude, which the radial part alone
                     cannot see. At constant magnitude the total reads back as an
-                    angle, {step.summary.nativeUnit} above.
+                    angle, {step.summary.nativeUnit} above.{" "}
+                    <span style={{ color: "#b8862b" }}>Common mode</span> is the
+                    odd one out: the <b>mean</b> of the steps taken as vectors,
+                    so what the subcarriers agree about survives and what they
+                    disagree about cancels. Measured on the 09-21 sitting set it
+                    separates <b>13.2×</b> against 8.1× for the median fold —
+                    the sharpest of the three here.
                   </>
                 ) : (
                   <>
@@ -1070,7 +1087,20 @@ export function Presence({
                     the direction and so can cancel: a body brightens some
                     subcarriers and fades others, which reads near zero with a
                     wide envelope. <span style={{ color: "#a34a8f" }}>|step|</span>{" "}
-                    folds the magnitudes and cannot.
+                    folds the magnitudes and cannot.{" "}
+                    <span style={{ color: "#b8862b" }}>Common mode</span> is the{" "}
+                    <b>mean</b> rather than a median: it keeps only what the
+                    subcarriers agree about.
+                    {step.signal === "amplitude" && (
+                      <>
+                        {" "}<b>On this signal treat it with suspicion</b> — a
+                        receiver gain step is pure common mode, so measured it
+                        inflates up to 68× at a gain crossing and its
+                        empty/occupied separation inverts to 0.22×. On the ratio,
+                        where the common gain divides out, it is the sharpest
+                        fold there is.
+                      </>
+                    )}
                   </>
                 )}{" "}
                 Median, not mean — two subcarriers moving 40 dB leave it at zero,

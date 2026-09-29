@@ -1579,6 +1579,8 @@ def frame_diff(
         "signed_hi": _nullable(result["signed_hi"]),
         "magnitude": _nullable(result["magnitude"]),
         "magnitude_hi": _nullable(result["magnitude_hi"]),
+        "common": _nullable(result["common"]),
+        "common_hi": _nullable(result["common_hi"]),
         "count": [int(v) for v in result["count"]],
         "bin_seconds": result["bin_seconds"],
         "decimated": bool(result["decimated"]),

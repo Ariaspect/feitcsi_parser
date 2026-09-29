@@ -1384,6 +1384,10 @@ export interface FrameDiff {
    *  This is `hybrid.amplitude_diff` on the bounded axis, exactly. */
   magnitude: (number | null)[];
   magnitudeHi: (number | null)[];
+  /** The MEAN fold, and its modulus: what the subcarriers agree about, with
+   *  what they disagree about cancelled. The channel's common mode. */
+  common: (number | null)[];
+  commonHi: (number | null)[];
   /** Frames behind each column, blanked ones included. */
   count: number[];
   binSeconds: number;
@@ -1409,6 +1413,7 @@ export interface FrameDiff {
     /** Subcarriers a typical step was folded over — the array width less the
      *  guard band and the dead bins. */
     liveMedian: number;
+    commonMedian: number | null;
     nBridged: number;
     /** Frame pairs that crossed a reported gain state. Always counted; blanked
      *  only when `gateGain` was asked for. 84-100% of the loudest 1% of steps
@@ -1471,6 +1476,8 @@ export async function fetchFrameDiff(
     signedHi: body.signed_hi,
     magnitude: body.magnitude,
     magnitudeHi: body.magnitude_hi,
+    common: body.common,
+    commonHi: body.common_hi,
     count: body.count,
     binSeconds: body.bin_seconds,
     decimated: body.decimated,
@@ -1488,6 +1495,7 @@ export async function fetchFrameDiff(
       steps: s.steps,
       stepsMeasured: s.steps_measured,
       liveMedian: s.live_median,
+      commonMedian: s.common_median,
       nBridged: s.n_bridged,
       nGainCrossed: s.n_gain_crossed,
       gainGated: s.gain_gated,

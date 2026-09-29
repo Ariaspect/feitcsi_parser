@@ -191,8 +191,8 @@ def relative_step(amp_db: np.ndarray) -> np.ndarray:
         return np.tanh(np.diff(amp_db, axis=0) * DB_TO_UNIT)
 
 
-def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The same step on a complex series. Returns ``(radial, total)``.
+def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The same step on a complex series. Returns ``(radial, total, vector)``.
 
     A complex difference has a direction in the plane rather than a sign, so
     the pair is the honest decomposition of one quantity:
@@ -207,6 +207,12 @@ def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     gap between the traces IS the phase rotation, which is the whole reason to
     read the ratio complex.
 
+    ``vector`` is the step kept complex, ``(r_t - r_t-1) / (|r_t| + |r_t-1|)``,
+    whose modulus is ``total``. It exists so the common-mode fold can average
+    the steps as vectors: steps that agree in direction add and steps that
+    disagree cancel, which is what separates a channel moving coherently from
+    subcarriers rattling independently.
+
     For a pure rotation by ``theta`` at constant magnitude the chord over the
     sum gives ``total = sin(theta / 2)``, so a step reads back as an angle
     through ``unit_to_radians``. That is the case ``backend.motion`` is about:
@@ -218,29 +224,51 @@ def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"ratio must be 2-D (n_frames, n_sc), got {ratio.shape}")
     if ratio.shape[0] < 2:
         empty = np.zeros((0, ratio.shape[1]))
-        return empty, empty.copy()
+        return empty, empty.copy(), empty.astype(complex)
     mag = np.abs(ratio)
     denom = mag[1:] + mag[:-1]
     with np.errstate(invalid="ignore", divide="ignore"):
         radial = np.diff(mag, axis=0) / denom
-        total = np.abs(np.diff(ratio, axis=0)) / denom
+        vector = np.diff(ratio, axis=0) / denom
+        total = np.abs(vector)
     # A subcarrier that is zero in both frames has no step, not a zero one.
     dead = ~np.isfinite(denom) | (denom <= 0)
     radial[dead] = np.nan
     total[dead] = np.nan
-    return radial, total
+    vector[dead] = np.nan
+    return radial, total, vector
 
 
-def fold(steps: np.ndarray, magnitudes: np.ndarray | None = None) -> dict[str, np.ndarray]:
+def fold(
+    steps: np.ndarray,
+    magnitudes: np.ndarray | None = None,
+    vectors: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
     """Reduce ``(n_steps, n_sc)`` to one row of numbers per step.
 
-    ``signed`` and ``magnitude`` are the two median folds and ``live`` is how
-    many subcarriers carried them. A step with too few live subcarriers reports
-    NaN rather than a median of one or two: a dead array is not a quiet room.
+    Three folds, and ``live`` is how many subcarriers carried them. A step with
+    too few live subcarriers reports NaN rather than a median of one or two: a
+    dead array is not a quiet room.
+
+    ``signed`` and ``magnitude`` are median folds -- typical per-subcarrier
+    behaviour, robust to a handful of subcarriers on a fading null.
+
+    ``common`` is the odd one out: the **mean**, and its modulus. Averaging
+    signed steps keeps only what the subcarriers agree about and cancels what
+    they do not, so it measures the channel's COMMON MODE. On a complex series
+    the mean is taken as a vector, so steps agreeing in direction add and
+    opposing ones cancel.
+
+    That makes it the sharpest of the three on the ratio and the worst on the
+    raw amplitude, for one reason: a receiver gain step is pure common mode.
+    Measured, the raw-amplitude common fold is inflated up to 68x at a gain
+    crossing and its empty/occupied separation INVERTS to 0.22x, while on the
+    ratio -- where the common gain has divided out -- it separates 13.2x
+    against 8.1x for the median fold. See ``docs/frame_step.md``.
 
     *magnitudes* is the unsigned per-subcarrier step where it is not simply
-    ``|steps|`` -- the complex channel, whose total step carries rotation the
-    signed radial part cannot. Left out, ``|steps|`` is used.
+    ``|steps|``; *vectors* the signed step where it is not simply ``steps``,
+    which for a complex series is the step kept complex.
     """
     steps = np.asarray(steps, dtype=float)
     if steps.ndim != 2:
@@ -248,10 +276,14 @@ def fold(steps: np.ndarray, magnitudes: np.ndarray | None = None) -> dict[str, n
     mags = np.abs(steps) if magnitudes is None else np.asarray(magnitudes, dtype=float)
     if mags.shape != steps.shape:
         raise ValueError(f"magnitudes {mags.shape} must match steps {steps.shape}")
+    vecs = steps if vectors is None else np.asarray(vectors)
+    if vecs.shape != steps.shape:
+        raise ValueError(f"vectors {vecs.shape} must match steps {steps.shape}")
     n = steps.shape[0]
     out = {
         "signed": np.full(n, np.nan),
         "magnitude": np.full(n, np.nan),
+        "common": np.full(n, np.nan),
         "live": np.zeros(n, dtype=int),
     }
     if n == 0:
@@ -266,6 +298,7 @@ def fold(steps: np.ndarray, magnitudes: np.ndarray | None = None) -> dict[str, n
 
     out["signed"][usable] = np.nanmedian(steps[usable], axis=1)
     out["magnitude"][usable] = np.nanmedian(mags[usable], axis=1)
+    out["common"][usable] = np.abs(np.nanmean(vecs[usable], axis=1))
     return out
 
 
@@ -305,10 +338,10 @@ def frame_steps(
         )
 
     if complex_input:
-        steps, mags = relative_step_complex(amp_db)
+        steps, mags, vecs = relative_step_complex(amp_db)
     else:
-        steps, mags = relative_step(amp_db), None
-    folded = fold(steps, mags)
+        steps, mags, vecs = relative_step(amp_db), None, None
+    folded = fold(steps, mags, vecs)
     dt = np.diff(times) if times.size >= 2 else np.zeros(0)
     limit = gap_limit_for(times) if gap_limit is None else float(gap_limit)
 
@@ -329,7 +362,7 @@ def frame_steps(
         if gate_gain:
             blank = blank | crossed
 
-    for key in ("signed", "magnitude"):
+    for key in ("signed", "magnitude", "common"):
         folded[key][blank] = np.nan
 
     return {
@@ -358,7 +391,7 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
         empty = np.zeros(0)
         return {
             "time_s": empty, "signed": empty, "signed_lo": empty, "signed_hi": empty,
-            "magnitude": empty, "magnitude_hi": empty,
+            "magnitude": empty, "magnitude_hi": empty, "common": empty, "common_hi": empty,
             "count": np.zeros(0, dtype=int), "bin_seconds": 0.0, "decimated": False,
         }
 
@@ -371,6 +404,8 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
             "signed_hi": np.asarray(series["signed"], dtype=float),
             "magnitude": np.asarray(series["magnitude"], dtype=float),
             "magnitude_hi": np.asarray(series["magnitude"], dtype=float),
+            "common": np.asarray(series["common"], dtype=float),
+            "common_hi": np.asarray(series["common"], dtype=float),
             "count": np.ones(n, dtype=int),
             "bin_seconds": float(np.median(np.diff(t))) if n >= 2 else 0.0,
             "decimated": False,
@@ -384,9 +419,10 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
 
     signed = np.asarray(series["signed"], dtype=float)
     magnitude = np.asarray(series["magnitude"], dtype=float)
+    common = np.asarray(series["common"], dtype=float)
 
     keys = ("time_s", "signed", "signed_lo", "signed_hi", "magnitude",
-            "magnitude_hi")
+            "magnitude_hi", "common", "common_hi")
     out: dict[str, Any] = {k: np.full(max_points, np.nan) for k in keys}
     out["count"] = np.zeros(max_points, dtype=int)
 
@@ -410,6 +446,11 @@ def decimate(series: dict[str, Any], max_points: int = DEFAULT_MAX_POINTS) -> di
         if mg.size:
             out["magnitude"][i] = np.median(mg)
             out["magnitude_hi"][i] = mg.max()
+        cm = common[lo:hi]
+        cm = cm[np.isfinite(cm)]
+        if cm.size:
+            out["common"][i] = np.median(cm)
+            out["common_hi"][i] = cm.max()
 
     out["bin_seconds"] = float(edges[1] - edges[0])
     out["decimated"] = True
@@ -604,12 +645,15 @@ def compute_frame_diff(
     # width: the guard band and the dead bins never do.
     live = np.asarray(steps["live"], dtype=float)
     live = live[live > 0]
+    com = np.asarray(steps["common"], dtype=float)
+    com = com[np.isfinite(com)]
     return {
         **binned,
         "summary": {
             "steps": int(mag.size),
             "steps_measured": int(finite.size),
             "live_median": int(np.median(live)) if live.size else 0,
+            "common_median": (float(np.median(com)) if com.size else None),
             "n_bridged": int(steps["n_bridged"]),
             "n_gain_crossed": int(steps["n_gain_crossed"]),
             "gain_gated": bool(steps["gain_gated"]),

@@ -196,6 +196,39 @@ an angle readback — and not a better detector input. Anyone reaching for it as
 one should use the hybrid's own-floor rule, because the number itself calibrates
 no better than `|dr|/|r|` does, being the same number.
 
+### The common-mode fold (2026-09-29)
+
+A third fold, from the user's own formula — `y = (1/N) Σ (A_i − A_{i−1})`. The
+mean of a difference is the difference of the means, so it is the frame-to-frame
+change in the array's **average level**: the channel's **common mode**. On a
+complex series the mean is taken as a vector, so steps agreeing in direction add
+and opposing ones cancel.
+
+Which makes it the sharpest fold on the ratio and the worst on the raw
+amplitude, for one reason: **a receiver gain step is pure common mode**, while a
+body's effect is differential across subcarriers and largely cancels in a mean.
+
+Separation, 6 sitting captures (09-21 20:17–20:44) against 3 same-day empties:
+
+| fold / signal | sitting | empty | separation |
+|---|---:|---:|---:|
+| common mode, **raw amplitude** | 0.263 dB | 1.209 dB | **0.22× — inverted** |
+| median \|d\|, ratio complex | 0.0853 | 0.0105 | 8.10× |
+| common mode, ratio \|r\| | 0.0174 | 0.0018 | 9.95× |
+| **common mode, ratio complex** | **0.0326** | **0.0025** | **13.16×** |
+
+All the ratio forms are clean (no overlap); the raw-amplitude one inverts
+because the night empties re-gear on 52 % of pairs. Gain-crossing inflation of
+the common fold on raw amplitude reaches **68×** on 20260921_125836, against
+1.0–4.4× for the median fold on the same captures — the mean is exactly the
+wrong fold for a series the AGC can move.
+
+Two properties asserted in the tests: a step every subcarrier makes together
+survives the mean untouched, and half the array up with half down cancels to
+zero while the magnitude fold reads it at full size. Opposing *rotations* are
+the interesting middle case — they cancel to a tenth rather than to nothing,
+because +θ and −θ share the radial component (1−cos θ)/2.
+
 ### AGC immunity, measured rather than assumed
 
 Median `|d|` at a gain crossing over the same-state level:
