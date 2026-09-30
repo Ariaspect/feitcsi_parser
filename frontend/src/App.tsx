@@ -148,12 +148,11 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
-  // The capture picker groups by the day the capture was recorded (the
-  // yyyymmdd stamp in its name, else its mtime). The metadata axes that used
-  // to be offered here (room / configuration / scenario / ...) grouped
-  // nothing useful -- one room, a flag only recent captures carry -- and the
-  // user reads the corpus by date. See captureGroups below.
-  const [groupBy, setGroupBy] = useState<string>("date");
+  // The day the capture picker is narrowed to: a yyyymmdd stamp, or "all".
+  // The "Group by" select lists every day the listing holds and the picker
+  // shows only that day's captures. Empty until the listing arrives, then
+  // the newest day. See captureGroups below.
+  const [groupBy, setGroupBy] = useState<string>("");
   // A default applies until the user overrides it. Without this, picking 'all'
   // deliberately and then loading another capture would snap the selection
   // back to 2x1 and quietly fight the user.
@@ -357,47 +356,40 @@ export function App() {
   // the same captures along any axes, a capture belongs to several groupings
   // at once, and a second on-disk copy inside captures/ would be listed twice
   // and picked twice as a calibration reference.
-  const captureGroups = (() => {
-    // Group label: "mm-dd" from the capture's own stamp, else from its mtime
-    // (in the browser's zone). The year and the directory are left off --
-    // every capture here is from the same year and the folder repeats the
-    // date. The sort key keeps the full yyyymmdd so days order correctly.
-    const day = (c: CaptureFile): { sort: string; label: string } => {
-      const m = captureDay(c);
-      return { sort: m, label: `${m.slice(4, 6)}-${m.slice(6, 8)}` };
-    };
-
-    const byKey = new Map<string, { label: string; items: CaptureFile[] }>();
-    for (const c of captures ?? []) {
-      const k = groupBy === "none" ? { sort: "", label: "" } : day(c);
-      if (!byKey.has(k.sort)) byKey.set(k.sort, { label: k.label, items: [] });
-      byKey.get(k.sort)!.items.push(c);
-    }
-    // Newest day first, newest capture first within a day: today's capture
-    // is what gets opened most.
-    return [...byKey.entries()]
+  // Every day in the listing, newest first, as "mm-dd" -- no year, no folder.
+  const days = (() => {
+    const seen = new Map<string, number>();
+    for (const c of captures ?? []) seen.set(captureDay(c), (seen.get(captureDay(c)) ?? 0) + 1);
+    return [...seen.entries()]
       .sort((a, b) => b[0].localeCompare(a[0]))
-      .map(([, { label, items }]) => ({
-        label,
-        items: items
-          .slice()
-          .sort((a, b) => captureStamp(b).localeCompare(captureStamp(a)))
-          .map((c) => ({
-            // Inside a day group the date is the group label, so the item shows
-            // the time of day; without grouping it shows the full name.
-            label: `${
-              groupBy === "none"
-                ? truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)
-                : captureTimeLabel(c)
-            }  (${formatBytes(c.size_bytes)})`,
-            value: c.path,
-          })),
-      }));
+      .map(([day, n]) => ({ day, label: `${day.slice(4, 6)}-${day.slice(6, 8)}`, count: n }));
   })();
 
+  // The picker holds the chosen day's captures, newest first, labelled by
+  // time of day; with "all" it holds everything under a day heading each.
+  const captureGroups = (() => {
+    const chosen = groupBy && groupBy !== "all" ? days.filter((d) => d.day === groupBy) : days;
+    return chosen.map((d) => ({
+      label: groupBy === "all" ? d.label : "",
+      items: (captures ?? [])
+        .filter((c) => captureDay(c) === d.day)
+        .sort((a, b) => captureStamp(b).localeCompare(captureStamp(a)))
+        .map((c) => ({ label: `${captureTimeLabel(c)}  (${formatBytes(c.size_bytes)})`, value: c.path })),
+    }));
+  })();
+
+  // Start on the newest day once the listing is in; the user's own choice
+  // sticks after that. A day that disappears from the listing falls back.
+  useEffect(() => {
+    if (!captures || captures.length === 0) return;
+    if (!groupBy || (groupBy !== "all" && !days.some((d) => d.day === groupBy))) {
+      setGroupBy(days[0]?.day ?? "all");
+    }
+  }, [captures, groupBy, days]);
+
   const groupByItems = [
-    { label: "date", value: "date" },
-    { label: "no grouping", value: "none" },
+    ...days.map((d) => ({ label: `${d.label}  (${d.count})`, value: d.day })),
+    { label: "all dates", value: "all" },
   ];
 
   const mimoItems = [
@@ -478,7 +470,7 @@ export function App() {
               onValueChange={(v) => v && setGroupBy(v)}
               items={groupByItems}
             >
-              <SelectTrigger className="w-44">
+              <SelectTrigger className="w-36">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
