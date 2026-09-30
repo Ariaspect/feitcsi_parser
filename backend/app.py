@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import farsense, framediff, hybrid, lgdetect, lgproc, motionsig, truth as truthmod
+from . import farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1423,6 +1423,128 @@ def hybrid_detector(   # not `hybrid`: that name is the module this calls
         "t_min": result["t_min"],
         "t_max": result["t_max"],
         "floor_scope": "explicit" if motion_floor is not None else "own",
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
+        "confusion": confusion_out,
+    }
+
+
+@app.get("/api/hybrid2")
+def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    lag_s: float = Query(0.0, ge=0, le=10, description="Difference frames this far apart instead of adjacent ones. 0 keeps the adjacent pair. Measured within a capture against its own empty seconds, small movement goes from 19% of its seconds detected at one frame to 88% at 2 s, while a still occupant stays near chance -- the lag, not the statistic, is what makes small motion visible"),
+    gate_gain: bool = Query(False, description="Blank frame pairs that cross a reported receiver gain state"),
+    hold_s: float = Query(hybrid.HOLD_SECONDS, ge=0, le=600, description="Seconds presence is held after the last evidence"),
+    burst_s: float = Query(hybrid.BURST_SECONDS, ge=1, le=60, description="Consecutive seconds above the motion threshold that make a burst"),
+    motion_rel: float = Query(hybrid2.MOTION_REL, ge=1, le=100, description="Motion threshold as a multiple of the range's own floor"),
+    motion_abs: float = Query(hybrid2.MOTION_ABS, ge=0, le=10, description="Motion threshold never below this step level. Half of hybrid 1's, because this metric is exactly half of |dr|/|r|"),
+    floor_pct: float = Query(hybrid.FLOOR_PERCENTILE, ge=0, le=100, description="Percentile of the per-second level taken as the range's quiet floor"),
+    motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet level in place of the range's own percentile. A range occupied throughout has no quiet stretch -- its own percentile IS the occupant"),
+    breath_min_peak: float = Query(hybrid.BREATH_MIN_PEAK, ge=-1, le=1, description="Normalised FarSense peak a window needs to count as breathing"),
+    breath_persist_s: float = Query(hybrid.BREATH_PERSIST_SECONDS, ge=1, le=120, description="Seconds of consecutive qualifying windows that must agree on the rate"),
+    breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=30, description="Rate tolerance within a breathing run, rpm"),
+    breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
+    breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
+    rpm_lo: float = Query(farsense.RATE_BAND_RPM[0], gt=0, le=120, description="Slowest breathing rate the FarSense search considers"),
+    rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate the FarSense search considers"),
+    lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it"),
+    max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'. Left alone the frame step resolves to the dominant peer at 2x1, full width"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The composite detector: the complex frame step for motion, FarSense for breath.
+
+    See ``backend.hybrid2``. Same shape as ``/api/hybrid`` -- motion opens
+    presence, breathing keeps it open, a hold carries it across gaps -- with
+    the motion channel replaced by ``framediff``'s ratio-complex step on a
+    uniform frame set. The breathing half is hybrid 1's, unchanged, so a
+    difference between the two tabs is never the breath.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rpm_lo >= rpm_hi:
+        raise HTTPException(status_code=400, detail="rpm_lo must be below rpm_hi")
+
+    try:
+        result = hybrid2.compute_hybrid2(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            gate_gain=gate_gain,
+            lag_seconds=lag_s,
+            hold_seconds=hold_s,
+            burst_seconds=burst_s,
+            motion_rel=motion_rel,
+            motion_abs=motion_abs,
+            floor_percentile=floor_pct,
+            motion_floor=motion_floor,
+            breath_min_peak=breath_min_peak,
+            breath_persist_seconds=breath_persist_s,
+            breath_rate_tol=breath_rate_tol,
+            breath_window_seconds=breath_window,
+            breath_highpass_hz=breath_highpass,
+            band_rpm=(rpm_lo, rpm_hi),
+            max_gap_fraction=max_gap_fraction,
+            lead_hold=lead_hold,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    truth_out = None
+    confusion_out = None
+    cam = _camera_truth(p)
+    if cam is not None and cam.size:
+        cells, excluded = truthmod.cell_truth(
+            result["time_s"], cam[:, 0], cam[:, 1] > 0.5, 0.5, margin_s
+        )
+        c = truthmod.confusion(cells, result["present"], excluded)
+        scored = np.isfinite(cells)
+        c["base_rate"] = float(np.mean(cells[scored] > 0.5)) if scored.any() else None
+        c["margin_s"] = float(margin_s)
+        confusion_out = c
+        truth_out = {
+            "time_s": [float(v) for v in cam[:, 0]],
+            "present": [bool(v > 0.5) for v in cam[:, 1]],
+        }
+
+    def _nan(v: float) -> float | None:
+        return float(v) if np.isfinite(v) else None
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "present": [bool(v) for v in result["present"]],
+        "state": result["state"],
+        "unknown": [bool(v) for v in result["unknown"]],
+        "motion": _nullable(result["motion_ratio"]),
+        "motion_reference": _nullable(result["motion_reference"]),
+        "burst": [bool(v) for v in result["burst"]],
+        "breathing": [bool(v) for v in result["breathing"]],
+        "breath_peak": _nullable(result["breath_peak"]),
+        "breath_rpm": _nullable(result["breath_rpm"]),
+        "floor": _nan(result["ratio_floor"]),
+        "threshold": _nan(result["ratio_threshold"]),
+        "floor_scope": "explicit" if motion_floor is not None else "own",
+        "signal": result["signal"],
+        "selection_note": result["selection_note"],
+        "lag_seconds": result["lag_seconds"],
+        "lag_frames": result["lag_frames"],
+        "gain_gated": result["gain_gated"],
+        "n_gain_crossed": result["n_gain_crossed"],
+        "breath_note": result["breath_note"],
+        "fs_hz": result["fs_hz"],
+        "params": result["params"],
+        "frames_used": result["frames_used"],
+        "frames_dropped": result["frames_dropped"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
         "truth": truth_out,
         "truth_excluded": _truth_exclusion(p),
         "confusion": confusion_out,

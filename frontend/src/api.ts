@@ -1509,3 +1509,140 @@ export async function fetchFrameDiff(
     },
   };
 }
+
+// --------------------------------------------------------------------------- #
+//  Hybrid 2 (/api/hybrid2): the complex frame step for motion, FarSense for breath
+// --------------------------------------------------------------------------- #
+
+export interface Hybrid2 {
+  timeS: number[];
+  present: boolean[];
+  state: HybridState[];
+  unknown: boolean[];
+  /** Per-second median of the ratio-complex frame step. The motion channel. */
+  motion: (number | null)[];
+  /** Hybrid 1's |Δr|/|r| on the same axis, for reference only — it decides
+   *  nothing here. Exactly twice `motion` before the fold and the frame set
+   *  differ, so the two are close but not equal. */
+  motionReference: (number | null)[];
+  burst: boolean[];
+  breathing: boolean[];
+  breathPeak: (number | null)[];
+  breathRpm: (number | null)[];
+  /** The range's own quiet level, and the threshold built from it. A range
+   *  occupied throughout has no quiet stretch — its own floor IS the occupant,
+   *  which is the detector's known blind spot rather than a bug. */
+  floor: number | null;
+  threshold: number | null;
+  floorScope: "own" | "explicit";
+  signal: string;
+  selectionNote: string;
+  lagSeconds: number;
+  lagFrames: number;
+  gainGated: boolean;
+  nGainCrossed: number;
+  breathNote: string | null;
+  fsHz: number;
+  framesUsed: number;
+  framesDropped: number;
+  tMin: number;
+  tMax: number;
+  truth: { timeS: number[]; present: boolean[] } | null;
+  truthExcluded: string | null;
+  confusion: HybridConfusion | null;
+}
+
+export interface Hybrid2Options {
+  lagS?: number;
+  gateGain?: boolean;
+  holdS?: number;
+  burstS?: number;
+  motionRel?: number;
+  motionAbs?: number;
+  floorPct?: number;
+  motionFloor?: number | null;
+  breathMinPeak?: number;
+  breathPersistS?: number;
+  breathWindow?: number;
+  rpmLo?: number;
+  rpmHi?: number;
+  leadHold?: boolean;
+  marginS?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchHybrid2(
+  path: string,
+  t0: number,
+  t1: number,
+  options: Hybrid2Options = {},
+  signal?: AbortSignal,
+): Promise<Hybrid2> {
+  const {
+    lagS = 0, gateGain = false, holdS = 20, burstS = 2,
+    motionRel = 2, motionAbs = 0.05, floorPct = 20, motionFloor,
+    breathMinPeak = 0.2, breathPersistS = 10, breathWindow = 10,
+    rpmLo = 10, rpmHi = 30, leadHold = true, marginS = 5,
+    mimo, sourceMac, interpolate,
+  } = options;
+
+  const url =
+    `/api/hybrid2?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}&lag_s=${lagS}&hold_s=${holdS}&burst_s=${burstS}` +
+    `&motion_rel=${motionRel}&motion_abs=${motionAbs}&floor_pct=${floorPct}` +
+    `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
+    `&breath_window=${breathWindow}&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}` +
+    `&margin_s=${marginS}` +
+    (gateGain ? "&gate_gain=true" : "") +
+    (leadHold ? "" : "&lead_hold=false") +
+    (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `hybrid2: ${res.status}`);
+  }
+  const body = await res.json();
+  const c = body.confusion;
+  return {
+    timeS: body.time_s,
+    present: body.present,
+    state: body.state,
+    unknown: body.unknown,
+    motion: body.motion,
+    motionReference: body.motion_reference,
+    burst: body.burst,
+    breathing: body.breathing,
+    breathPeak: body.breath_peak,
+    breathRpm: body.breath_rpm,
+    floor: body.floor,
+    threshold: body.threshold,
+    floorScope: body.floor_scope,
+    signal: body.signal,
+    selectionNote: body.selection_note,
+    lagSeconds: body.lag_seconds,
+    lagFrames: body.lag_frames,
+    gainGated: body.gain_gated,
+    nGainCrossed: body.n_gain_crossed,
+    breathNote: body.breath_note,
+    fsHz: body.fs_hz,
+    framesUsed: body.frames_used,
+    framesDropped: body.frames_dropped,
+    tMin: body.t_min,
+    tMax: body.t_max,
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded,
+    confusion: c
+      ? {
+          tp: c.tp, fp: c.fp, fn: c.fn, tn: c.tn, total: c.total,
+          excluded: c.excluded, accuracy: c.accuracy, recall: c.recall,
+          specificity: c.specificity, precision: c.precision,
+          baseRate: c.base_rate, marginSeconds: c.margin_s,
+        }
+      : null,
+  };
+}

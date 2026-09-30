@@ -174,24 +174,27 @@ def unit_to_radians(d: np.ndarray | float) -> np.ndarray | float:
     return 2.0 * np.arcsin(np.clip(d, -1.0, 1.0))
 
 
-def relative_step(amp_db: np.ndarray) -> np.ndarray:
+def relative_step(amp_db: np.ndarray, lag: int = 1) -> np.ndarray:
     """Per-subcarrier signed step in ``(-1, 1)``, one row per frame pair.
 
     *amp_db* is ``(n_frames, n_subcarriers)`` of amplitude in dB, as
     ``tiles._decode_for_doppler`` returns it for ``amplitude`` and for
     ``csi_ratio_amplitude``. Row *i* is the step from frame *i* to frame
-    *i + 1*, so the result is one row shorter.
+    *i + lag*, so the result is *lag* rows shorter.
     """
     amp_db = np.asarray(amp_db, dtype=float)
     if amp_db.ndim != 2:
         raise ValueError(f"amp_db must be 2-D (n_frames, n_sc), got {amp_db.shape}")
-    if amp_db.shape[0] < 2:
+    lag = max(1, int(lag))
+    if amp_db.shape[0] <= lag:
         return np.zeros((0, amp_db.shape[1]))
     with np.errstate(invalid="ignore"):
-        return np.tanh(np.diff(amp_db, axis=0) * DB_TO_UNIT)
+        return np.tanh((amp_db[lag:] - amp_db[:-lag]) * DB_TO_UNIT)
 
 
-def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def relative_step_complex(
+    ratio: np.ndarray, lag: int = 1
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The same step on a complex series. Returns ``(radial, total, vector)``.
 
     A complex difference has a direction in the plane rather than a sign, so
@@ -222,14 +225,15 @@ def relative_step_complex(ratio: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
     ratio = np.asarray(ratio)
     if ratio.ndim != 2:
         raise ValueError(f"ratio must be 2-D (n_frames, n_sc), got {ratio.shape}")
-    if ratio.shape[0] < 2:
+    lag = max(1, int(lag))
+    if ratio.shape[0] <= lag:
         empty = np.zeros((0, ratio.shape[1]))
         return empty, empty.copy(), empty.astype(complex)
     mag = np.abs(ratio)
-    denom = mag[1:] + mag[:-1]
+    denom = mag[lag:] + mag[:-lag]
     with np.errstate(invalid="ignore", divide="ignore"):
-        radial = np.diff(mag, axis=0) / denom
-        vector = np.diff(ratio, axis=0) / denom
+        radial = (mag[lag:] - mag[:-lag]) / denom
+        vector = (ratio[lag:] - ratio[:-lag]) / denom
         total = np.abs(vector)
     # A subcarrier that is zero in both frames has no step, not a zero one.
     dead = ~np.isfinite(denom) | (denom <= 0)
@@ -307,6 +311,7 @@ def frame_steps(
     times: np.ndarray,
     *,
     complex_input: bool = False,
+    lag: int = 1,
     gap_limit: float | None = None,
     gain_state: np.ndarray | None = None,
     gate_gain: bool = False,
@@ -337,13 +342,17 @@ def frame_steps(
             f"{times.shape[0]} times against {amp_db.shape[0]} frames of amplitude"
         )
 
+    lag = max(1, int(lag))
     if complex_input:
-        steps, mags, vecs = relative_step_complex(amp_db)
+        steps, mags, vecs = relative_step_complex(amp_db, lag)
     else:
-        steps, mags, vecs = relative_step(amp_db), None, None
+        steps, mags, vecs = relative_step(amp_db, lag), None, None
     folded = fold(steps, mags, vecs)
-    dt = np.diff(times) if times.size >= 2 else np.zeros(0)
-    limit = gap_limit_for(times) if gap_limit is None else float(gap_limit)
+    dt = times[lag:] - times[:-lag] if times.size > lag else np.zeros(0)
+    # A lag-k pair is meant to span k intervals, so the hole it may not cross
+    # scales with it. Measured from the adjacent spacing either way, so the
+    # limit does not inherit the lag's own stretch.
+    limit = (gap_limit_for(times) if gap_limit is None else float(gap_limit)) * lag
 
     # A step that spans a dropout is not a frame-to-frame step. Blanked rather
     # than dropped, so the series keeps its place on the time axis.
@@ -357,8 +366,8 @@ def frame_steps(
             raise ValueError(
                 f"{gain_state.shape[0]} gain states against {amp_db.shape[0]} frames"
             )
-        if gain_state.size >= 2:
-            crossed = np.diff(gain_state) != 0
+        if gain_state.size > lag:
+            crossed = gain_state[lag:] != gain_state[:-lag]
         if gate_gain:
             blank = blank | crossed
 
@@ -366,7 +375,8 @@ def frame_steps(
         folded[key][blank] = np.nan
 
     return {
-        "time_s": times[1:] if times.size >= 2 else np.zeros(0),
+        "time_s": times[lag:] if times.size > lag else np.zeros(0),
+        "lag_frames": lag,
         "dt": dt,
         "gap_limit": limit,
         "n_bridged": n_bridged,
@@ -536,8 +546,17 @@ def capture_steps(
     interpolate: bool = True,
     signal: str = DEFAULT_SIGNAL,
     gate_gain: bool = False,
+    lag_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Decode a range and reduce it to the per-step series, cached.
+
+    *lag_seconds* differences frames that far apart rather than adjacent ones;
+    0 (the default) keeps the adjacent pair and changes nothing. Measured
+    within a capture against its own empty seconds, the lag is what makes
+    *small* motion visible at all -- 19 % of its seconds past the empty P90 at
+    one frame, 88 % at 2 s, while a still occupant stays near chance. It does
+    nothing for the cross-capture floor, which has already saturated at one
+    frame.
 
     **One transmitter, one MIMO mode, one bandwidth.** Unlike
     ``hybrid.capture_evidence``, which takes whatever the caller filtered to,
@@ -557,7 +576,8 @@ def capture_steps(
     path = Path(path)
     st = path.stat()
     key = (str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
-           mimo, source_mac, bool(interpolate), str(signal), bool(gate_gain))
+           mimo, source_mac, bool(interpolate), str(signal), bool(gate_gain),
+           float(lag_seconds))
     with _cache_lock:
         hit = _cache.get(key)
         if hit is not None:
@@ -590,8 +610,20 @@ def capture_steps(
 
     rssi = np.asarray(getattr(index, "rssi_1", None))
     gain_state = rssi[ids] if rssi.ndim == 1 and rssi.size > int(ids[-1]) else None
-    out = frame_steps(series, times_all[ids], complex_input=is_complex,
+    t_sel = times_all[ids]
+    lag = 1
+    if lag_seconds > 0 and t_sel.size >= 2:
+        step_dt = float(np.median(np.diff(t_sel)))
+        if step_dt > 0:
+            lag = max(1, int(round(lag_seconds / step_dt)))
+    if lag >= ids.size:
+        raise ValueError(
+            f"a {lag_seconds:g} s lag is {lag} frames, and this range holds "
+            f"{ids.size}; there is no pair that far apart"
+        )
+    out = frame_steps(series, t_sel, complex_input=is_complex, lag=lag,
                       gain_state=gain_state, gate_gain=gate_gain)
+    out["lag_seconds"] = float(lag_seconds)
     out["signal"] = signal
     out["source_mac"] = sel["source_mac"]
     out["mimo"] = sel["mimo"]
@@ -630,12 +662,14 @@ def compute_frame_diff(
     interpolate: bool = True,
     signal: str = DEFAULT_SIGNAL,
     gate_gain: bool = False,
+    lag_seconds: float = 0.0,
     max_points: int = DEFAULT_MAX_POINTS,
 ) -> dict[str, Any]:
     """The per-step series, decimated for a plot, with its summary."""
     steps = capture_steps(
         path, t0, t1, mimo=mimo, source_mac=source_mac,
         interpolate=interpolate, signal=signal, gate_gain=gate_gain,
+        lag_seconds=lag_seconds,
     )
     binned = decimate(steps, max_points)
 
@@ -669,6 +703,8 @@ def compute_frame_diff(
             "max_native": _native(finite.max(), signal) if finite.size else None,
         },
         "signal": steps["signal"],
+        "lag_seconds": steps["lag_seconds"],
+        "lag_frames": steps["lag_frames"],
         "frames_used": steps["frames_used"],
         "frames_dropped": steps["frames_dropped"],
         "frames_dropped_narrow": steps["frames_dropped_narrow"],
