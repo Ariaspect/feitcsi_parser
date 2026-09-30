@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePath
+from typing import NamedTuple
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -1741,7 +1742,16 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
+class _Found(NamedTuple):
+    """A capture found by :func:`_scan_captures`, with what the walk already knows."""
+
+    path: Path                  # spelled under the root the walk started from
+    stat: os.stat_result
+    dir_fd: int                 # the capture's directory; valid only until the walk resumes
+    siblings: frozenset[str]    # every name in that directory
+
+
+def _scan_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[_Found]:
     """Yield capture files under *root*, descending into subdirectories.
 
     Hand-rolled rather than ``rglob`` because ``rglob`` does not descend into
@@ -1751,29 +1761,88 @@ def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
     *seen* holds the real paths of directories already visited, so a symlink
     cycle terminates instead of recursing forever. Unreadable directories are
     skipped rather than failing the whole listing.
+
+    Everything is done relative to an open directory rather than by full path.
+    On lg the captures sit on a 9p mount of the Windows drive, reached through
+    two symlinks, where a lookup by path costs ~1.3 ms; one ``is_dir`` on every
+    camera frame beside every capture made the listing take 9 s. ``scandir``
+    reads the file types off the directory listing itself, and a stat or open
+    against the directory's descriptor skips the path walk.
     """
-    if depth < 0:
-        return
     try:
-        entries = sorted(root.iterdir())
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
         return
-    for entry in entries:
+    yield from _scan_dir(fd, root, root.resolve(), depth, seen)
+
+
+def _scan_dir(fd: int, path: Path, real: Path, depth: int,
+              seen: set[Path]) -> Iterator[_Found]:
+    """:func:`_scan_captures` below one open directory; closes *fd*."""
+    try:
+        if depth < 0:
+            return
         try:
-            is_dir = entry.is_dir()  # follows symlinks; False if broken
+            entries = sorted(os.scandir(fd), key=lambda e: e.name)
         except OSError:
-            continue
-        if is_dir:
-            real = entry.resolve()
-            if real in seen:
+            return
+        siblings = frozenset(e.name for e in entries)
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()  # follows symlinks; False if broken
+                is_link = entry.is_symlink()
+            except OSError:
                 continue
-            seen.add(real)
-            yield from _walk_captures(entry, depth - 1, seen)
-        elif entry.suffix in CAPTURE_SUFFIXES and entry.is_file():
-            yield entry
+            if is_dir:
+                # A plain subdirectory's real path is its parent's plus its
+                # name; only a symlink needs resolving.
+                sub_real = (real / entry.name).resolve() if is_link else real / entry.name
+                if sub_real in seen:
+                    continue
+                seen.add(sub_real)
+                try:
+                    sub = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                except OSError:
+                    continue
+                yield from _scan_dir(sub, path / entry.name, sub_real, depth - 1, seen)
+            elif PurePath(entry.name).suffix in CAPTURE_SUFFIXES:
+                try:
+                    if not entry.is_file():
+                        continue
+                    st = entry.stat()
+                except OSError:
+                    continue  # vanished or dangling between listing and stat
+                yield _Found(path / entry.name, st, fd, siblings)
+    finally:
+        os.close(fd)
 
 
-def _capture_conditions(capture: Path) -> dict:
+def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
+    """The paths :func:`_scan_captures` finds, for callers that need no more."""
+    for found in _scan_captures(root, depth, seen):
+        yield found.path
+
+
+def _sidecar_json(found: _Found, suffix: str) -> dict | None:
+    """The capture's ``<stem><suffix>`` JSON object, or None if absent or unreadable.
+
+    Presence is read off the directory listing the walk already made and the
+    file is opened through the walk's descriptor, so neither costs a path
+    lookup.
+    """
+    name = f"{found.path.stem}{suffix}"
+    if name not in found.siblings:
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY, dir_fd=found.dir_fd)
+        with os.fdopen(fd, "rb") as fh:
+            obj = json.loads(fh.read())
+    except (OSError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _capture_conditions(found: _Found) -> dict:
     """room/configuration/scenario for a capture, as far as they are recorded.
 
     ``scenario`` falls back to what the camera saw, so the unattended runs sort
@@ -1782,27 +1851,21 @@ def _capture_conditions(capture: Path) -> dict:
     a recorded blank.
     """
     out: dict = {}
-    meta_path = capture.with_name(f"{capture.stem}_meta.json")
-    if meta_path.is_file():
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            meta = {}
-        for key in ("room", "configuration", "scenario", "subject",
-                    "activity", "facing", "distance_m"):
-            if meta.get(key) not in (None, ""):
-                out[key] = meta[key]
+    meta = _sidecar_json(found, "_meta.json") or {}
+    for key in ("room", "configuration", "scenario", "subject",
+                "activity", "facing", "distance_m"):
+        if meta.get(key) not in (None, ""):
+            out[key] = meta[key]
     if "scenario" not in out:
-        cv_path = capture.with_name(f"{capture.stem}_cv.json")
-        if cv_path.is_file():
-            try:
-                frac = json.loads(cv_path.read_text())["summary"]["fraction_occupied"]
-            except (OSError, json.JSONDecodeError, KeyError):
-                frac = None
-            if frac is not None:
-                out["scenario"] = ("empty" if frac == 0.0
-                                   else "occupied" if frac > 0.5 else "partial")
-                out["occupancy"] = float(frac)
+        cv = _sidecar_json(found, "_cv.json") or {}
+        try:
+            frac = cv["summary"]["fraction_occupied"]
+        except (KeyError, TypeError):
+            frac = None
+        if frac is not None:
+            out["scenario"] = ("empty" if frac == 0.0
+                               else "occupied" if frac > 0.5 else "partial")
+            out["occupancy"] = float(frac)
     return out
 
 
@@ -1827,16 +1890,12 @@ def list_captures() -> list[dict]:
         return []
 
     files: list[dict] = []
-    for entry in _walk_captures(root, MAX_CAPTURE_DEPTH, {root.resolve()}):
-        try:
-            st = entry.stat()
-        except OSError:
-            continue  # vanished or dangling between walk and stat
+    for found in _scan_captures(root, MAX_CAPTURE_DEPTH, {root.resolve()}):
         files.append({
-            "filename": entry.relative_to(root).as_posix(),
-            "path": str(entry),
-            "size_bytes": st.st_size,
-            "mtime": st.st_mtime,
+            "filename": found.path.relative_to(root).as_posix(),
+            "path": str(found.path),
+            "size_bytes": found.stat.st_size,
+            "mtime": found.stat.st_mtime,
             # The conditions a capture was recorded under, for grouping the
             # picker. Read from the sidecar rather than from a directory
             # layout: scripts/build_dataset_tree.py can arrange the same
@@ -1844,7 +1903,7 @@ def list_captures() -> list[dict]:
             # at once. Filing them on disk instead would also put a second copy
             # of every capture inside captures/, where the walk above would
             # list it twice and the reference pooling would pick it twice.
-            **_capture_conditions(entry),
+            **_capture_conditions(found),
         })
 
     files.sort(key=lambda f: f["mtime"], reverse=True)
