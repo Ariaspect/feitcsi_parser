@@ -230,6 +230,14 @@ export function Hybrid2({
         </Button>
         {data && (
           <span className="text-[11px] text-muted-foreground">
+            <span
+              className={`mr-2 rounded px-1.5 py-0.5 font-semibold ${data.rangeVerdict.present ? "bg-[#2f6fed] text-white" : "bg-[#6b7280] text-white"}`}
+              title={`Range verdict, fixed thresholds: present when P90 of the ${data.rangeVerdict.thresholds.lagSeconds} s-lag step > ${data.rangeVerdict.thresholds.motionP90}, else when the FarSense peak ≥ ${data.rangeVerdict.thresholds.breathPeak} for ≥ ${data.rangeVerdict.thresholds.breathRun} consecutive windows. Chosen on 235 one-minute captures (docs/hybrid2.md).`}
+            >
+              range: {data.rangeVerdict.present ? "present" : "empty"}
+              {data.rangeVerdict.by && ` (${data.rangeVerdict.by})`}
+              {" · "}P90 {data.rangeVerdict.motionP90?.toFixed(4) ?? "—"} · breath run {data.rangeVerdict.breathRun}
+            </span>
             {data.fsHz.toFixed(1)} Hz · {data.selectionNote}
             {data.lagFrames > 1 && ` · lag ${data.lagFrames} frames`}
           </span>

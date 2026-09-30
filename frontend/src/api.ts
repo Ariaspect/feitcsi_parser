@@ -1550,6 +1550,16 @@ export interface Hybrid2 {
   truth: { timeS: number[]; present: boolean[] } | null;
   truthExcluded: string | null;
   confusion: HybridConfusion | null;
+  /** One present/empty call for the whole range from fixed thresholds: P90 of
+   *  the 2 s-lag step, else a run of FarSense peaks. See docs/hybrid2.md. */
+  rangeVerdict: {
+    present: boolean;
+    by: "motion" | "breathing" | null;
+    motionP90: number | null;
+    breathRun: number;
+    seconds: number;
+    thresholds: { lagSeconds: number; motionP90: number; breathPeak: number; breathRun: number };
+  };
 }
 
 export interface Hybrid2Options {
@@ -1624,6 +1634,19 @@ export async function fetchHybrid2(
     floorScope: body.floor_scope,
     signal: body.signal,
     selectionNote: body.selection_note,
+    rangeVerdict: {
+      present: Boolean(body.range_verdict?.present),
+      by: body.range_verdict?.by ?? null,
+      motionP90: body.range_verdict?.motion_p90 ?? null,
+      breathRun: body.range_verdict?.breath_run ?? 0,
+      seconds: body.range_verdict?.seconds ?? 0,
+      thresholds: {
+        lagSeconds: body.range_verdict?.thresholds?.lag_seconds ?? 2,
+        motionP90: body.range_verdict?.thresholds?.motion_p90 ?? 0.035,
+        breathPeak: body.range_verdict?.thresholds?.breath_peak ?? 0.25,
+        breathRun: body.range_verdict?.thresholds?.breath_run ?? 5,
+      },
+    },
     lagSeconds: body.lag_seconds,
     lagFrames: body.lag_frames,
     gainGated: body.gain_gated,

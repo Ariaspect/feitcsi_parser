@@ -220,3 +220,17 @@ def test_the_endpoint_refuses_an_inverted_rate_band(tmp_path: Path) -> None:
     res = TestClient(app).get("/api/hybrid2", params={
         "path": str(p), "t0": 0.0, "t1": 200.0, "rpm_lo": 30, "rpm_hi": 10})
     assert res.status_code == 400
+
+
+def test_range_verdict_motion_then_breath_then_empty() -> None:
+    from backend import hybrid2
+    quiet = np.full(60, 0.011)
+    nopeak = np.full(60, 0.05)
+    assert hybrid2.range_verdict(quiet, nopeak)["present"] is False
+    moving = quiet.copy(); moving[10:20] = 0.09          # 10 of 60 s above -> P90 clears 0.035
+    v = hybrid2.range_verdict(moving, nopeak); assert v["present"] and v["by"] == "motion"
+    peaks = nopeak.copy(); peaks[30:35] = 0.3            # five consecutive windows at 0.3
+    v = hybrid2.range_verdict(quiet, peaks); assert v["present"] and v["by"] == "breathing" and v["breath_run"] == 5
+    peaks[32] = 0.1                                      # broken run -> 2 + 2
+    assert hybrid2.range_verdict(quiet, peaks)["present"] is False
+    assert hybrid2.range_verdict(np.full(60, np.nan), nopeak)["present"] is False

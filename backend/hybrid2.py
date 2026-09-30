@@ -79,6 +79,19 @@ FLOOR_PERCENTILE = hybrid.FLOOR_PERCENTILE
 BREATH_MIN_PEAK = hybrid.BREATH_MIN_PEAK
 BREATH_PERSIST_SECONDS = hybrid.BREATH_PERSIST_SECONDS
 
+# The range verdict: one present/empty call for a whole range, the rule the
+# user set for the 1-minute captures (docs/hybrid2.md, 2026-09-30). Present
+# when the 90th percentile of the per-second step at a 2 s lag clears
+# RANGE_MOTION_P90, else when the FarSense peak holds RANGE_BREATH_PEAK for
+# RANGE_BREATH_RUN consecutive windows, else empty. Absolute thresholds -- no
+# floor -- chosen on 235 one-minute captures (200 empty, 35 occupied): 98.3 %
+# in-sample, 95.3 % / 97.2 % under 5- and 2-fold blocked cross-validation;
+# the same triple came out of 3 of 5 folds.
+RANGE_LAG_SECONDS = 2.0
+RANGE_MOTION_P90 = 0.035
+RANGE_BREATH_PEAK = 0.25
+RANGE_BREATH_RUN = 5
+
 _CACHE_SIZE = 4
 _cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
 _cache_lock = Lock()
@@ -189,6 +202,44 @@ def capture_evidence(
     return out
 
 
+def longest_run(mask: np.ndarray) -> int:
+    """Length of the longest run of consecutive true cells."""
+    best = cur = 0
+    for x in np.asarray(mask, dtype=bool):
+        cur = cur + 1 if x else 0
+        best = max(best, cur)
+    return best
+
+
+def range_verdict(
+    level_lag2: np.ndarray,
+    breath_peak: np.ndarray,
+    *,
+    motion_p90: float = RANGE_MOTION_P90,
+    breath_peak_min: float = RANGE_BREATH_PEAK,
+    breath_run: int = RANGE_BREATH_RUN,
+) -> dict[str, Any]:
+    """One call for the whole range from fixed thresholds (see RANGE_*)."""
+    lv = np.asarray(level_lag2, dtype=float)
+    lv = lv[np.isfinite(lv)]
+    p90 = float(np.percentile(lv, 90)) if lv.size else float("nan")
+    pk = np.asarray(breath_peak, dtype=float)
+    run = longest_run(np.isfinite(pk) & (pk >= breath_peak_min))
+    by_motion = bool(np.isfinite(p90) and p90 > motion_p90)
+    by_breath = bool(run >= breath_run)
+    return {
+        "present": by_motion or by_breath,
+        "by": "motion" if by_motion else ("breathing" if by_breath else None),
+        "motion_p90": p90,
+        "breath_run": int(run),
+        "seconds": int(lv.size),
+        "thresholds": {
+            "lag_seconds": RANGE_LAG_SECONDS, "motion_p90": float(motion_p90),
+            "breath_peak": float(breath_peak_min), "breath_run": int(breath_run),
+        },
+    }
+
+
 def compute_hybrid2(
     path,
     t0: float,
@@ -221,4 +272,18 @@ def compute_hybrid2(
                 "lag_seconds", "lag_frames", "breath_note"):
         if key in ev:
             out[key] = ev[key]
+
+    # The range verdict always reads the step at RANGE_LAG_SECONDS, whatever
+    # lag the per-second series above was drawn with.
+    seconds = np.asarray(ev["time_s"], dtype=float) - 0.5
+    if float(lag_seconds) == RANGE_LAG_SECONDS:
+        level2 = np.asarray(ev["motion_ratio"], dtype=float)
+    else:
+        level2, _ = motion_per_second(
+            path, t0, t1, seconds, mimo=mimo, source_mac=source_mac,
+            interpolate=interpolate, gate_gain=gate_gain, lag_seconds=RANGE_LAG_SECONDS,
+        )
+        level2 = np.asarray(level2, dtype=float)
+        level2[np.asarray(ev["unknown"], dtype=bool)] = np.nan
+    out["range_verdict"] = range_verdict(level2, ev["breath_peak"])
     return out

@@ -1525,6 +1525,10 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
         "unknown": [bool(v) for v in result["unknown"]],
         "motion": _nullable(result["motion_ratio"]),
         "motion_reference": _nullable(result["motion_reference"]),
+        "range_verdict": {
+            **result["range_verdict"],
+            "motion_p90": None if not np.isfinite(result["range_verdict"]["motion_p90"]) else float(result["range_verdict"]["motion_p90"]),
+        },
         "burst": [bool(v) for v in result["burst"]],
         "breathing": [bool(v) for v in result["breathing"]],
         "breath_peak": _nullable(result["breath_peak"]),
