@@ -1560,7 +1560,13 @@ export interface Hybrid2 {
     seconds: number;
     thresholds: { lagSeconds: number; motionP90: number; breathPeak: number; breathRun: number };
   };
+  /** The same rule applied every second to the trailing `windowSeconds`:
+   *  what a live system would show. */
+  rangeSeries: { present: boolean[]; state: Hybrid2RangeState[]; windowSeconds: number };
+  rangeConfusion: HybridConfusion | null;
 }
+
+export type Hybrid2RangeState = "present:motion" | "present:breathing" | "empty" | "unknown";
 
 export interface Hybrid2Options {
   lagS?: number;
@@ -1581,6 +1587,8 @@ export interface Hybrid2Options {
   mimo?: string | null;
   sourceMac?: string | null;
   interpolate?: boolean;
+  /** Trailing window, seconds, for the per-second range-rule series. */
+  rangeWindow?: number;
 }
 
 export async function fetchHybrid2(
@@ -1594,12 +1602,13 @@ export async function fetchHybrid2(
     lagS = 0, gateGain = false, holdS = 20, burstS = 2,
     motionRel = 2, motionAbs = 0.05, floorPct = 20, motionFloor,
     breathMinPeak = 0.2, breathPersistS = 10, breathWindow = 10,
-    rpmLo = 10, rpmHi = 30, leadHold = true, marginS = 5,
+    rpmLo = 10, rpmHi = 30, leadHold = true, marginS = 5, rangeWindow = 60,
     mimo, sourceMac, interpolate,
   } = options;
 
   const url =
     `/api/hybrid2?path=${encodeURIComponent(path)}` +
+    `&range_window=${rangeWindow}` +
     `&t0=${t0}&t1=${t1}&lag_s=${lagS}&hold_s=${holdS}&burst_s=${burstS}` +
     `&motion_rel=${motionRel}&motion_abs=${motionAbs}&floor_pct=${floorPct}` +
     `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
@@ -1617,6 +1626,7 @@ export async function fetchHybrid2(
     throw new Error(body.detail ?? `hybrid2: ${res.status}`);
   }
   const body = await res.json();
+  const rc = body.range_confusion;
   const c = body.confusion;
   return {
     timeS: body.time_s,
@@ -1667,5 +1677,18 @@ export async function fetchHybrid2(
           baseRate: c.base_rate, marginSeconds: c.margin_s,
         }
       : null,
+    rangeConfusion: rc
+      ? {
+          tp: rc.tp, fp: rc.fp, fn: rc.fn, tn: rc.tn, total: rc.total,
+          excluded: rc.excluded, accuracy: rc.accuracy, recall: rc.recall,
+          specificity: rc.specificity, precision: rc.precision,
+          baseRate: rc.base_rate, marginSeconds: rc.margin_s,
+        }
+      : null,
+    rangeSeries: {
+      present: body.range_series?.present ?? [],
+      state: body.range_series?.state ?? [],
+      windowSeconds: body.range_series?.window_seconds ?? 60,
+    },
   };
 }

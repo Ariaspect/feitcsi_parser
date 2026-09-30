@@ -1451,6 +1451,7 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
     rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate the FarSense search considers"),
     lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it"),
     max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
+    range_window: float = Query(hybrid2.RANGE_SERIES_WINDOW_SECONDS, ge=5, le=600, description="The range rule applied every second to this many trailing seconds (the live-system view of the fixed-threshold rule)"),
     margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
     mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'. Left alone the frame step resolves to the dominant peer at 2x1, full width"),
     source_mac: str | None = Query(None, description="Source MAC filter"),
@@ -1479,6 +1480,7 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
             source_mac=parse_mac_filter(source_mac),
             interpolate=interpolate,
             gate_gain=gate_gain,
+            range_window_seconds=range_window,
             lag_seconds=lag_s,
             hold_seconds=hold_s,
             burst_seconds=burst_s,
@@ -1500,6 +1502,7 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
 
     truth_out = None
     confusion_out = None
+    range_confusion_out = None
     cam = _camera_truth(p)
     if cam is not None and cam.size:
         cells, excluded = truthmod.cell_truth(
@@ -1510,6 +1513,9 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
         c["base_rate"] = float(np.mean(cells[scored] > 0.5)) if scored.any() else None
         c["margin_s"] = float(margin_s)
         confusion_out = c
+        rc = truthmod.confusion(cells, result["range_series"]["present"], excluded)
+        rc["base_rate"] = c["base_rate"]; rc["margin_s"] = float(margin_s)
+        range_confusion_out = rc
         truth_out = {
             "time_s": [float(v) for v in cam[:, 0]],
             "present": [bool(v > 0.5) for v in cam[:, 1]],
@@ -1529,6 +1535,12 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
             **result["range_verdict"],
             "motion_p90": None if not np.isfinite(result["range_verdict"]["motion_p90"]) else float(result["range_verdict"]["motion_p90"]),
         },
+        "range_series": {
+            "present": [bool(v) for v in result["range_series"]["present"]],
+            "state": list(result["range_series"]["state"]),
+            "window_seconds": float(result["range_series"]["window_seconds"]),
+        },
+        "range_confusion": range_confusion_out,
         "burst": [bool(v) for v in result["burst"]],
         "breathing": [bool(v) for v in result["breathing"]],
         "breath_peak": _nullable(result["breath_peak"]),

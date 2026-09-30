@@ -234,3 +234,19 @@ def test_range_verdict_motion_then_breath_then_empty() -> None:
     peaks[32] = 0.1                                      # broken run -> 2 + 2
     assert hybrid2.range_verdict(quiet, peaks)["present"] is False
     assert hybrid2.range_verdict(np.full(60, np.nan), nopeak)["present"] is False
+
+
+def test_range_series_is_the_rule_on_a_trailing_window() -> None:
+    from backend import hybrid2
+    n = 200
+    lv = np.full(n, 0.011); pk = np.full(n, 0.05); unk = np.zeros(n, dtype=bool)
+    lv[100:110] = 0.09                      # 10 s of motion
+    pk[150:155] = 0.3                       # five consecutive breathing windows
+    out = hybrid2.range_series(lv, pk, unk, window_seconds=60)
+    st = np.array(out["state"]); pres = out["present"]
+    assert (st[:29] == "unknown").all() and st[29] != "unknown"      # half the window known
+    assert not pres[30:100].any()
+    assert (st[109:160] == "present:motion").all()                  # motion holds while the 10 s sit inside the trailing 60
+    assert st[170] == "present:breathing"                            # motion left the window, the breathing run is still inside
+    assert st[199] == "present:breathing"
+    assert out["window_seconds"] == 60.0

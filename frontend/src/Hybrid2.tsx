@@ -8,6 +8,7 @@ import {
   fetchHybrid2,
   type Hybrid2 as Hybrid2Data,
   type HybridState,
+  type Hybrid2RangeState,
   type Meta,
 } from "./api";
 import { Chart, CHART_MARGIN } from "./Chart";
@@ -30,6 +31,26 @@ const STATE_LABEL: Record<HybridState, string> = {
   empty: "empty",
   unknown: "no data",
 };
+
+const RANGE_LABEL: Record<Hybrid2RangeState, string> = {
+  "present:motion": "present (motion)",
+  "present:breathing": "present (breathing)",
+  empty: "empty",
+  unknown: "no data",
+};
+
+function rangeColor(state: Hybrid2RangeState, dark: boolean): string {
+  switch (state) {
+    case "present:motion":
+      return "#d97a2f";
+    case "present:breathing":
+      return "#2f6fed";
+    case "empty":
+      return dark ? "#2b3038" : "#e6e9ee";
+    case "unknown":
+      return "url(#hybrid2-no-data)";
+  }
+}
 
 function stateColor(state: HybridState, dark: boolean): string {
   switch (state) {
@@ -94,6 +115,10 @@ export function Hybrid2({
   const [breathPersistS, setBreathPersistS] = useState(10);
   const [leadHold, setLeadHold] = useState(true);
   const [gateGain, setGateGain] = useState(false);
+  // Which rule the verdict strip draws: the per-second hybrid (own floor,
+  // holds) or the fixed-threshold range rule applied to a trailing window.
+  const [verdictMode, setVerdictMode] = useState<"hybrid" | "range">("hybrid");
+  const [rangeWindow, setRangeWindow] = useState(60);
 
   const [data, setData] = useState<Hybrid2Data | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -132,7 +157,7 @@ export function Hybrid2({
       path, range[0], range[1],
       {
         lagS, holdS, burstS, motionRel, motionAbs, floorPct,
-        breathMinPeak, breathPersistS, leadHold, gateGain,
+        breathMinPeak, breathPersistS, leadHold, gateGain, rangeWindow,
         mimo, sourceMac, interpolate,
       },
       controller.signal,
@@ -147,7 +172,7 @@ export function Hybrid2({
     return () => controller.abort();
   }, [
     path, range, lagS, holdS, burstS, motionRel, motionAbs, floorPct,
-    breathMinPeak, breathPersistS, leadHold, gateGain, mimo, sourceMac,
+    breathMinPeak, breathPersistS, leadHold, gateGain, rangeWindow, mimo, sourceMac,
     interpolate,
   ]);
 
@@ -156,7 +181,13 @@ export function Hybrid2({
     return [data.timeS[0], data.timeS[data.timeS.length - 1]];
   }, [data, range]);
 
-  const stateRuns = useMemo(() => (data ? runs(data.timeS, data.state) : []), [data]);
+  const stateRuns = useMemo(
+    () => (data ? runs<string>(data.timeS, verdictMode === "range" ? data.rangeSeries.state : data.state) : []),
+    [data, verdictMode],
+  );
+  const labelOf = (v: string) => (verdictMode === "range" ? RANGE_LABEL[v as Hybrid2RangeState] : STATE_LABEL[v as HybridState]);
+  const colorOf = (v: string) => (verdictMode === "range" ? rangeColor(v as Hybrid2RangeState, dark) : stateColor(v as HybridState, dark));
+  const conf = data ? (verdictMode === "range" ? data.rangeConfusion : data.confusion) : null;
   const truthRuns = useMemo(
     () => (data?.truth ? runs(data.truth.timeS, data.truth.present) : []),
     [data],
@@ -273,23 +304,39 @@ export function Hybrid2({
                   const a = clampX(r.t0); const b = clampX(r.t1);
                   if (b <= a) return null;
                   return (
-                    <rect key={`s${i}`} x={a} width={Math.max(1, b - a)} y={STRIP + 4} height={STRIP} fill={stateColor(r.value, dark)}>
+                    <rect key={`s${i}`} x={a} width={Math.max(1, b - a)} y={STRIP + 4} height={STRIP} fill={colorOf(r.value)}>
                       <title>
-                        {STATE_LABEL[r.value]} · {formatTime(r.t0, domain[1] - domain[0])} – {formatTime(r.t1, domain[1] - domain[0])}
+                        {labelOf(r.value)} · {formatTime(r.t0, domain[1] - domain[0])} – {formatTime(r.t1, domain[1] - domain[0])}
                       </title>
                     </rect>
                   );
                 })}
-                <text x={-6} y={STRIP * 2} textAnchor="end" fontSize={9} fill="currentColor">verdict</text>
+                <text x={-6} y={STRIP * 2} textAnchor="end" fontSize={9} fill="currentColor">{verdictMode === "range" ? "range" : "verdict"}</text>
               </g>
             </svg>
           </ChartBusy>
 
-          <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
-            {(["moving", "breathing", "held", "bridged", "empty", "unknown"] as HybridState[]).map((s) => (
+          <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+            <Button
+              variant={verdictMode === "range" ? "default" : "outline"}
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              title="Draw the verdict strip from the fixed-threshold range rule (P90 of the 2 s-lag step > 0.035, else a run of 5 FarSense peaks ≥ 0.25), applied every second to the trailing window — what a live system would show. Off: the per-second hybrid with its own floor and holds."
+              onClick={() => setVerdictMode((m) => (m === "range" ? "hybrid" : "range"))}
+            >
+              verdict: {verdictMode === "range" ? "range rule" : "hybrid"}
+            </Button>
+            {verdictMode === "range" && (
+              <NumberField id="h2-rwin" label="window (s)" value={rangeWindow} onChange={setRangeWindow} min={5} max={600} width="w-16"
+                title="Trailing seconds the range rule sees at each second. 60 is what the one-minute captures were scored with; shorter exits sooner after the person leaves" />
+            )}
+            {(verdictMode === "range"
+              ? (["present:motion", "present:breathing", "empty", "unknown"] as string[])
+              : (["moving", "breathing", "held", "bridged", "empty", "unknown"] as string[])
+            ).map((s) => (
               <span key={s} className="flex items-center gap-1.5">
-                <svg width={10} height={10}><rect width={10} height={10} fill={stateColor(s, dark)} /></svg>
-                {STATE_LABEL[s]}
+                <svg width={10} height={10}><rect width={10} height={10} fill={colorOf(s)} /></svg>
+                {labelOf(s)}
               </span>
             ))}
           </div>
@@ -331,14 +378,15 @@ export function Hybrid2({
             {data.breathNote && ` · breathing: ${data.breathNote}`}
           </p>
 
-          {data.confusion && (
+          {conf && (
             <p className="text-[11px] text-muted-foreground leading-relaxed">
-              accuracy <b className="text-foreground">{rate(data.confusion.accuracy)}</b> ·
-              recall {rate(data.confusion.recall)} · specificity{" "}
-              {rate(data.confusion.specificity)} · precision {rate(data.confusion.precision)} ·
-              always-present baseline {rate(data.confusion.baseRate)}
-              {data.confusion.excluded > 0 &&
-                ` · ${data.confusion.excluded} s not scored (within ${data.confusion.marginSeconds} s of a camera transition)`}
+              {verdictMode === "range" ? `range rule (${data.rangeSeries.windowSeconds} s window): ` : "hybrid: "}
+              accuracy <b className="text-foreground">{rate(conf.accuracy)}</b> ·
+              recall {rate(conf.recall)} · specificity{" "}
+              {rate(conf.specificity)} · precision {rate(conf.precision)} ·
+              always-present baseline {rate(conf.baseRate)}
+              {conf.excluded > 0 &&
+                ` · ${conf.excluded} s not scored (within ${conf.marginSeconds} s of a camera transition)`}
             </p>
           )}
           {data.truthExcluded && (

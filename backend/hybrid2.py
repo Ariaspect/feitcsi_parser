@@ -240,6 +240,60 @@ def range_verdict(
     }
 
 
+RANGE_SERIES_WINDOW_SECONDS = 60.0
+
+
+def range_series(
+    level_lag2: np.ndarray,
+    breath_peak: np.ndarray,
+    unknown: np.ndarray,
+    *,
+    window_seconds: float = RANGE_SERIES_WINDOW_SECONDS,
+    motion_p90: float = RANGE_MOTION_P90,
+    breath_peak_min: float = RANGE_BREATH_PEAK,
+    breath_run: int = RANGE_BREATH_RUN,
+) -> dict[str, Any]:
+    """The range rule applied every second to the trailing ``window_seconds``.
+
+    What a live system would output: at second *i* the rule sees only
+    seconds ``i - W + 1 .. i``. Present when the P90 of the lag-2 step over
+    that window clears ``motion_p90``, else when a run of ``breath_run``
+    consecutive windows with peak >= ``breath_peak_min`` ends inside it.
+    ``unknown`` where fewer than half the window's seconds are known (the
+    warm-up included).
+    """
+    lv = np.asarray(level_lag2, dtype=float)
+    pk = np.asarray(breath_peak, dtype=float)
+    unk = np.asarray(unknown, dtype=bool)
+    n = lv.size
+    W = max(1, int(round(window_seconds)))
+    q = np.isfinite(pk) & (pk >= breath_peak_min)
+    runlen = np.zeros(n, dtype=int)                 # qualifying windows ending at i
+    for i in range(n):
+        runlen[i] = runlen[i - 1] + 1 if (q[i] and i > 0) else int(q[i])
+    present = np.zeros(n, dtype=bool)
+    by: list[str | None] = [None] * n
+    state: list[str] = ["unknown"] * n
+    for i in range(n):
+        a = max(0, i - W + 1)
+        seg = lv[a : i + 1]
+        known = np.isfinite(seg) & ~unk[a : i + 1]
+        if known.sum() * 2 < W:
+            continue
+        p90 = float(np.percentile(seg[known], 90))
+        # longest qualifying run lying entirely inside [a, i]
+        best = 0
+        for j in range(a, i + 1):
+            best = max(best, min(int(runlen[j]), j - a + 1))
+        if p90 > motion_p90:
+            present[i] = True; by[i] = "motion"; state[i] = "present:motion"
+        elif best >= breath_run:
+            present[i] = True; by[i] = "breathing"; state[i] = "present:breathing"
+        else:
+            state[i] = "empty"
+    return {"present": present, "by": by, "state": state, "window_seconds": float(W)}
+
+
 def compute_hybrid2(
     path,
     t0: float,
@@ -250,6 +304,7 @@ def compute_hybrid2(
     interpolate: bool = True,
     gate_gain: bool = False,
     lag_seconds: float = 0.0,
+    range_window_seconds: float = RANGE_SERIES_WINDOW_SECONDS,
     **params: Any,
 ) -> dict[str, Any]:
     """Decode a range and run the composite detector; times on the capture's clock."""
@@ -286,4 +341,7 @@ def compute_hybrid2(
         level2 = np.asarray(level2, dtype=float)
         level2[np.asarray(ev["unknown"], dtype=bool)] = np.nan
     out["range_verdict"] = range_verdict(level2, ev["breath_peak"])
+    out["range_series"] = range_series(
+        level2, ev["breath_peak"], ev["unknown"], window_seconds=range_window_seconds,
+    )
     return out
