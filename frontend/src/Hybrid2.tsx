@@ -105,14 +105,14 @@ export interface Hybrid2Props {
 export function Hybrid2({
   path, meta, timeLink, mimo, sourceMac, interpolate, dark,
 }: Hybrid2Props) {
-  const [lagS, setLagS] = useState(0);
+  const [lagS, setLagS] = useState(2);
   const [holdS, setHoldS] = useState(20);
   const [burstS, setBurstS] = useState(2);
   const [motionRel, setMotionRel] = useState(2);
-  const [motionAbs, setMotionAbs] = useState(0.05);
+  const [motionAbs, setMotionAbs] = useState(0.035);
   const [floorPct, setFloorPct] = useState(20);
-  const [breathMinPeak, setBreathMinPeak] = useState(0.2);
-  const [breathPersistS, setBreathPersistS] = useState(10);
+  const [breathMinPeak, setBreathMinPeak] = useState(0.25);
+  const [breathPersistS, setBreathPersistS] = useState(5);
   const [leadHold, setLeadHold] = useState(true);
   const [gateGain, setGateGain] = useState(false);
   // Which rule the verdict strip draws: the per-second hybrid (own floor,
