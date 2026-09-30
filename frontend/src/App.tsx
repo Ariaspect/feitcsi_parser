@@ -115,6 +115,29 @@ interface DopplerGeom {
   scaleMax: number;
 }
 
+/** The 14-digit yyyymmddHHMMSS stamp a capture name carries, else a stamp
+ *  built from its mtime in the browser's zone. Used to group and order. */
+function captureStamp(c: CaptureFile): string {
+  const m = /(\d{8})_(\d{6})/.exec(c.filename);
+  if (m) return m[1] + m[2];
+  const d = new Date(c.mtime * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+}
+
+function captureDay(c: CaptureFile): string {
+  return captureStamp(c).slice(0, 8);
+}
+
+/** "13:08:27" for a stamped capture; for anything else, the bare file name
+ *  so an oddly named file is still recognisable inside its day group. */
+function captureTimeLabel(c: CaptureFile): string {
+  const m = /\d{8}_(\d{2})(\d{2})(\d{2})/.exec(c.filename);
+  if (m) return `${m[1]}:${m[2]}:${m[3]}`;
+  const base = c.filename.slice(c.filename.lastIndexOf("/") + 1);
+  return truncateCaptureName(base, CAPTURE_LIST_CHARS);
+}
+
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
   const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS);
@@ -125,17 +148,12 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
-  // Which condition the capture picker groups by. A view over the listing's
-  // metadata, not a directory layout -- see captureGroups below.
-  //
-  // Empty until the listing arrives, then set to whichever axis actually
-  // varies. Defaulting to room/config/scenario looked right and is the worst
-  // view of the data we have: room is recorded on one value ("lab_a") because
-  // there is one room, and configuration only on the handful of captures taken
-  // since the flag existed, so every group came out named
-  // "unspecified / unspecified / occupied" -- two thirds of the label constant,
-  // and the same partition scenario alone gives, spelled less readably.
-  const [groupBy, setGroupBy] = useState<string>("");
+  // The capture picker groups by the day the capture was recorded (the
+  // yyyymmdd stamp in its name, else its mtime). The metadata axes that used
+  // to be offered here (room / configuration / scenario / ...) grouped
+  // nothing useful -- one room, a flag only recent captures carry -- and the
+  // user reads the corpus by date. See captureGroups below.
+  const [groupBy, setGroupBy] = useState<string>("date");
   // A default applies until the user overrides it. Without this, picking 'all'
   // deliberately and then loading another capture would snap the selection
   // back to 2x1 and quietly fight the user.
@@ -340,71 +358,45 @@ export function App() {
   // at once, and a second on-disk copy inside captures/ would be listed twice
   // and picked twice as a calibration reference.
   const captureGroups = (() => {
-    const key = (c: CaptureFile) =>
-      groupBy === "none"
-        ? ""
-        : groupBy === "room/config/scenario"
-          ? [c.room, c.configuration, c.scenario].map((v) => v ?? "unspecified").join(" / ")
-          : ((c as unknown as Record<string, unknown>)[groupBy] as
-              | string
-              | undefined) ?? "unspecified";
+    // Group label: "mm-dd" from the capture's own stamp, else from its mtime
+    // (in the browser's zone). The year and the directory are left off --
+    // every capture here is from the same year and the folder repeats the
+    // date. The sort key keeps the full yyyymmdd so days order correctly.
+    const day = (c: CaptureFile): { sort: string; label: string } => {
+      const m = captureDay(c);
+      return { sort: m, label: `${m.slice(4, 6)}-${m.slice(6, 8)}` };
+    };
 
-    const byKey = new Map<string, CaptureFile[]>();
+    const byKey = new Map<string, { label: string; items: CaptureFile[] }>();
     for (const c of captures ?? []) {
-      const k = key(c);
-      if (!byKey.has(k)) byKey.set(k, []);
-      byKey.get(k)!.push(c);
+      const k = groupBy === "none" ? { sort: "", label: "" } : day(c);
+      if (!byKey.has(k.sort)) byKey.set(k.sort, { label: k.label, items: [] });
+      byKey.get(k.sort)!.items.push(c);
     }
-    // Everything unknown sinks to the bottom; the rest sorts by name, so the
-    // ordering does not move around as captures arrive.
-    const unknown = (k: string) => k === "" || k.includes("unspecified");
+    // Newest day first, newest capture first within a day: today's capture
+    // is what gets opened most.
     return [...byKey.entries()]
-      .sort((a, b) =>
-        unknown(a[0]) !== unknown(b[0])
-          ? Number(unknown(a[0])) - Number(unknown(b[0]))
-          : a[0].localeCompare(b[0]),
-      )
-      .map(([label, items]) => ({
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([, { label, items }]) => ({
         label,
-        items: items.map((c) => ({
-          // The list gets far more room than the trigger (the popup sizes to
-          // its content below), so it shows the size too and only elides a
-          // name long enough to beat even that.
-          label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
-          value: c.path,
-        })),
+        items: items
+          .slice()
+          .sort((a, b) => captureStamp(b).localeCompare(captureStamp(a)))
+          .map((c) => ({
+            // Inside a day group the date is the group label, so the item shows
+            // the time of day; without grouping it shows the full name.
+            label: `${
+              groupBy === "none"
+                ? truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)
+                : captureTimeLabel(c)
+            }  (${formatBytes(c.size_bytes)})`,
+            value: c.path,
+          })),
       }));
   })();
 
-  // Pick the finest grouping the data can actually support: the triple only if
-  // every part of it varies, else the single axis with the most distinct
-  // values. Runs once, and only until the user chooses for themselves.
-  useEffect(() => {
-    if (groupBy || !captures || captures.length === 0) return;
-    const distinct = (k: keyof CaptureFile) =>
-      new Set(
-        captures
-          .map((c) => c[k])
-          .filter((v) => v !== undefined && v !== null && v !== ""),
-      ).size;
-    const triple = ["room", "configuration", "scenario"] as const;
-    if (triple.every((k) => distinct(k) > 1)) {
-      setGroupBy("room/config/scenario");
-      return;
-    }
-    const best = (["scenario", "configuration", "activity", "subject", "room"] as const)
-      .map((k) => [k, distinct(k)] as const)
-      .sort((a, b) => b[1] - a[1])[0];
-    setGroupBy(best && best[1] > 1 ? best[0] : "none");
-  }, [captures, groupBy]);
-
   const groupByItems = [
-    { label: "room / config / scenario", value: "room/config/scenario" },
-    { label: "room", value: "room" },
-    { label: "configuration", value: "configuration" },
-    { label: "scenario", value: "scenario" },
-    { label: "subject", value: "subject" },
-    { label: "activity", value: "activity" },
+    { label: "date", value: "date" },
     { label: "no grouping", value: "none" },
   ];
 
