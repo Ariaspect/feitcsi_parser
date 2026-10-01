@@ -5,9 +5,6 @@ import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
-import { MotionSignal } from "./MotionSignal";
-import { LgDetector } from "./LgDetector";
-import { Phase1 } from "./Phase1";
 import { PresenceBar } from "./PresenceBar";
 import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
@@ -651,8 +648,6 @@ export function App() {
               <TabsTrigger value="farsense">FarSense</TabsTrigger>
               <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
               <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
-              <TabsTrigger value="motionsig">Motion signal</TabsTrigger>
-              <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -925,54 +920,6 @@ export function App() {
               </div>
             </TabsContent>
 
-
-            <TabsContent value="lgdetect">
-              <div className="space-y-4">
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  Both detectors against the camera, on one grid. Ours compares
-                  a window to an empty-room reference; LG&apos;s compares each
-                  frame to the one before, so it answers &ldquo;is something
-                  changing&rdquo; and cannot see a motionless occupant at all.
-                  The reference for our side is drawn only from OTHER captures
-                  the camera labelled empty — never this one&apos;s own empty
-                  stretches, which would be knowing the answer in advance.
-                </p>
-
-                <FoldedPanel
-                  title="Verdicts and confusion matrices"
-                  hint="ground truth, ours, theirs — same grid, same windows"
-                  defaultOpen
-                >
-                  <Phase1 path={path} dark={dark} />
-                </FoldedPanel>
-
-                <FoldedPanel
-                  title="LG detector in detail"
-                  hint="its raw +/- events and per-threshold behaviour"
-                >
-                  <div className="space-y-3">
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">
-                      Its own <code>mtk_read_bf_csi</code> and{" "}
-                      <code>process_csi_data</code> decide — nothing here
-                      reimplements them. It runs under a NumPy 1.x interpreter
-                      matching the board, because its TLV length arithmetic
-                      shifts a <code>uint8</code> left by 8: NumPy 2 keeps that
-                      as <code>uint8</code>, evaluates it to 0, and the walk
-                      desynchronises at the first CSI field — silently, yielding
-                      frames with zeroed imaginary parts rather than an error.
-                    </p>
-                    <LgDetector
-                      path={path}
-                      captureTMin={meta.t_min}
-                      captureTMax={meta.t_max}
-                      timeLink={timeLink}
-                      dark={dark}
-                    />
-                  </div>
-                </FoldedPanel>
-              </div>
-            </TabsContent>
-
             <TabsContent value="farsense">
               <FarSense
                 path={path}
@@ -999,18 +946,6 @@ export function App() {
 
             <TabsContent value="hybrid2">
               <Hybrid2
-                path={path}
-                meta={meta}
-                timeLink={timeLink}
-                mimo={mimo}
-                sourceMac={sourceMac}
-                interpolate={interpolate}
-                dark={dark}
-              />
-            </TabsContent>
-
-            <TabsContent value="motionsig">
-              <MotionSignal
                 path={path}
                 meta={meta}
                 timeLink={timeLink}

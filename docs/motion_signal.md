@@ -1,6 +1,7 @@
 # The motion signal: the CSI ratio → two features → one scalar
 
-`backend/motionsig.py`, `/api/motion-signal`, the **Motion signal** tab.
+`backend/motionsig.py`, `/api/motion-signal`. The **Motion signal** tab was
+removed from the web UI on 2026-10-01; the module and endpoint remain.
 It reduces a window of CSI to one number: *how much is the channel moving
 right now*. No hold, no breathing channel, no second chance.
 
