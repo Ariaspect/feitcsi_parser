@@ -6,7 +6,6 @@ import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { PresenceBar } from "./PresenceBar";
-import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
 import { Button } from "@/components/ui/button";
@@ -644,7 +643,6 @@ export function App() {
             <TabsList>
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
-              <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
               <TabsTrigger value="farsense">FarSense</TabsTrigger>
               <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
               <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
@@ -946,18 +944,6 @@ export function App() {
 
             <TabsContent value="hybrid2">
               <Hybrid2
-                path={path}
-                meta={meta}
-                timeLink={timeLink}
-                mimo={mimo}
-                sourceMac={sourceMac}
-                interpolate={interpolate}
-                dark={dark}
-              />
-            </TabsContent>
-
-            <TabsContent value="presence">
-              <Presence
                 path={path}
                 meta={meta}
                 timeLink={timeLink}

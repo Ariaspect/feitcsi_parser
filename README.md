@@ -540,7 +540,8 @@ while a *still* person is nearly silent, betrayed only by chest motion of a few
 millimetres at 0.2–0.5 Hz. So loud-versus-quiet cannot tell an empty room from
 a sleeping one; the quiet case is decided on **periodicity**, not on energy.
 
-The **Motion & presence** tab shows the verdict strip on the shared time axis
+The **Motion & presence** tab (removed from the web UI on 2026-10-02; the
+`/api/presence` endpoint remains) showed the verdict strip on the shared time axis
 and, underneath it, every quantity the verdict was built from: motion level,
 then score with `periodicity` / `tonality` / `motion gate` drawn separately,
 then breathing rate. The strip is the answer; the traces are why.

@@ -12,6 +12,7 @@ import {
   type Meta,
 } from "./api";
 import { Chart, CHART_MARGIN } from "./Chart";
+import { FrameStep } from "./FrameStep";
 import { formatTime, linearScale, runs } from "./series";
 import type { TimeLink } from "./timelink";
 
@@ -396,8 +397,9 @@ export function Hybrid2({
           )}
 
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            <b>Motion</b> is the ratio-complex frame step of the Motion &amp; presence
-            panel, reduced to a per-second median and thresholded against the
+            <b>Motion</b> is the ratio-complex frame step — drawn per frame pair,
+            one frame apart, in the panel below — taken at the lag set above,
+            reduced to a per-second median and thresholded against the
             range&apos;s <b>own</b> quiet level. It sees motion big or small and
             nothing else — measured within a capture, walking clears its empty
             seconds 4.56× while a still occupant reads 0.94×, correctly, because a
@@ -413,6 +415,19 @@ export function Hybrid2({
           </p>
         </>
       )}
+
+      {/* Its own request, outside the verdict's: the panel is evidence, so a
+          slow or failed decode here never holds up or blanks the verdict. */}
+      <FrameStep
+        path={path}
+        range={range}
+        domain={domain}
+        width={width}
+        mimo={mimo}
+        sourceMac={sourceMac}
+        interpolate={interpolate}
+        dark={dark}
+      />
     </div>
   );
 }

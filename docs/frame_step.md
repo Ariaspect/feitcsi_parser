@@ -1,8 +1,9 @@
 # The frame step: the amplitude difference on a bounded −1..1 axis
 
-`backend/framediff.py`, `/api/frame-diff`, on the **Motion & presence** tab
-behind the `frame step` toggle. Evidence only — nothing in that tab's verdict
-reads it, and it does not vote.
+`backend/framediff.py`, `/api/frame-diff`, drawn at the bottom of the
+**Hybrid 2** tab (until 2026-10-02 it sat on the Motion & presence tab,
+behind a `frame step` toggle; that tab is gone). Evidence only — the panel
+is its own request and does not vote.
 
 The oldest presence signal in this project is the board's own: difference the
 raw per-subcarrier amplitude against the frame before, fire when the step is
