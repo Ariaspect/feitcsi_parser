@@ -179,3 +179,64 @@ cross-session set gives 0.09 for 85.5 % there, which would then sit above the
 still sitters of 09-11 (occupied P10 0.029). So: the breathing half
 transfers; the motion threshold is a property of the link state and holds on
 the current one (09-21 onward, this AP placement), not on September's.
+
+## Held out on the days after the fit, 2026-10-02
+
+The rule above, unchanged (lag 2 s, `P90(step) > 0.035` OR `peak ≥ 0.25 for
+≥ 5 windows`, one call per capture through `compute_hybrid2`'s
+`range_verdict`), on every one-minute capture with a camera sidecar recorded
+*after* the fitted set ends at 09-30 15:40: 173 captures, 94 camera-empty, 79
+occupied (> 50 % of frames; none in between). The thresholds never saw any of
+them.
+
+| block | n | occupied | empty | accuracy | recall | specificity | fp | fn | empty-capture P90 median / max |
+|---|---|---|---|---|---|---|---|---|---|
+| 09-30 15:45–20:25 | 56 | 24 | 32 | 85.7 % | 100 % | 75.0 % | 8 | 0 | 0.0227 / 0.0814 |
+| 10-01 15:15–16:06 | 18 | 9 | 9 | 94.4 % | 100 % | 88.9 % | 1 | 0 | 0.0193 / 0.0447 |
+| 10-01 18:42–20:12 | 30 | 27 | 3 | 100 % | 100 % | 100 % | 0 | 0 | 0.0146 / 0.0146 |
+| 10-02 02:00–04:27 | 50 | 0 | 50 | 100 % | — | 100 % | 0 | 0 | 0.0150 / 0.0237 |
+| 10-02 17:18–18:27 | 19 | 19 | 0 | 100 % | 100 % | — | 0 | 0 | — |
+| all | 173 | 79 | 94 | 94.8 % | 100 % | 90.4 % | 9 | 0 | 0.0162 / 0.0814 |
+
+Balanced 95.2 %, against 99.0 % in-sample and 94.9–95.1 % under the blocked
+folds — the folds predicted it. Of the 79 occupied captures 73 are caught by
+motion (17 of those also carry a 5-window breathing run) and 6 by breathing
+alone. The gap the threshold sits in is still there: occupied P90 min 0.0225,
+5th percentile 0.0316; empty P90 median 0.0159 and 95th percentile 0.0263
+once the block below is set aside. The night of 10-02 reads 0.0150 median,
+a little above the fitted set's 0.0108, well under the threshold.
+
+**The nine false positives, all by motion.** Six are consecutive:
+09-30 17:55, 18:05, 18:10, 18:15, 18:20, 18:25, P90 0.073–0.081 with 58–59
+of 60 seconds above the threshold — a steady level for half an hour, not a
+burst. The camera has no box in any of their frames. But the 18:00 capture
+between them is camera-occupied (P90 0.14, breathing run 23), the person
+sits on camera from 18:30 to 20:20, the near chair has moved between the
+17:55 and 18:10 stills, a laptop is on the desk at 18:30, and the 20:25
+capture after they leave is back at 0.018. The other three are short:
+09-30 16:30 (P90 0.071, 9 s above), 17:45 (0.040, 9 s), 10-01 15:33 (0.045,
+13 s) — the last lies between camera-occupied 15:27 and 15:36.
+
+Whether the half-hour block is a person out of the camera's field or a link
+episode, the per-frame step cannot say. Spectrum of the one-frame-lag
+ratio-complex step over each capture's first minute (fraction of variance
+above 5 Hz, lag-1 autocorrelation):
+
+| captures | median step | > 5 Hz | ρ₁ |
+|---|---|---|---|
+| the five block captures 17:55–18:25 | 0.069–0.075 | 0.71–0.74 | 0.14–0.15 |
+| camera-occupied, sitting: 18:00, 20:10 | 0.081, 0.075 | 0.71, 0.71 | 0.15, 0.09 |
+| clean empties: 17:30, 10-02 03:00, 04:00 | 0.013–0.014 | 0.57–0.61 | 0.31–0.45 |
+| noisy-link empties 09-16 ×2, 09-17 | 0.083–0.101 | 0.48–0.65 | 0.05–0.16 |
+| the three short bursts | 0.014–0.021 | 0.04, 0.37, 0.44 | 0.94, 0.85, 0.63 |
+
+A sitting person and the noisy link share one signature — broadband, ρ₁
+near 0.1 — so the block matches the sitter at 18:00 exactly and the 09-17
+empty room nearly as well; the same thing `docs/frame_step.md` found on
+09-16, from the other side. The three short bursts are low-frequency
+(ρ₁ 0.6–0.9): something moved. None of the nine is adjudicated; the camera
+labels stand until the operator says where they were.
+
+So on the current link the rule holds out at 95 % balanced with every miss on
+the camera-empty side, and the one sustained miss is a half hour whose truth
+the camera cannot vouch for.
