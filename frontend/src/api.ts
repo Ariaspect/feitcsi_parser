@@ -1205,3 +1205,139 @@ export async function fetchHybrid2(
     },
   };
 }
+
+// --------------------------------------------------------------------------- #
+//  Classifier (/api/classifier): the one-minute verdict's feature bank
+// --------------------------------------------------------------------------- #
+
+/** One entry of the bank, as the backend describes it. The tab renders these,
+ *  so a feature added by a later test needs no new column code here. */
+export interface ClassifierFeature {
+  key: string;
+  label: string;
+  /** Which test of the programme produced it ("range rule", "1", "context", …). */
+  test: string;
+  /** "in rule" for the range rule's inputs, "candidate" for what the tests
+   *  have produced since, "context" for link-state readings beside them. */
+  status: string;
+  /** A measured operating point to draw as a guide, or null. Not a verdict. */
+  reference: number | null;
+  axis: [number, number] | null;
+  decimals: number;
+  description: string;
+}
+
+export interface ClassifierUnit {
+  t0: number;
+  t1: number;
+  nWindows: number;
+  nSeconds: number;
+  nFrames: number;
+  /** Fraction of the unit's camera frames with a person; null without a camera. */
+  cameraOccupancy: number | null;
+  cameraFrames: number;
+  /** One value per `ClassifierFeature.key`. */
+  values: Record<string, number | null>;
+}
+
+export interface Classifier {
+  /** ψ̂ per autocorrelation window, on the ratio amplitude and phase. */
+  acf: {
+    timeS: number[];
+    amp: (number | null)[];
+    phase: (number | null)[];
+    windowFrames: number;
+    windowSeconds: number | null;
+    /** −1/T, where white noise sits. */
+    nullMean: number;
+  };
+  /** The lag step the range rule reads, per second. */
+  step: { timeS: number[]; level: (number | null)[]; lagSeconds: number; lagFrames: number };
+  units: ClassifierUnit[];
+  unitSeconds: number;
+  fsHz: number | null;
+  nSubcarriers: number;
+  framesUsed: number;
+  framesDropped: number;
+  selectionNote: string;
+  features: ClassifierFeature[];
+  truth: { timeS: number[]; present: boolean[] } | null;
+  truthExcluded: string | null;
+}
+
+export interface ClassifierOptions {
+  unitS?: number;
+  acfFrames?: number;
+  lagS?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchClassifier(
+  path: string,
+  t0: number,
+  t1: number,
+  options: ClassifierOptions = {},
+  signal?: AbortSignal,
+): Promise<Classifier> {
+  const { unitS = 60, acfFrames = 84, lagS = 2, mimo, sourceMac, interpolate } = options;
+  const url =
+    `/api/classifier?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}&unit_s=${unitS}&acf_frames=${acfFrames}&lag_s=${lagS}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `classifier: ${res.status}`);
+  }
+  const body = await res.json();
+  const features: ClassifierFeature[] = (body.features ?? []).map((f: Record<string, unknown>) => ({
+    key: f.key as string,
+    label: f.label as string,
+    test: String(f.test),
+    status: f.status as string,
+    reference: (f.reference as number | null) ?? null,
+    axis: (f.axis as [number, number] | null) ?? null,
+    decimals: (f.decimals as number) ?? 3,
+    description: (f.description as string) ?? "",
+  }));
+  const units: ClassifierUnit[] = (body.units ?? []).map((u: Record<string, unknown>) => ({
+    t0: u.t0 as number,
+    t1: u.t1 as number,
+    nWindows: (u.n_windows as number) ?? 0,
+    nSeconds: (u.n_seconds as number) ?? 0,
+    nFrames: (u.n_frames as number) ?? 0,
+    cameraOccupancy: (u.camera_occupancy as number | null) ?? null,
+    cameraFrames: (u.camera_frames as number) ?? 0,
+    values: Object.fromEntries(features.map((f) => [f.key, (u[f.key] as number | null) ?? null])),
+  }));
+  return {
+    acf: {
+      timeS: body.acf.time_s,
+      amp: body.acf.amp,
+      phase: body.acf.phase,
+      windowFrames: body.acf.window_frames,
+      windowSeconds: body.acf.window_seconds ?? null,
+      nullMean: body.acf.null_mean,
+    },
+    step: {
+      timeS: body.step.time_s,
+      level: body.step.level,
+      lagSeconds: body.step.lag_seconds,
+      lagFrames: body.step.lag_frames,
+    },
+    units,
+    unitSeconds: body.unit_seconds,
+    fsHz: body.fs_hz ?? null,
+    nSubcarriers: body.n_subcarriers,
+    framesUsed: body.frames_used,
+    framesDropped: body.frames_dropped,
+    selectionNote: body.selection_note,
+    features,
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded ?? null,
+  };
+}

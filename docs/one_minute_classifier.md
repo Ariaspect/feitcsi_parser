@@ -23,6 +23,19 @@ run in order, each stopped and evaluated before the next:
 7. The operational fallback: per-link-state thresholds refreshed from
    camera-confirmed-empty captures.
 
+**The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
+tab: the feature bank. A range is cut into units (one-minute captures are
+one unit; a longer range into equal units nearest the requested length) and
+every feature the programme has produced is a scalar per unit, listed in
+`classifier.FEATURES` with its origin test, a status (*in rule* /
+*candidate* / *context*) and, where one has been measured, a reference
+operating point drawn as a guide. The tab renders that list — a strip of
+unit cells per referenced feature against the camera, the per-window and
+per-second series behind the scalars, and a table of units × features — so
+a feature a later test adds appears without new column code. The references
+are measured operating points, not the verdict; the verdict rule is what
+the remaining tests decide.
+
 Units throughout: a one-minute capture is one unit; a longer capture is cut
 into 60 s windows. Truth per unit from the camera sidecar: occupied when
 more than half the frames show a person, empty when none does, mixed

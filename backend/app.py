@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
+from . import classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1565,6 +1565,96 @@ def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
         "truth": truth_out,
         "truth_excluded": _truth_exclusion(p),
         "confusion": confusion_out,
+    }
+
+
+@app.get("/api/classifier")
+def classifier_features(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    unit_s: float = Query(classifier.UNIT_SECONDS, ge=5, le=600, description="Unit length the range is divided into, seconds. A one-minute capture is one unit; a longer range is cut into equal units nearest this length"),
+    acf_frames: int = Query(classifier.ACF_WINDOW_FRAMES, ge=8, le=4000, description="Frames per autocorrelation window (WiDetect's T). 84 is ~2 s at 42 Hz; fixed in frames because the null distribution is a function of the sample count"),
+    lag_s: float = Query(classifier.STEP_LAG_SECONDS, ge=0, le=10, description="Lag of the frame step, seconds. 2 is what the range rule reads"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'. Left alone the uniform set resolves to the dominant peer at 2x1, full width"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The one-minute classifier's feature bank, per unit of the range.
+
+    See ``backend.classifier`` and ``docs/one_minute_classifier.md``. One
+    scalar per feature per unit, the per-window and per-second series behind
+    them, the camera's occupancy fraction per unit, and the bank's own
+    description of each feature so the tab can draw a column it has never
+    seen.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        out = classifier.compute_features(
+            p, t0, t1, unit_seconds=unit_s, acf_frames=acf_frames, lag_seconds=lag_s,
+            mimo=mimo_filter, source_mac=parse_mac_filter(source_mac), interpolate=interpolate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    cam = _camera_truth(p)
+    truth_out = None
+    if cam is not None and cam.size:
+        truth_out = {
+            "time_s": [float(v) for v in cam[:, 0]],
+            "present": [bool(v > 0.5) for v in cam[:, 1]],
+        }
+
+    def _num(v: object) -> float | int | None:
+        if v is None:
+            return None
+        if isinstance(v, (int, np.integer)):
+            return int(v)
+        return float(v) if np.isfinite(v) else None  # type: ignore[arg-type]
+
+    units = []
+    for u in out["units"]:
+        row = {k: _num(v) for k, v in u.items()}
+        occ, n_cam = None, 0
+        if cam is not None and cam.size:
+            m = (cam[:, 0] >= u["t0"]) & (cam[:, 0] <= u["t1"])
+            n_cam = int(m.sum())
+            occ = float(np.mean(cam[m, 1] > 0.5)) if n_cam else None
+        row["camera_occupancy"] = occ
+        row["camera_frames"] = n_cam
+        units.append(row)
+
+    return {
+        "acf": {
+            "time_s": [float(v) for v in out["acf"]["time_s"]],
+            "amp": _nullable(out["acf"]["amp"]),
+            "phase": _nullable(out["acf"]["phase"]),
+            "window_frames": out["acf"]["window_frames"],
+            "window_seconds": _num(out["acf"]["window_seconds"]),
+            "null_mean": out["acf"]["null_mean"],
+        },
+        "step": {
+            "time_s": [float(v) for v in out["step"]["time_s"]],
+            "level": _nullable(out["step"]["level"]),
+            "lag_seconds": out["step"]["lag_seconds"],
+            "lag_frames": out["step"]["lag_frames"],
+        },
+        "units": units,
+        "unit_seconds": out["unit_seconds"],
+        "fs_hz": _num(out["fs_hz"]),
+        "n_subcarriers": out["n_subcarriers"],
+        "frames_used": out["frames_used"],
+        "frames_dropped": out["frames_dropped"],
+        "selection_note": out["selection_note"],
+        "source_mac": out["source_mac"],
+        "mimo": out["mimo"],
+        "features": out["features"],
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
     }
 
 

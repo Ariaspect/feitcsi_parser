@@ -5,6 +5,7 @@ import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
+import { Classifier } from "./Classifier";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -646,6 +647,7 @@ export function App() {
               <TabsTrigger value="farsense">FarSense</TabsTrigger>
               <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
               <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
+              <TabsTrigger value="classifier">Classifier</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -944,6 +946,18 @@ export function App() {
 
             <TabsContent value="hybrid2">
               <Hybrid2
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </TabsContent>
+
+            <TabsContent value="classifier">
+              <Classifier
                 path={path}
                 meta={meta}
                 timeLink={timeLink}

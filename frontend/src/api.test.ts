@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, truncateCaptureName } from "./api";
+import { fetchClassifier, fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -441,5 +441,71 @@ describe("truncateCaptureName", () => {
     const out = truncateCaptureName("2026-08/a_very_long_capture_name.dat", 14);
     expect(out).toHaveLength(14);
     expect(out.endsWith(".dat")).toBe(true);
+  });
+});
+
+describe("fetchClassifier", () => {
+  const body = {
+    acf: { time_s: [1, 3], amp: [0.01, null], phase: [0.02, 0.5], window_frames: 84, window_seconds: 2.0, null_mean: -1 / 84 },
+    step: { time_s: [0.5, 1.5], level: [0.012, null], lag_seconds: 2, lag_frames: 84 },
+    units: [
+      { t0: 0, t1: 60, n_windows: 29, n_seconds: 60, n_frames: 2500, step_p90: 0.02, step_p50: 0.011,
+        acf_amp_median: -0.01, acf_amp_p90: 0.03, acf_phase_median: 0.0, acf_phase_p90: 0.05,
+        gain_crossings: 12, rssi_median: -47, camera_occupancy: 0.0, camera_frames: 60 },
+      { t0: 60, t1: 120, n_windows: 29, n_seconds: 60, n_frames: 2500, step_p90: 0.09, step_p50: 0.04,
+        acf_amp_median: 0.2, acf_amp_p90: 0.45, acf_phase_median: 0.25, acf_phase_p90: 0.5,
+        gain_crossings: 40, rssi_median: -48, camera_occupancy: 1.0, camera_frames: 60 },
+    ],
+    unit_seconds: 60,
+    fs_hz: 42.0,
+    n_subcarriers: 244,
+    frames_used: 5000,
+    frames_dropped: 3,
+    selection_note: "08:bf:b8:95:80:04, 2x1, full width",
+    source_mac: "08:bf:b8:95:80:04",
+    mimo: [2, 1],
+    features: [
+      { key: "step_p90", label: "step P90", test: "range rule", status: "in rule", reference: 0.035, axis: [0, 0.3], decimals: 4, description: "" },
+      { key: "acf_amp_p90", label: "ψ̂ amp · P90w", test: 1, status: "candidate", reference: 0.2, axis: [-0.2, 1], decimals: 3, description: "" },
+      { key: "rssi_median", label: "RSSI", test: "context", status: "context", reference: null, axis: null, decimals: 0, description: "" },
+    ],
+    truth: { time_s: [0, 1], present: [false, true] },
+    truth_excluded: null,
+  };
+
+  function stub() {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ json: body }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("keys each unit's values by the bank the server sent", async () => {
+    stub();
+    const out = await fetchClassifier("c.dat", 0, 120);
+    expect(out.features.map((f) => f.key)).toEqual(["step_p90", "acf_amp_p90", "rssi_median"]);
+    expect(out.features[1].test).toBe("1");
+    expect(out.units).toHaveLength(2);
+    expect(out.units[1].values).toEqual({ step_p90: 0.09, acf_amp_p90: 0.45, rssi_median: -48 });
+    expect(out.units[0].cameraOccupancy).toBe(0);
+    expect(out.acf.nullMean).toBeCloseTo(-1 / 84);
+    expect(out.step.lagSeconds).toBe(2);
+    expect(out.truth?.present).toEqual([false, true]);
+  });
+
+  it("sends the unit length, the window and the lag", async () => {
+    const fetchMock = stub();
+    await fetchClassifier("c.dat", 0, 120, { unitS: 30, acfFrames: 42, lagS: 0.5 });
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("unit_s=30");
+    expect(url).toContain("acf_frames=42");
+    expect(url).toContain("lag_s=0.5");
+    expect(url).not.toContain("interpolate=false");
+  });
+
+  it("surfaces the server's own reason for a refusal", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse({
+      ok: false, status: 400, json: { detail: "fewer than 2 frames in range" },
+    })));
+    await expect(fetchClassifier("c.dat", 0, 0.01)).rejects.toThrow("fewer than 2 frames in range");
   });
 });
