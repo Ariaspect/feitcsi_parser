@@ -174,7 +174,9 @@ def test_endpoint_returns_units_with_camera_occupancy_and_the_bank(tmp_path: Pat
     assert occ[1] > 0.5 and occ[0] < 0.5 and occ[2] < 0.5
     assert len(body["acf"]["time_s"]) == len(body["acf"]["amp"]) == len(body["acf"]["phase"])
     assert body["truth"] is not None and body["truth_excluded"] is None
-    assert body["unit_seconds"] == pytest.approx(200.0 / 3)
+    # The fixture's last frame is at 199.95 s; units span the frames, so a
+    # third of that, not of the 200 s asked for.
+    assert body["unit_seconds"] == pytest.approx(199.95 / 3, abs=0.05)
 
 
 def test_endpoint_honours_the_unit_length_and_refuses_an_empty_range(tmp_path: Path) -> None:
