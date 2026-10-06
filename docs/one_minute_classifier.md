@@ -33,7 +33,7 @@ sections below carry the numbers.
 | 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
 | 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
 | 5 | cross-subcarrier structure: correlation, λ₁ share, eigenvector drift, delay concentration of the change | **nothing new for presence** — where structure separates (clean link, movers), step/ψ̂/breathing already do; eigenvector drift separates *movers* from the noisy link (0.80) and becomes P(occupied)'s 7th input; the robot's change is low-rank and repeatable (λ₁ 0.41, delay spread 12.7) where no person's is | **a still sitter from the noisy empty room** (AUC ≤ 0.63 on every structure feature; breathing 0.99) — the noisy state has a sitter's structure |
-| 6 (partial) | breathing peak + λ₁ share + delay spread, as a machine test; rule B then P(occupied) as a three-way verdict | **the robot from a person**: no breathing, low rank, the same change every second — 3 % of robot units called human held out by session, 94 % of people kept; the staged verdict sends 63–90 % of robot units to *motion-unconfirmed* with nothing fitted on it | a fan, a curtain, any mover not yet recorded (plan pending); phone users and walkers from machines on structure alone (their motion repeats too — breathing rescues them) |
+| 6 (partial) | breathing peak + λ₁ share + delay spread → P(human \| moving), gating rule B's "present" | **the robot from a human** — the only thing required of it: 3 % of robot units called human held out by session (0 % with P(occupied) as a second condition), 91 % (86 %) of people kept; what a robot lacks is breathing, rank and variety | a fan, a curtain, any mover not yet recorded (plan pending); seated movers and walkers are the people it loses (their motion repeats too); P(occupied) alone is not a robot gate (23 % pass) |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
 tab: the feature bank. A range is cut into units (one-minute captures are
@@ -725,23 +725,50 @@ over 0.5, otherwise *motion-unconfirmed*:
 
 The robot lands in *motion-unconfirmed* 63–90 % of the time and people in
 *human* 74–100 %, and the stage costs people nothing that rule B had not
-already cost them (seated movement's 0.17 empty is rule B's). This is the
-bank's `verdict (3-way)`. With the confirmation at 0.7 the robot's human
-share on 10-06 falls to 0.10 and the env2 sitter's to 0.86.
+already cost them (seated movement's 0.17 empty is rule B's). With the
+confirmation at 0.7 the robot's human share on 10-06 falls to 0.10 and the
+env2 sitter's to 0.86. (The bank's `verdict (3-way)` was first wired this
+way; the requirement restated below moved its human gate to
+`P(human | moving)`.)
+
+### The requirement, restated (2026-10-06, user)
+
+A robot need not be told from an empty room; it must not be called
+**human**. So the only numbers that matter are the share of robot units
+that end up labelled human (lower is better) and the share of people kept
+(higher is better). Every gate below is applied to units rule B already
+calls present:
+
+| human gate | robot 10-05 | robot 10-06 | **robot all** | still | seated mov. | phone | walking | 1-min occ. | env2 sitter | **all people** | empties called human |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| none (rule B as is) | 0.90 | 0.87 | 0.88 | 1.00 | 0.83 | 1.00 | 1.00 | 1.00 | 1.00 | 0.95 | 0.11 |
+| P(occupied) > 0.5 | 0.00 | 0.23 | 0.17 | 1.00 | 0.74 | 1.00 | 1.00 | 0.98 | 0.94 | 0.91 | 0.06 |
+| breathing run 20 s ≥ 5 only | 0.10 | 0.10 | 0.10 | 0.94 | 0.34 | 0.68 | 0.25 | 0.35 | 0.74 | 0.52 | 0.03 |
+| not machine-like | 0.20 | 0.03 | 0.07 | 0.88 | 0.80 | 0.64 | 0.75 | 0.97 | 0.97 | 0.86 | 0.10 |
+| **P(human \| moving) > 0.5** | 0.10 | 0.00 | **0.03** | 0.97 | 0.74 | 0.93 | 0.83 | 0.96 | 0.97 | **0.91** | 0.09 |
+| P(human \| moving) > 0.7 | 0.00 | 0.00 | 0.00 | 0.94 | 0.69 | 0.86 | 0.83 | 0.90 | 0.89 | 0.85 | 0.08 |
+| **P(occupied) > 0.5 AND P(human) > 0.5** | 0.00 | 0.00 | **0.00** | 0.97 | 0.66 | 0.93 | 0.83 | 0.94 | 0.92 | **0.86** | 0.04 |
+
+`P(occupied)` alone is not a robot gate — 23 % of the 10-06 session passes
+it, seven units whose ψ̂ phase (0.56–0.71) and pattern drift read like a
+person's and one of which (`20261006_132922`) carries a 14 s breathing run
+at 0.32: a robot can put a line in the breathing band. The gate that is
+built for the question, `P(human | moving)`, passes 1 robot unit in 40 and
+keeps 91 % of people; combined with `P(occupied)` it passes none and keeps
+86 %. The people either gate loses are the seated movers (0.66–0.74) and
+walkers (0.83), whose motion is repetitive too.
 
 ### Verdict
 
-- *Can the bank tell the robot from a person?* **On this robot, yes, three
-  ways** — and the one that uses nothing fitted on it (rule B, then
-  P(occupied)) already sends 63–90 % of robot units to *motion-unconfirmed*
-  and 0–23 % to *human*. What the robot lacks is breathing, rank and variety;
-  a body has all three.
+- *Can the bank keep the robot out of the human label?* **Yes:** rule B,
+  then `P(human | moving)` > 0.5 — 3 % of robot units called human (held
+  out by session), 91 % of people kept; with `P(occupied)` as a second
+  condition 0 % and 86 %. **The user chose the first** (2026-10-06); it is
+  the human gate of the bank's `verdict (3-way)`. Both are one device in
+  one room until the plan's other movers are recorded.
 - *What it cannot say yet:* anything about a fan, a curtain or a second
   robot. The plan's H1 (fixed fan: nothing in either channel) and H2
   (oscillating fan: a 6–12 rpm line the breathing channel might read — the
-  11 rpm floor and the 20 s window are the defence) are still predictions.
-  The 16 planned captures are the next thing to record; the bank will show
-  them without new code.
-- The people the machine test mistakes are phone users and walkers, because
-  their motion is also repetitive; breathing is what rescues them in the
-  three-input form, and `P(occupied)` in the staged one.
+  11 rpm floor and the 20 s window are the defence) are still predictions;
+  the `20261006_132922` unit says a slow mechanical motion can reach the
+  breathing band, so H2 is not idle.

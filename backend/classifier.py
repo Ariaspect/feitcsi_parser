@@ -319,10 +319,13 @@ FEATURES: list[dict[str, Any]] = [
     {
         "key": "verdict3", "label": "verdict (3-way)", "test": "6", "status": "candidate verdict",
         "reference": 1.5, "axis": [0.0, 2.0], "decimals": 0,
-        "description": "0 empty (rule B says so), 2 human (rule B present AND P(occupied) > 0.5), 1 "
-                       "motion-unconfirmed (present by rule B, not confirmed). Robot units: 0 % / 23 % "
-                       "human by session, 63-90 % unconfirmed; people 74-100 % human; empties 6 % human, "
-                       "5 % unconfirmed. Uses nothing fitted on the robot.",
+        "description": "0 empty (rule B says so), 2 human (rule B present AND P(human | moving) > 0.5), "
+                       "1 motion-unconfirmed (present by rule B, not passed as human). The requirement is "
+                       "that a robot is never called human, not that it is told from an empty room: this "
+                       "gate passes 1 robot unit in 40 held out by session and keeps 91 % of people "
+                       "(still 97 %, phone 93 %, 1-min 96 %, env2 97 %, walking 83 %, seated movement "
+                       "74 %); empties called human 9 %. The user's choice of 2026-10-06 over "
+                       "P(occupied) > 0.5 (23 % of one robot session) and the AND of both (0 % / 86 %).",
     },
     {
         "key": "gain_crossings", "label": "gain steps", "test": "context", "status": "context",
@@ -698,15 +701,19 @@ def compute_features(
         u["rule_b_floor"] = floor if np.isfinite(floor) else float("nan")
         # Test 6: is the mover a machine? Two readings -- a fixed pair of
         # thresholds, and a three-input logistic -- and a three-way verdict
-        # that confirms a rule-B "present" with P(occupied).
+        # that passes a rule-B "present" as human only through the logistic.
         lam_ok = np.isfinite(u["lam_share_median"]) and np.isfinite(u["delay_spread"])
         u["machine_like"] = (1 if (lam_ok and u["lam_share_median"] < MACHINE_LAM_MAX
                                    and u["delay_spread"] < MACHINE_SPREAD_MAX) else 0) if lam_ok else None
         u["p_human"] = human_probability(u)
+        # The human gate is P(human | moving), the user's choice of 2026-10-06:
+        # a robot need not be told from an empty room, it must not be called
+        # human. 3 % of robot units pass it held out by session, 91 % of
+        # people; P(occupied) alone let 23 % of one robot session through.
         if not u["rule_b"]:
             u["verdict3"] = 0
         else:
-            u["verdict3"] = 2 if (np.isfinite(u["p_occupied"]) and u["p_occupied"] > P_OCCUPIED_REFERENCE) else 1
+            u["verdict3"] = 2 if (np.isfinite(u["p_human"]) and u["p_human"] > P_HUMAN_REFERENCE) else 1
 
     return {
         "acf": {
