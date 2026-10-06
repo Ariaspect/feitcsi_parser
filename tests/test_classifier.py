@@ -198,6 +198,38 @@ def test_coherence_windows_read_a_steady_pattern_as_no_drift() -> None:
     assert np.isnan(drift[0]) and np.isfinite(drift[1:]).all()
 
 
+def test_delay_spread_is_small_for_a_repeated_change_and_large_for_a_wandering_one() -> None:
+    """Test 6's column. A change whose shape across subcarriers is the same
+    complex exponential every frame (one fixed delay) has no spread; a change
+    whose delay wanders has a large one."""
+    rng = np.random.default_rng(4)
+    n, F = 600, 64
+    times = np.arange(n) / 42.0
+    k = np.arange(F)
+    fixed = np.exp(1j * 2 * np.pi * 7 * k / F)[None, :] * (1 + 0.5 * np.sin(2 * np.pi * 0.4 * times))[:, None]
+    base = 1.0 + 0.0j
+    r_fixed = base + 0.2 * fixed + 0.001 * (rng.standard_normal((n, F)) + 1j * rng.standard_normal((n, F)))
+    delays = rng.integers(-20, 20, size=n)
+    wander = np.exp(1j * 2 * np.pi * delays[:, None] * k[None, :] / F)
+    r_wander = base + 0.2 * wander + 0.001 * (rng.standard_normal((n, F)) + 1j * rng.standard_normal((n, F)))
+    assert classifier.change_delay_spread(r_fixed, times, 2.0) < 2.0
+    assert classifier.change_delay_spread(r_wander, times, 2.0) > 20.0
+    assert np.isnan(classifier.change_delay_spread(r_fixed[:3], times[:3], 2.0))
+
+
+def test_the_test6_columns_are_well_formed(tmp_path: Path) -> None:
+    units = classifier.compute_features(_slow_capture(tmp_path), 0.0, 200.0)["units"]
+    for u in units:
+        assert u["machine_like"] in (0, 1, None)
+        assert u["verdict3"] in (0, 1, 2)
+        assert u["p_human"] != u["p_human"] or 0.0 <= u["p_human"] <= 1.0
+        assert u["delay_spread"] != u["delay_spread"] or u["delay_spread"] >= 0.0
+        if not u["rule_b"]:
+            assert u["verdict3"] == 0
+    # the breathing unit is confirmed human by P(occupied), so the three-way verdict says so
+    assert units[1]["verdict3"] == 2
+
+
 def test_lr_probability_is_nan_on_a_missing_input() -> None:
     u = {k: 0.0 for k in classifier.LR_FEATURES}
     assert 0.0 <= classifier.lr_probability(u) <= 1.0

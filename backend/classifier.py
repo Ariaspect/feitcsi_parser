@@ -123,6 +123,35 @@ P_OCCUPIED_REFERENCE = 0.5
 RULE_FLOOR_MULTIPLE = 2.0
 
 
+# Test 6: is the mover a machine? Measured on 40 robot-vacuum units from one
+# device in one room against 373 units of people called present by rule B --
+# weak evidence until other movers are recorded (docs/plans/
+# nonhuman_motion_plan.pdf). A fixed pair of thresholds, chosen on the 10-06
+# session and tested on 10-05 (robot machine-like 0.80; people 0.03-0.36 by
+# class, phone users and walkers most), and a three-input logistic that holds
+# out by robot session at AUC 0.995 (robot called human 3 %, people kept 94 %).
+MACHINE_LAM_MAX = 0.5
+MACHINE_SPREAD_MAX = 18.0
+HUMAN_FEATURES = ("breath_peak10", "lam_share_median", "delay_spread")
+HUMAN_MEAN = (0.398829, 0.578781, 40.938499)
+HUMAN_SCALE = (0.103143, 0.161842, 39.289416)
+HUMAN_COEF = (3.496855, 2.33978, 3.62858)
+HUMAN_INTERCEPT = 6.539183
+P_HUMAN_REFERENCE = 0.5
+
+
+def human_probability(unit: dict[str, Any]) -> float:
+    """P(human | moving) from the test-6 logistic; NaN if an input is."""
+    x = []
+    for key in HUMAN_FEATURES:
+        v = unit.get(key)
+        if v is None or not np.isfinite(v):
+            return float("nan")
+        x.append(float(v))
+    z = HUMAN_INTERCEPT + sum(c * (xi - m) / s for xi, m, s, c in zip(x, HUMAN_MEAN, HUMAN_SCALE, HUMAN_COEF))
+    return float(1.0 / (1.0 + np.exp(-z)))
+
+
 def lr_probability(unit: dict[str, Any]) -> float:
     """P(occupied) from the test-4 logistic regression; NaN if an input is."""
     x = []
@@ -263,6 +292,39 @@ FEATURES: list[dict[str, Any]] = [
                        "0.80 where the range rule reads 0.00 / 1.00.",
     },
     {
+        "key": "delay_spread", "label": "delay spread", "test": "6", "status": "candidate",
+        "reference": MACHINE_SPREAD_MAX, "axis": [0.0, 120.0], "decimals": 1,
+        "description": "Spread (std, bins) over the unit's frames of the dominant delay of the lag-2 s "
+                       "change across subcarriers. A machine repeats its change: the robot reads 12.7 "
+                       "[11.7, 15.1]; sitters 21-56, seated movement 36 -- but walking 10, so it is read "
+                       "with the breathing peak. Below the reference counts towards machine-like.",
+    },
+    {
+        "key": "machine_like", "label": "machine-like", "test": "6", "status": "candidate",
+        "reference": 0.5, "axis": [0.0, 1.0], "decimals": 0,
+        "description": "1 when λ₁ share < 0.5 AND delay spread < 18: a low-rank, repeated change. "
+                       "Thresholds chosen on the 10-06 robot session, tested on 10-05 (robot 0.80 "
+                       "machine-like; still sitters 0.12, seated movement 0.03, 1-min occupants 0.03, "
+                       "phone users 0.36, walkers 0.25). One device, one room, 40 units.",
+    },
+    {
+        "key": "p_human", "label": "P(human | moving)", "test": "6", "status": "candidate",
+        "reference": P_HUMAN_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Three-input logistic -- breathing peak, λ₁ share, delay spread -- fit on the 40 "
+                       "robot units against 373 people units called present by rule B. Held out by robot "
+                       "session: AUC 0.995, robot called human 3 %, people kept 94 % (walkers 83 %). "
+                       "Meaningful only for a unit that is present by motion; weak evidence until other "
+                       "movers are recorded.",
+    },
+    {
+        "key": "verdict3", "label": "verdict (3-way)", "test": "6", "status": "candidate verdict",
+        "reference": 1.5, "axis": [0.0, 2.0], "decimals": 0,
+        "description": "0 empty (rule B says so), 2 human (rule B present AND P(occupied) > 0.5), 1 "
+                       "motion-unconfirmed (present by rule B, not confirmed). Robot units: 0 % / 23 % "
+                       "human by session, 63-90 % unconfirmed; people 74-100 % human; empties 6 % human, "
+                       "5 % unconfirmed. Uses nothing fitted on the robot.",
+    },
+    {
         "key": "gain_crossings", "label": "gain steps", "test": "context", "status": "context",
         "reference": None, "axis": None, "decimals": 0,
         "description": "Receiver gain-state changes (rssi_1) inside the unit. The ratio divides the "
@@ -379,6 +441,37 @@ def coherence_windows(
             drift[b] = float(1.0 - abs(np.vdot(v_prev, v1)))
         v_prev = v1
     return lam, drift
+
+
+def change_delay_spread(r: np.ndarray, times: np.ndarray, lag_seconds: float) -> float:
+    """Test 6: how repeatable the change's shape across subcarriers is.
+
+    Per frame, the lag change ``r_t - r_{t-L}`` (mean over subcarriers
+    removed) is transformed across subcarriers (4x zero-padded) and the
+    strongest bin -- the dominant delay of the change -- is kept; the result
+    is the standard deviation of that bin over the unit's frames, in bins. A
+    machine moves the same way every second (the robot: 12.7 [11.7, 15.1]);
+    a body does not (sitters 21-56, seated movement 36). Walking is the
+    exception people make (10), so this is read with the breathing peak.
+    """
+    r = np.asarray(r); times = np.asarray(times, dtype=float)
+    dt = np.diff(times)
+    if dt.size == 0:
+        return float("nan")
+    step = float(np.median(dt))
+    L = max(1, int(round(lag_seconds / step))) if step > 0 else 1
+    if r.shape[0] <= L:
+        return float("nan")
+    d = r[L:] - r[:-L]
+    ok = np.isfinite(d).all(axis=1)
+    d = d[ok]
+    if d.shape[0] < 4:
+        return float("nan")
+    d = d - d.mean(axis=1, keepdims=True)
+    NP = 4 * d.shape[1]
+    pk = np.abs(np.fft.fft(d, n=NP, axis=1)).argmax(axis=1).astype(float)
+    pk[pk > NP / 2] -= NP
+    return float(np.std(pk))
 
 
 def unit_edges(t0: float, t1: float, unit_seconds: float) -> np.ndarray:
@@ -566,6 +659,7 @@ def compute_features(
         p_med, p_p90, _ = _quantiles(psi_phase[wsel])
         l_med, _, _ = _quantiles(lam_share[wsel])
         _, d_p90, _ = _quantiles(ev_drift[wsel])
+        spread = change_delay_spread(ratio[fsel], times[fsel], lag_seconds)
         s_med, s_p90, n_sec = _quantiles(level[ssel])
         j = jitter[ssel]
         j = j[np.isfinite(j)]
@@ -583,7 +677,7 @@ def compute_features(
             "breath_rpm": br20[1],
             "acf_amp_median": a_med, "acf_amp_p90": a_p90,
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
-            "lam_share_median": l_med, "ev_drift_p90": d_p90,
+            "lam_share_median": l_med, "ev_drift_p90": d_p90, "delay_spread": spread,
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })
@@ -602,6 +696,17 @@ def compute_features(
         by_motion = np.isfinite(u["step_p90"]) and u["step_p90"] > thr
         u["rule_b"] = 1 if (by_motion or u["breath_run20"] >= BREATH_RUN_REFERENCE) else 0
         u["rule_b_floor"] = floor if np.isfinite(floor) else float("nan")
+        # Test 6: is the mover a machine? Two readings -- a fixed pair of
+        # thresholds, and a three-input logistic -- and a three-way verdict
+        # that confirms a rule-B "present" with P(occupied).
+        lam_ok = np.isfinite(u["lam_share_median"]) and np.isfinite(u["delay_spread"])
+        u["machine_like"] = (1 if (lam_ok and u["lam_share_median"] < MACHINE_LAM_MAX
+                                   and u["delay_spread"] < MACHINE_SPREAD_MAX) else 0) if lam_ok else None
+        u["p_human"] = human_probability(u)
+        if not u["rule_b"]:
+            u["verdict3"] = 0
+        else:
+            u["verdict3"] = 2 if (np.isfinite(u["p_occupied"]) and u["p_occupied"] > P_OCCUPIED_REFERENCE) else 1
 
     return {
         "acf": {

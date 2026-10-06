@@ -33,6 +33,7 @@ sections below carry the numbers.
 | 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
 | 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
 | 5 | cross-subcarrier structure: correlation, λ₁ share, eigenvector drift, delay concentration of the change | **nothing new for presence** — where structure separates (clean link, movers), step/ψ̂/breathing already do; eigenvector drift separates *movers* from the noisy link (0.80) and becomes P(occupied)'s 7th input; the robot's change is low-rank and repeatable (λ₁ 0.41, delay spread 12.7) where no person's is | **a still sitter from the noisy empty room** (AUC ≤ 0.63 on every structure feature; breathing 0.99) — the noisy state has a sitter's structure |
+| 6 (partial) | breathing peak + λ₁ share + delay spread, as a machine test; rule B then P(occupied) as a three-way verdict | **the robot from a person**: no breathing, low rank, the same change every second — 3 % of robot units called human held out by session, 94 % of people kept; the staged verdict sends 63–90 % of robot units to *motion-unconfirmed* with nothing fitted on it | a fan, a curtain, any mover not yet recorded (plan pending); phone users and walkers from machines on structure alone (their motion repeats too — breathing rescues them) |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
 tab: the feature bank. A range is cut into units (one-minute captures are
@@ -637,3 +638,110 @@ second; a body does not. That is test 6's lead, not a presence feature.
 - With this, the still-sitter problem is settled as far as this link can
   settle it: motion over the link floor for anyone who moves, breathing for
   anyone who does not, and nothing else to be had from the ratio.
+
+## Test 6 — non-human movers (2026-10-06, partial: the robot only)
+
+**What exists.** 45 one-minute captures tagged `robot_vacuum_no_person`
+(10 on 10-05 20:55–21:10, 35 on 10-06 13:27–15:31; 40 in the feature
+table), all in the second room (env2). No fan captures yet — the plan in
+`docs/plans/nonhuman_motion_plan.pdf` (fixed fan, oscillating fan, robot,
+each with and without a seated person) is still the measurement that
+completes this test. Everything below is one device in one room, and the
+thresholds and fits are to be read that way.
+
+### Where the robot sits in the bank
+
+Robot against each human class, AUC with the robot as the positive class
+(0 means the feature is *lower* for the robot than for people, 1 higher;
+0.5 is no separation):
+
+| feature | vs still sitters | vs seated movement | vs phone | vs walking | vs 1-min occupied | vs env2 sitter | **vs all people** | vs empties |
+|---|---|---|---|---|---|---|---|---|
+| step P90 | 0.03 | 0.00 | 0.18 | 0.00 | 0.17 | 0.67 | 0.19 | 0.82 |
+| step / own jitter | 0.62 | 0.77 | 0.22 | 0.00 | 0.21 | 0.73 | 0.40 | 0.91 |
+| ψ̂ amp median | 0.81 | 0.98 | 0.61 | 0.00 | 0.57 | 0.80 | 0.65 | 0.96 |
+| **breath peak 10 s** | **0.00** | 0.10 | 0.01 | 0.08 | 0.10 | 0.09 | **0.08** | 0.64 |
+| breath run 20 s | 0.03 | 0.31 | 0.13 | 0.28 | 0.31 | 0.14 | 0.23 | 0.66 |
+| **λ₁ share, median** | 0.11 | 0.25 | 0.20 | 0.25 | 0.08 | 0.16 | **0.13** | 0.49 |
+| pattern drift P90 | 0.17 | 0.05 | 0.25 | 0.19 | 0.20 | 0.60 | 0.26 | 0.49 |
+| **delay spread** | 0.28 | 0.03 | 0.50 | 0.58 | 0.10 | 0.03 | **0.21** | 0.07 |
+
+The robot's motion is real and the motion channel sees it (step 0.039
+[0.035, 0.045], 2.3× its jitter — over every motion threshold in this doc).
+What it lacks is what a body has: a breathing peak (0.27 against sitters'
+0.49 and even walkers' 0.39), a high-rank fluctuation (λ₁ share 0.41 against
+0.59–0.63), and variety — its change has the same dominant delay every
+second (spread 12.7 against 33–45; walking, the one periodic human motion,
+10). In its own room it is the sitter's inverse: env2 sitters read step
+0.028 / breathing run 26 / peak 0.47, the robot 0.039 / 1 / 0.27.
+
+### Three ways to use that
+
+**A fixed pair of thresholds** — *machine-like* = λ₁ share < 0.5 and delay
+spread < 18, chosen on the 10-06 session and tested on 10-05 (and the
+reverse):
+
+| trained on | thresholds | robot, held-out session | still sitters | seated movement | 1-min occupants | phone | walking |
+|---|---|---|---|---|---|---|---|
+| 10-05 (10 units) | λ₁ < 0.55, spread < 16 | 0.93 (10-06) | 0.18 | 0.00 | 0.03 | 0.39 | 0.42 |
+| 10-06 (30 units) | λ₁ < 0.50, spread < 18 | 0.80 (10-05) | 0.12 | 0.03 | 0.03 | 0.36 | 0.25 |
+
+Phone users and walkers are the people it mistakes for machines — a thumb
+on a screen and a gait are repetitive and low-rank too.
+
+**A three-input logistic** — breathing peak, λ₁ share, delay spread — on
+units called present by rule B, held out by robot session (people held out
+by day):
+
+| inputs | AUC | robot called human | people kept | by class: still / seated / phone / walking / 1-min |
+|---|---|---|---|---|
+| breath peak only | 0.912 | 0.15 | 0.81 | 0.97 / 0.79 / 0.96 / 0.83 / 0.75 |
+| λ₁ + spread only | 0.924 | 0.07 | 0.79 | 0.82 / 0.86 / 0.46 / 0.33 / 0.89 |
+| **breath + λ₁ + spread** | **0.995** | **0.03** | **0.94** | 0.97 / 0.90 / 0.93 / 0.83 / 0.94 |
+| + drift + ψ̂ | 0.996 | 0.00 | 0.97 | 0.97 / 1.00 / 1.00 / 0.75 / 0.97 |
+
+Breathing and repeatability are complementary: breathing alone loses the
+movers, structure alone loses phone users and walkers, together they keep
+94 % of people and 3 % of robot units. The three-input fit is in the bank as
+`P(human | moving)`; the figure is one device.
+
+**A staged verdict that uses nothing fitted on the robot** — rule B says
+present or empty; a present unit is *human* if `P(occupied)` (test 4's
+seven-feature score, which has breathing and the pattern drift in it) is
+over 0.5, otherwise *motion-unconfirmed*:
+
+| class | n | empty | **human** | motion-unconfirmed |
+|---|---|---|---|---|
+| still sitters | 34 | 0.00 | **1.00** | 0.00 |
+| seated movement | 35 | 0.17 | 0.74 | 0.09 |
+| phone | 28 | 0.00 | 1.00 | 0.00 |
+| walking | 12 | 0.00 | 1.00 | 0.00 |
+| 1-min occupied | 130 | 0.00 | 0.98 | 0.02 |
+| env2 sitter | 66 | 0.00 | 0.94 | 0.06 |
+| other September occupied | 86 | 0.14 | 0.77 | 0.09 |
+| **robot 10-05** | 10 | 0.10 | **0.00** | 0.90 |
+| **robot 10-06** | 30 | 0.13 | **0.23** | 0.63 |
+| empties | 514 | 0.89 | 0.06 | 0.05 |
+
+The robot lands in *motion-unconfirmed* 63–90 % of the time and people in
+*human* 74–100 %, and the stage costs people nothing that rule B had not
+already cost them (seated movement's 0.17 empty is rule B's). This is the
+bank's `verdict (3-way)`. With the confirmation at 0.7 the robot's human
+share on 10-06 falls to 0.10 and the env2 sitter's to 0.86.
+
+### Verdict
+
+- *Can the bank tell the robot from a person?* **On this robot, yes, three
+  ways** — and the one that uses nothing fitted on it (rule B, then
+  P(occupied)) already sends 63–90 % of robot units to *motion-unconfirmed*
+  and 0–23 % to *human*. What the robot lacks is breathing, rank and variety;
+  a body has all three.
+- *What it cannot say yet:* anything about a fan, a curtain or a second
+  robot. The plan's H1 (fixed fan: nothing in either channel) and H2
+  (oscillating fan: a 6–12 rpm line the breathing channel might read — the
+  11 rpm floor and the 20 s window are the defence) are still predictions.
+  The 16 planned captures are the next thing to record; the bank will show
+  them without new code.
+- The people the machine test mistakes are phone users and walkers, because
+  their motion is also repetitive; breathing is what rescues them in the
+  three-input form, and `P(occupied)` in the staged one.
