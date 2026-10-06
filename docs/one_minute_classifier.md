@@ -206,3 +206,141 @@ point costs so much recall.
   like any other.
 - The phase variant is marginally better for seated movement against the
   noisy link (0.90 against 0.85) and otherwise equal; both are kept.
+
+## Test 2 — a link-state indicator that ignores occupancy (2026-10-06)
+
+**The hypothesis.** Motion changes the channel *between* frames; estimation
+noise is white *across* subcarriers within one frame, where the channel is
+smooth. So the across-subcarrier roughness of a single frame — the second
+difference along subcarriers, median over the frame, median over the unit —
+should read the receiver's noise and not the room, and could normalise the
+step. Computed on the same 1,050 units as test 1 (ratio with nulls left as
+NaN; also the fourth difference, the raw plane, and the far-delay fraction of
+the subcarrier FFT), with the lag-2 s step beside it. Scripts
+`lg:/tmp/test2_rough.py`, `test2_ramp.py`, `test2_delay.py`, `test2_lag1.py`.
+
+### Roughness ignores the room — and the link
+
+Camera-empty units, medians per day:
+
+| day | fs | step P90 | roughness Δ² | Δ⁴ | raw plane | FFT tail | step / Δ² |
+|---|---|---|---|---|---|---|---|
+| 09-14 | 19.6 | 0.027 | 0.0147 | 0.038 | 0.137 | 0.011 | 1.9 |
+| 09-15 | 19.6 | 0.068 | 0.0179 | 0.046 | 0.148 | 0.006 | 3.8 |
+| 09-16 | 19.6 | **0.105** | **0.0220** | 0.056 | 0.144 | 0.014 | 4.8 |
+| 09-17 | 41.7 | **0.123** | **0.0184** | 0.043 | 0.169 | 0.002 | 6.7 |
+| 09-21 | 41.7 | 0.011 | 0.0156 | 0.038 | 0.159 | 0.001 | 0.7 |
+| 09-30 | 43.5 | **0.011** | **0.0131** | 0.034 | 0.111 | 0.002 | 0.8 |
+| 10-02 | 41.7 | 0.015 | 0.0229 | 0.056 | 0.195 | 0.035 | 0.7 |
+
+Spearman across days between the step floor and any roughness: 0.2–0.5. The
+roughness sits at 0.012–0.023 everywhere while the floor spans 10×; 10-02,
+the cleanest step floor of October, has the roughest frames. It *is*
+occupancy-blind — occupied / empty medians 0.91–1.26×, AUC 0.13–0.75, mostly
+near 0.5, on eleven days with both classes — but it does not measure the
+thing that moves the floor. Normalising the step by it lifts the still-vs-
+noisy-empty AUC from 0.46 only to 0.64.
+
+### So what is the noisy state?
+
+Three mechanism checks on one unit per case:
+
+- **Not a per-frame scalar.** Splitting the lag change *q_t(k) = r_t/r_{t−L}*
+  into the component shared by every subcarrier and the remainder: on 09-16/17
+  the shared part is 0.041 of a 0.110 floor and the remainder 0.105. On the
+  current link 0.003 of 0.011. The fluctuation is frequency-selective.
+- **Not a per-frame ramp.** A per-frame fit of offset + slope (and + curvature)
+  in log-amplitude and phase across subcarriers, removed before the step,
+  changes clean units by nothing and makes noisy ones worse — the fit itself
+  is noise there.
+- **Partly a transmit-delay switch, on one day.** The ratio is a transmit
+  pair (README, *The ratio is a transmit pair*), so a change in the AP's
+  per-chain delay is a change in the ratio's phase ramp. Per frame, the ramp's
+  delay from the FFT peak: clean days constant to the 0.8 ns resolution, no
+  frame jumping; **09-17: 44 % of consecutive frames jump by > 3 ns, four
+  states, IQR 6.5 ns** — but the step restricted to pairs in the same state is
+  still 0.090 against 0.110, and 09-16 (floor 0.103) never jumps at all.
+  Still sitter 09-17 and seated movement 09-21 also show jumps (29 %, 3 %).
+
+RSSI does not separate the states (09-16/17 −42 dBm, 09-21 −41, 09-30 −43,
+10-02 −47) and neither do gain crossings (09-16/17 360–470 per minute, 09-21
+1,271, 10-02 49). The noisy state is a frame-to-frame change of the
+transmit-pair ratio that is smooth and selective in frequency, which is what
+a change of the *channel* looks like; its cause is not identified here.
+
+### What does read the link: the step at one frame of lag
+
+At one frame apart a still or slow occupant adds almost nothing to the step
+(`docs/hybrid2.md`: 0.94× the empty level) while the link's jitter is all of
+it. Its 20th percentile over the unit's seconds (`lag1_p20`):
+
+| day | fs | n | lag-1 P10 | lag-1 P20 | lag-1 P50 | lag-2 P90 (floor) | floor / lag-1 P20 |
+|---|---|---|---|---|---|---|---|
+| 09-11 | 19.6 | 22 | 0.0189 | 0.0194 | 0.0206 | 0.0262 | 1.35 |
+| 09-15 | 19.6 | 29 | 0.0412 | 0.0430 | 0.0464 | 0.0676 | 1.57 |
+| 09-16 | 19.6 | 14 | 0.0728 | 0.0768 | 0.0851 | 0.1050 | 1.37 |
+| 09-17 | 41.7 | 12 | 0.0910 | 0.0955 | 0.1019 | 0.1230 | 1.29 |
+| 09-21 | 41.7 | 95 | 0.0101 | 0.0102 | 0.0105 | 0.0108 | 1.06 |
+| 09-29 | 43.5 | 59 | 0.0100 | 0.0101 | 0.0103 | 0.0110 | 1.09 |
+| 09-30 | 43.5 | 186 | 0.0099 | 0.0100 | 0.0102 | 0.0108 | 1.08 |
+| 10-01 | 43.5 | 12 | 0.0146 | 0.0149 | 0.0154 | 0.0185 | 1.24 |
+| 10-02 | 41.7 | 50 | 0.0137 | 0.0138 | 0.0141 | 0.0150 | 1.09 |
+
+It tracks the empty floor one-to-one across a 10× range. Against the same
+day's empties, by class (median [p10, p90] of the ratio): **still sitters
+0.97× [0.80, 1.61], phone 1.07× [0.63, 1.68], robot 1.02× [0.99, 1.07]** —
+blind, as hoped — but **seated movement 7.5× [1.1, 7.9], walking 2.6×, all
+1-min occupied 1.38× [1.0, 7.0]**: anyone moving continuously moves
+consecutive frames too. So as a per-unit normaliser it is flawed (the
+normalised step's AUC: 0.91 same link, 0.76 still vs noisy empty, and seated
+movement's denominator is inflated along with its numerator), and the
+operational form is a **trailing minimum**: the smallest `lag1_p20` of the
+previous ten units, whatever their occupancy, since occupancy can only push
+the jitter up. Estimate against the day's true empty floor, median [p10,
+p90]: 09-16 0.90 [0.70, 0.97], 09-17 0.92 [0.80, 0.96], 09-22 0.96, 09-29
+0.98, 09-30 0.99 [0.98, 1.29], 10-01 0.98, 10-02 0.99 [0.99, 1.23]; 09-21 1.06
+[0.98, 7.0] (a person moving through more than ten consecutive units lifts
+even the minimum) and 09-11 0.62 (that day's "empty" windows are the
+near-presence ones). On the occupied units alone the estimate is the same —
+the floor is read through the occupant.
+
+### A threshold relative to that floor
+
+Present when lag-2 P90 > α × trailing floor, no absolute minimum, on every
+unit with an estimate (units in time order; 505 empty, 394 occupied):
+
+| rule | spec. 09-16/17 | spec. 09-15 | spec. 09-21 | recall still | recall seated | recall all occupied | spec. all | balanced |
+|---|---|---|---|---|---|---|---|---|
+| fixed P90 > 0.035 | **0.00** | 0.33 | 0.93 | 1.00 | 1.00 | 0.83 | 0.84 | 0.835 |
+| α = 2.0 | **1.00** | 0.85 | 0.83 | 0.14–0.40 | 0.63–0.80 | 0.74 | 0.87 | 0.802 |
+| α = 2.5 | 1.00 | 0.85 | 0.89 | 0.14–0.20 | 0.40–0.47 | 0.67 | 0.90 | 0.782 |
+| α = 3.0 | 1.00 | 0.89 | 0.92 | 0.14–0.20 | 0.40–0.43 | 0.64 | 0.93 | 0.782 |
+
+The step over the trailing floor, by class: empty 1.14 [1.06, 2.53]; still
+sitters 2.99 [1.25, 11.5]; seated movement 2.32 [1.45, 12.5]; phone 8.8;
+1-min occupied 7.3 [1.8, 19.9]; env2 occupied 1.72 [1.22, 14.9]; **robot
+2.50 [2.22, 2.83]**. The relative rule does exactly what a relative rule
+can: it trades the noisy link's false alarms (82 → 68 of 505 empties) for
+its misses, and the balanced accuracy does not move, because on 09-16/17 a
+still sitter's lag-2 step is 1.25–1.5× a floor that is itself the jitter.
+The fixed rule's 100 % recall there was never detection; it was calling
+every minute present.
+
+### Verdict
+
+- *Can a link-state indicator be read without knowing the occupancy?*
+  **Yes** — not the within-frame roughness that was proposed, but the
+  one-frame-lag step's low percentile, taken as a trailing minimum over
+  units. It tracks the floor 1:1 across every link state seen and a still
+  person does not move it. It belongs in the bank (`lag1_p20`, `step_norm`)
+  and is what test 7's refit should key on.
+- *Does normalising the step by it solve the still sitter across links?*
+  **No.** Specificity transfers; recall does not, because on the noisy link
+  the sitter's slow signal is below the link's own jitter. No motion
+  statistic will see under that — test 1's ψ̂ reached half of them by
+  looking at persistence rather than size, and that is its ceiling. Still-
+  sitter recall on a noisy link has to come from breathing (test 3) or from
+  a feature that sees structure the jitter lacks (test 5).
+- The noisy state's cause is still open. It is a smooth, frequency-selective,
+  frame-to-frame change of the transmit-pair ratio, partly (on 09-17) a
+  per-chain delay switch; not receiver noise, not AGC, not RSSI.

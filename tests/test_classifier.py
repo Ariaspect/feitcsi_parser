@@ -139,6 +139,19 @@ def test_white_per_frame_modulation_is_noise_to_the_autocorrelation(tmp_path: Pa
     assert units[1]["acf_amp_median"] <= max(units[0]["acf_amp_median"], units[2]["acf_amp_median"]) + 0.05
 
 
+def test_the_link_jitter_is_the_one_frame_step_and_the_norm_is_the_ratio(tmp_path: Path) -> None:
+    """Test 2's columns: lag1_p20 is the 20th percentile of the adjacent-frame
+    step, step_norm the lag step over it. On the white-modulation fixture the
+    moving unit's one-frame step is inflated too, so its norm is NOT larger
+    than the still units' -- which is the caveat the bank records."""
+    p = _capture(tmp_path)
+    units = classifier.compute_features(p, 0.0, 200.0)["units"]
+    for u in units:
+        assert np.isfinite(u["lag1_p20"]) and u["lag1_p20"] > 0
+        assert u["step_norm"] == pytest.approx(u["step_p90"] / u["lag1_p20"])
+    assert units[1]["lag1_p20"] > max(units[0]["lag1_p20"], units[2]["lag1_p20"])
+
+
 def test_units_span_the_frames_not_the_request(tmp_path: Path) -> None:
     """A range asked wider than the capture still yields units over the
     capture's own extent -- three for 200 s -- rather than units over nothing."""

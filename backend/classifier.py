@@ -41,6 +41,26 @@ empirical operating point (90 % specificity on the current link's empties,
 96 % on 09-16/17, 56 % recall of still sitters). A feature, not a
 replacement: it buys a floor that transfers across link states at the price
 of same-link sensitivity.
+
+*Test 2 -- the link's own jitter.* The hypothesis was that the across-
+subcarrier roughness of one frame would read the receiver's noise and not the
+room. It does not read the room (occupied / empty 0.9-1.3x) but it does not
+read the link either: 0.012-0.023 on every day while the step floor spans
+10x. The noisy link is not per-subcarrier estimation noise; it is a frame-to-
+frame change that is smooth across frequency, mostly frequency-selective, and
+only partly a transmit-delay switch (09-17: 44 % of frames jump > 3 ns, but
+pairs in the same state still read 0.090 against 0.110; 09-16 never jumps).
+What does read the link is the **step at one frame of lag**: its 20th
+percentile tracks the empty lag-2 s floor 1:1 across every day (ratio
+1.1-1.9) and a still sitter, a phone user or the robot leave it at 0.97x,
+1.07x, 1.02x of the empties -- continuous movement inflates it, so the
+operational floor is its minimum over a trailing window of units, which came
+within 0.9-1.06x of the true empty floor on 10 of 13 days with no knowledge of
+occupancy. A threshold relative to that floor recovers cross-link
+specificity (09-16/17: 0 % -> 100 %) and loses the still sitter there
+(recall 0.14-0.40), because on that link the sitter's slow signal is smaller
+than the link's own jitter. ``lag1_p20`` and ``step_norm`` are in the bank;
+the mechanism behind the noisy state is still unknown.
 """
 
 from __future__ import annotations
@@ -71,6 +91,10 @@ STEP_LAG_SECONDS = hybrid2.RANGE_LAG_SECONDS
 ACF_AMP_P90W_REFERENCE = 0.20
 ACF_PHASE_P90W_REFERENCE = 0.22
 STEP_P90_REFERENCE = hybrid2.RANGE_MOTION_P90
+# Test 2: the step as a multiple of the link's own one-frame jitter. Empty
+# units sit at 1.1-1.9 on every link state measured; 2.0 is where 09-16/17
+# specificity reaches 100 % (and still-sitter recall there falls to 0.14-0.40).
+STEP_NORM_REFERENCE = 2.0
 
 # The bank. ``key`` is the unit field; ``test`` says where the feature came
 # from; ``status`` is "in rule" for the inputs of the current range rule and
@@ -114,6 +138,27 @@ FEATURES: list[dict[str, Any]] = [
         "reference": ACF_PHASE_P90W_REFERENCE, "axis": [-0.2, 1.0], "decimals": 3,
         "description": "As ψ̂ amp · P90w, on the unwrapped ratio phase. Marginally better than the "
                        "amplitude for seated movement against the noisy link (AUC 0.90 vs 0.85).",
+    },
+    {
+        "key": "lag1_p20", "label": "link jitter", "test": "2", "status": "candidate",
+        "reference": None, "axis": [0.0, 0.15], "decimals": 4,
+        "description": "20th percentile over the unit of the per-second median frame step at ONE frame "
+                       "of lag: the link's own frame-to-frame jitter. Tracks the empty lag-2 s floor 1:1 "
+                       "across every link state (lag-2 P90 / this = 1.1-1.9 on 13 days whose floors span "
+                       "10x) and a still sitter, a phone user or the robot leave it alone (0.97x, 1.07x, "
+                       "1.02x of the same day's empties); continuous movement does inflate it (seated "
+                       "fidgeting 7.5x), so the operational floor is the MINIMUM of this over a trailing "
+                       "window of units, which occupancy can only push up.",
+    },
+    {
+        "key": "step_norm", "label": "step / jitter", "test": "2", "status": "candidate",
+        "reference": STEP_NORM_REFERENCE, "axis": [0.0, 10.0], "decimals": 2,
+        "description": "step P90 divided by this unit's own link jitter. Empty units read 1.1-1.9 "
+                       "(p90 2.5) on every link state; a still sitter 3.0 median but 1.3 at p10, and on "
+                       "the noisy 09-16/17 link at the floor -- a relative threshold recovers cross-link "
+                       "specificity (0 % -> 100 % at 2x) and loses the still sitter there (recall 0.14-0.40). "
+                       "A continuously moving person inflates the denominator too, so read it with the "
+                       "jitter column.",
     },
     {
         "key": "gain_crossings", "label": "gain steps", "test": "context", "status": "context",
@@ -329,6 +374,13 @@ def compute_features(
         interpolate=interpolate, gate_gain=False, lag_seconds=lag_seconds,
     )
     level = np.asarray(level, dtype=float)
+    # Test 2: the same step at one frame of lag -- the link's own jitter, which a
+    # still occupant does not move. Read on the same seconds.
+    jitter, _ = hybrid2.motion_per_second(
+        path, t0, t1, seconds, mimo=mimo, source_mac=source_mac,
+        interpolate=interpolate, gate_gain=False, lag_seconds=0.0,
+    )
+    jitter = np.asarray(jitter, dtype=float)
 
     gain = lvl["gain_state"]
     # Units span the frames, not the request: a range asked wider than the
@@ -345,11 +397,16 @@ def compute_features(
         a_med, a_p90, n_win = _quantiles(psi_amp[wsel])
         p_med, p_p90, _ = _quantiles(psi_phase[wsel])
         s_med, s_p90, n_sec = _quantiles(level[ssel])
+        j = jitter[ssel]
+        j = j[np.isfinite(j)]
+        j_p20 = float(np.percentile(j, 20)) if j.size else float("nan")
         g = gain[fsel] if gain is not None else None
         units.append({
             "t0": float(a), "t1": float(b),
             "n_windows": n_win, "n_seconds": n_sec, "n_frames": int(fsel.sum()),
             "step_p90": s_p90, "step_p50": s_med,
+            "lag1_p20": j_p20,
+            "step_norm": s_p90 / j_p20 if np.isfinite(j_p20) and j_p20 > 0 else float("nan"),
             "acf_amp_median": a_med, "acf_amp_p90": a_p90,
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
