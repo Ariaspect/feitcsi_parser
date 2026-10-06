@@ -72,7 +72,7 @@ from typing import Any
 
 import numpy as np
 
-from backend import hybrid2
+from backend import hybrid, hybrid2
 
 # One unit per one-minute capture.
 UNIT_SECONDS = 60.0
@@ -95,6 +95,11 @@ STEP_P90_REFERENCE = hybrid2.RANGE_MOTION_P90
 # units sit at 1.1-1.9 on every link state measured; 2.0 is where 09-16/17
 # specificity reaches 100 % (and still-sitter recall there falls to 0.14-0.40).
 STEP_NORM_REFERENCE = 2.0
+# Test 3: breathing. The range rule's run, and the 20 s-window variant.
+BREATH_PEAK = hybrid2.RANGE_BREATH_PEAK
+BREATH_RUN_REFERENCE = hybrid2.RANGE_BREATH_RUN
+BREATH_WINDOW_LONG_SECONDS = 20.0
+BREATH_RATE_FLOOR_RPM = 11.0
 
 # The bank. ``key`` is the unit field; ``test`` says where the feature came
 # from; ``status`` is "in rule" for the inputs of the current range rule and
@@ -159,6 +164,28 @@ FEATURES: list[dict[str, Any]] = [
                        "specificity (0 % -> 100 % at 2x) and loses the still sitter there (recall 0.14-0.40). "
                        "A continuously moving person inflates the denominator too, so read it with the "
                        "jitter column.",
+    },
+    {
+        "key": "breath_run", "label": "breath run 10 s", "test": "range rule", "status": "in rule",
+        "reference": BREATH_RUN_REFERENCE, "axis": [0.0, 60.0], "decimals": 0,
+        "description": "Longest run of consecutive seconds whose 10 s FarSense window has a normalised "
+                       "autocorrelation peak >= 0.25 -- the breathing half of the range rule (run >= 5). "
+                       "Finds 85 % of still sitters, on the noisy 09-15/16/17 link as well as the clean "
+                       "one, with 0 % false alarms on the current link's empties.",
+    },
+    {
+        "key": "breath_run20", "label": "breath run 20 s", "test": "3", "status": "candidate",
+        "reference": BREATH_RUN_REFERENCE, "axis": [0.0, 60.0], "decimals": 0,
+        "description": "The same run with 20 s FarSense windows and a rate floor at 11 rpm (DeMan's "
+                       "longer-window finding; the floor steps over the 7.5-10.9 rpm artefact of empty "
+                       "rooms). Still sitters 85 % -> 94 % (noisy link 96 %) for 0 -> 1 % false alarms "
+                       "on the current link's empties.",
+    },
+    {
+        "key": "breath_rpm", "label": "breath rpm", "test": "3", "status": "context",
+        "reference": None, "axis": [0.0, 40.0], "decimals": 1,
+        "description": "Median FarSense rate over the seconds in the 20 s run, rpm. Empty-room artefacts "
+                       "cluster at 8-11 rpm; sitters at 14-22.",
     },
     {
         "key": "gain_crossings", "label": "gain steps", "test": "context", "status": "context",
@@ -382,6 +409,30 @@ def compute_features(
     )
     jitter = np.asarray(jitter, dtype=float)
 
+    # Test 3: the breathing channel, through hybrid2 so the 10 s run is the
+    # range rule's own number; the 20 s run adds the rate floor.
+    breath: dict[float, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for W in (hybrid.BREATH_WINDOW_SECONDS, BREATH_WINDOW_LONG_SECONDS):
+        try:
+            h = hybrid2.compute_hybrid2(
+                path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+                lag_seconds=lag_seconds, breath_window_seconds=W,
+            )
+            breath[W] = (np.asarray(h["time_s"], float), np.asarray(h["breath_peak"], float),
+                         np.asarray(h["breath_rpm"], float))
+        except ValueError:
+            breath[W] = (np.zeros(0), np.zeros(0), np.zeros(0))
+
+    def _breath_run(W: float, a: float, b: float, floor_rpm: float | None) -> tuple[int, float]:
+        ts, pk, rpm = breath[W]
+        sel = (ts >= a) & (ts <= b)
+        q = np.isfinite(pk[sel]) & (pk[sel] >= BREATH_PEAK)
+        if floor_rpm is not None:
+            q &= rpm[sel] >= floor_rpm
+        run = hybrid2.longest_run(q)
+        med = float(np.nanmedian(rpm[sel][q])) if q.any() else float("nan")
+        return int(run), med
+
     gain = lvl["gain_state"]
     # Units span the frames, not the request: a range asked wider than the
     # capture would otherwise put its last units over nothing and cut the
@@ -407,6 +458,9 @@ def compute_features(
             "step_p90": s_p90, "step_p50": s_med,
             "lag1_p20": j_p20,
             "step_norm": s_p90 / j_p20 if np.isfinite(j_p20) and j_p20 > 0 else float("nan"),
+            "breath_run": _breath_run(hybrid.BREATH_WINDOW_SECONDS, a, b, None)[0],
+            "breath_run20": (br20 := _breath_run(BREATH_WINDOW_LONG_SECONDS, a, b, BREATH_RATE_FLOOR_RPM))[0],
+            "breath_rpm": br20[1],
             "acf_amp_median": a_med, "acf_amp_p90": a_p90,
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,

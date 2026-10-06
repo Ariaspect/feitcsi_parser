@@ -23,6 +23,15 @@ run in order, each stopped and evaluated before the next:
 7. The operational fallback: per-link-state thresholds refreshed from
    camera-confirmed-empty captures.
 
+**What each step separates, so far.** One line per completed test; the
+sections below carry the numbers.
+
+| step | feature | separates | does not separate |
+|---|---|---|---|
+| 1 | ψ̂ — lag-1 autocorrelation of the ratio level (persistence of change) | slow coherent motion from receiver noise, with an empty floor that holds across link states (0.011 → 0.11 step floor; ψ̂ −0.009 → +0.02); ~half of still sitters | a still sitter whose signal is under the link's jitter from an empty room; anything that moves slowly near the link (out-of-view people, robot) from a person |
+| 2 | one-frame-lag step, P20, trailing minimum (the link's own jitter) | clean link from noisy link, blind to a still person, a phone user or the robot (0.97×, 1.07×, 1.02×); as a ruler, "moves more than the link wobbles" (step/jitter > 2) from empty on every link | a still sitter on a noisy link from empty (1.3–1.5× vs 1.1–2.5×); a robot from a person (2.5×); a very still sitter in the far room (1.7×) |
+| 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
+
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
 tab: the feature bank. A range is cut into units (one-minute captures are
 one unit; a longer range into equal units nearest the requested length) and
@@ -344,3 +353,95 @@ every minute present.
 - The noisy state's cause is still open. It is a smooth, frequency-selective,
   frame-to-frame change of the transmit-pair ratio, partly (on 09-17) a
   per-chain delay switch; not receiver noise, not AGC, not RSSI.
+
+## Test 3 — the breathing channel at 60 s (2026-10-06)
+
+**What was computed.** On the same units: (A) the range rule's breathing
+half as it stands — FarSense 10 s windows, hop 1 s, per-second normalised
+autocorrelation peak, longest run of seconds with peak ≥ 0.25, present at
+run ≥ 5; (A′) the same with a rate floor at 11 rpm (the empty-room artefact
+sits at 7.5–10.9); (B) the same pipeline with 20 s and 30 s windows
+(DeMan's finding that 30 s beats 10 s); (C) a DeMan-style estimator built
+beside FarSense — per subcarrier, per 30 s window at 50 % overlap, the
+periodogram peak in 8–42 rpm on |r| and on unwrapped arg(r), a prominence
+gate Q, the window's rate as the median over passing subcarriers, agreement
+as the share of all live subcarriers that pass and sit within ±2 rpm of it;
+breathing when ≥ 2 of 3 windows agree at ≥ A with rates within 3 rpm and
+above 11. Script `lg:/tmp/test3_breath.py`, analysis `test3_analyse.py`.
+
+### Breathing alone
+
+Fraction of units declared breathing — recall for occupied classes, false
+alarms for empties:
+
+| rule | still sitters (34) | of which noisy link (26) | seated movement | phone | 1-min quiet (step < 0.06) | env2 sitter (66) | walking | **empty, current link (307)** | empty 09-21 (95) | empty 09-15/16/17 (55) | empty other Sept (69) | **robot (40)** |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| A  10 s, peak ≥ .25, run ≥ 5 (the rule) | **0.85** | **0.85** | 0.23 | 0.68 | 0.74 | 0.76 | 0.45 | **0.00** | 0.00 | 0.09 | 0.06 | 0.05 |
+| A′ + rate floor 11 rpm | 0.85 | 0.85 | 0.23 | 0.68 | 0.74 | 0.74 | 0.45 | 0.00 | 0.00 | 0.09 | 0.04 | 0.05 |
+| B  20 s + floor | **0.94** | **0.96** | 0.34 | 0.68 | 0.68 | 0.74 | 0.45 | 0.01 | 0.01 | 0.11 | 0.09 | 0.10 |
+| B  30 s + floor | 0.91 | 0.92 | 0.29 | 0.64 | 0.65 | 0.68 | 0.45 | 0.01 | 0.02 | 0.05 | 0.04 | 0.07 |
+| B  30 s, peak ≥ .30 + floor | 0.76 | 0.73 | 0.14 | 0.64 | 0.56 | 0.65 | 0.32 | 0.01 | 0.00 | 0.02 | 0.01 | 0.03 |
+| C  DeMan either, 30 s, Q3, A ≥ .30 | 0.53 | 0.50 | 0.11 | 0.29 | 0.47 | 0.50 | 0.00 | 0.00 | 0.02 | 0.07 | 0.04 | 0.15 |
+| C  DeMan either, 30 s, Q4, A ≥ .20 | 0.53 | 0.54 | 0.03 | 0.32 | 0.47 | 0.39 | 0.05 | 0.00 | 0.00 | 0.00 | 0.03 | 0.07 |
+
+Three things. **Breathing reaches the still sitter on the noisy link** —
+85 % with the rule as it stands, 96 % at 20 s — where tests 1 and 2 showed
+no motion statistic can (test 2: the sitter's step is 1.3–1.5× a floor that
+is the link's own jitter). It reaches the far room too: 74–76 % of the
+env2 sitters that the 0.035 step missed. And it is **near-silent on true
+empties**: 0 of 307 current-link units and 0 of 95 on 09-21 at 10 s, 1 % at
+20 s; the 6–13 % on the September "empties" are the camera-empty windows of
+occupied captures, where the person is near. **The robot does not
+breathe**: 5–10 % against 85–96 % for sitters — the human check test 6
+needs, though walking people also lack a peak 55 % of the time, so "motion
+without breathing" is not "non-human" by itself.
+
+**DeMan's estimator loses to FarSense's** on this link: 53 % of still
+sitters at matched false alarms against 85 %. The per-subcarrier agreement
+is dominated by the artefact band — of 411 agreeing empty windows 260 claim
+8–11 rpm, and the sitters' agreeing windows put 91 of 335 there too, so the
+11 rpm floor that removes the artefact also costs real slow breathers.
+FarSense's projection, BNR selection and combined autocorrelation are the
+better estimator here; **DeMan's window finding transfers** (20 s: still
+sitters 85 → 94 %, noisy-link sitters 85 → 96 %, for 0 → 1 % false alarms on
+the current link), his agreement test does not. The 11 rpm floor is free on
+the rule (recall unchanged, other-Sept false alarms 6 → 4 %).
+
+### Breathing with the motion channel
+
+The motion rules of tests 1–2 OR a breathing rule, on the 1,006 units with
+a trailing floor (robot excluded from the empties):
+
+| rule | still clean | still noisy | seated mov. | phone | 1-min occ. | env2 occ. | empty current | empty 09-21 | **empty noisy** | empty other | robot | spec. | recall | balanced |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| step > 0.035 (motion only) | 0.88 | 1.00 | 1.00 | 0.88 | 0.85 | 0.37 | 0.05 | 0.07 | 0.81 | 0.38 | 0.92 | 0.838 | 0.832 | 0.835 |
+| step > 0.035 OR breath 10 s **(= the range rule)** | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0.05 | 0.07 | **0.81** | 0.41 | 0.92 | 0.834 | 0.997 | 0.916 |
+| step > 2 × trailing floor OR breath 10 s | 1.00 | 1.00 | 0.77 | 1.00 | 1.00 | 1.00 | 0.07 | 0.17 | **0.15** | 0.46 | 0.97 | 0.857 | 0.947 | 0.902 |
+| step > max(2 × floor, 0.035) OR breath 10 s | 1.00 | 1.00 | 0.77 | 1.00 | 1.00 | 1.00 | 0.05 | 0.07 | **0.15** | 0.35 | 0.89 | 0.903 | 0.944 | **0.924** |
+| step > max(2 × floor, 0.035) OR breath 20 s | 1.00 | 1.00 | 0.83 | 1.00 | 1.00 | 1.00 | 0.05 | 0.08 | 0.19 | 0.37 | 0.89 | 0.889 | 0.957 | 0.923 |
+
+The range rule's 100 % recall on the noisy link was the motion channel
+calling every minute present (specificity 0.19); with the motion threshold
+tied to the link floor and breathing carrying the still sitter, the same
+units read 0.85 specificity at 100 % still-sitter recall. What the relative
+floor costs is seated movement (0.77–0.83: fidgeting raises the one-frame
+jitter with the step, test 2) and the clean-link empties when the floor is
+allowed under 0.035 (09-21: 0.07 → 0.17, restored by the absolute minimum).
+Overall balanced accuracy 0.924 against the range rule's 0.916 — a small
+number because most units are on the current link, where the fixed rule
+already works; the difference is all on the days it did not.
+
+### Verdict
+
+- *Does the breathing channel reach the quiet occupant the motion channel
+  cannot?* **Yes** — on the noisy link (85–96 %), in the far room (74–76 %),
+  at 0–1 % false alarms on true empties. This is the still sitter's channel
+  and it already works; the range rule's failures on that link were never
+  the breathing half.
+- *DeMan's improvements:* the **20 s window** transfers (+9 points on still
+  sitters, +11 on the noisy link); the **11 rpm floor** is free; the
+  **cross-subcarrier agreement** does not beat FarSense's estimator and is
+  not adopted. `breath_run` (the rule's) and `breath_run20` (+ floor) are
+  in the bank, with the rate.
+- *For test 6:* breathing is the human check — robot 5–10 % — but not a
+  sufficient one, since walking people show no peak 55 % of the time.

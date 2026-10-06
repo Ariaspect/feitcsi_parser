@@ -152,6 +152,19 @@ def test_the_link_jitter_is_the_one_frame_step_and_the_norm_is_the_ratio(tmp_pat
     assert units[1]["lag1_p20"] > max(units[0]["lag1_p20"], units[2]["lag1_p20"])
 
 
+def test_the_breath_run_is_the_range_rules_run(tmp_path: Path) -> None:
+    """Test 3's columns ride on hybrid2's own FarSense sweep: over a whole-range
+    unit the 10 s run is range_verdict's breath_run to the second, and the
+    20 s run with the rate floor is an integer that never exceeds the seconds."""
+    p = _capture(tmp_path)
+    out = classifier.compute_features(p, 0.0, 200.0, unit_seconds=200.0)
+    u = out["units"][0]
+    r = hybrid2.compute_hybrid2(p, 0.0, 200.0, lag_seconds=hybrid2.RANGE_LAG_SECONDS)
+    assert u["breath_run"] == r["range_verdict"]["breath_run"]
+    assert isinstance(u["breath_run20"], int) and 0 <= u["breath_run20"] <= u["n_seconds"]
+    assert u["breath_rpm"] != u["breath_rpm"] or u["breath_rpm"] >= classifier.BREATH_RATE_FLOOR_RPM
+
+
 def test_units_span_the_frames_not_the_request(tmp_path: Path) -> None:
     """A range asked wider than the capture still yields units over the
     capture's own extent -- three for 200 s -- rather than units over nothing."""
