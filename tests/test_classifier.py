@@ -180,6 +180,24 @@ def test_the_learned_score_and_the_rule_follow_the_slow_swing(tmp_path: Path) ->
     assert floors == sorted(floors, reverse=True)
 
 
+def test_coherence_windows_read_a_steady_pattern_as_no_drift() -> None:
+    """Test 5's columns. One fixed pattern across subcarriers, scaled by a
+    slow swing, is one-dimensional (λ₁ share near 1) and keeps its eigenvector
+    (drift near 0); independent noise per subcarrier is neither."""
+    rng = np.random.default_rng(2)
+    n, F = 84 * 10, 32
+    times = np.arange(n) / 42.0
+    pattern = rng.standard_normal(F) + 1j * rng.standard_normal(F)
+    swing = np.sin(2 * np.pi * 0.3 * times)[:, None]
+    steady = 1.0 + 0.2 * swing * pattern[None, :] + 0.01 * (rng.standard_normal((n, F)) + 1j * rng.standard_normal((n, F)))
+    lam, drift = classifier.coherence_windows(steady, times, 84)
+    assert np.nanmedian(lam) > 0.9 and np.nanmedian(drift) < 0.05
+    noise = 1.0 + 0.1 * (rng.standard_normal((n, F)) + 1j * rng.standard_normal((n, F)))
+    lam_n, drift_n = classifier.coherence_windows(noise, times, 84)
+    assert np.nanmedian(lam_n) < 0.3 and np.nanmedian(drift_n) > 0.5
+    assert np.isnan(drift[0]) and np.isfinite(drift[1:]).all()
+
+
 def test_lr_probability_is_nan_on_a_missing_input() -> None:
     u = {k: 0.0 for k in classifier.LR_FEATURES}
     assert 0.0 <= classifier.lr_probability(u) <= 1.0

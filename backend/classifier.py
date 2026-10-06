@@ -108,11 +108,15 @@ BREATH_RATE_FLOOR_RPM = 11.0
 # 0.918 by link state, the same as the hand rule and as the trailing-floor
 # form (0.925 / 0.915). Standardise with LR_MEAN / LR_SCALE, dot with LR_COEF.
 LR_FEATURES = ("log_step_norm_own", "acf_phase_p90", "acf_amp_median",
-               "breath_run20", "breath_peak10", "breath_run")
-LR_MEAN = (0.736253, 0.268186, 0.143688, 5.558665, 0.3191, 4.512379)
-LR_SCALE = (0.841415, 0.294841, 0.22634, 10.810983, 0.113858, 8.712246)
-LR_COEF = (0.862745, 1.816749, -0.694167, 1.671751, 1.987941, 0.516279)
-LR_INTERCEPT = 0.128836
+               "breath_run20", "breath_peak10", "breath_run", "ev_drift_p90")
+LR_MEAN = (0.722792, 0.263424, 0.136982, 5.510497, 0.317754, 4.485083, 0.378312)
+LR_SCALE = (0.832182, 0.29003, 0.21645, 10.793192, 0.112859, 8.754102, 0.331219)
+LR_COEF = (0.927663, 1.260349, -0.381335, 1.869359, 2.057399, 0.807373, 0.878329)
+LR_INTERCEPT = -0.029666
+# Test 5 added the seventh input, the pattern drift: held out by link state
+# 0.917 balanced (six features: 0.918) with the noisy fold's recall 0.72 ->
+# 0.80, seated movement 0.60 -> 0.74, and the robot called occupied 0.50 ->
+# 0.17; by day 0.916 -> 0.922. Fit on 905 non-robot units with all inputs.
 P_OCCUPIED_REFERENCE = 0.5
 # The hand rule of tests 2-3, as a candidate verdict: the step over a floor
 # that is the smaller of 2x the link jitter and 0.035, or a 20 s breathing run.
@@ -217,6 +221,24 @@ FEATURES: list[dict[str, Any]] = [
                        "cluster at 8-11 rpm; sitters at 14-22.",
     },
     {
+        "key": "ev_drift_p90", "label": "pattern drift", "test": "5", "status": "candidate",
+        "reference": None, "axis": [0.0, 1.0], "decimals": 3,
+        "description": "P90 over 2 s windows of 1 - |<v1(w-1), v1(w)>|: how much the leading pattern "
+                       "of the fluctuation across subcarriers changes from one window to the next "
+                       "(R-TTWD's idea). Does not tell a still sitter from the noisy link (AUC 0.52) "
+                       "but separates moving people from it (seated movement 0.79) and, added to the "
+                       "test-4 logistic, lifts the held-out noisy fold's recall 0.63 -> 0.76 at the "
+                       "same specificity.",
+    },
+    {
+        "key": "lam_share_median", "label": "λ₁ share", "test": "5", "status": "context",
+        "reference": None, "axis": [0.0, 1.0], "decimals": 3,
+        "description": "Median over 2 s windows of the leading-eigenvalue share of the subcarrier "
+                       "covariance: how one-dimensional the fluctuation is across subcarriers. A sitter "
+                       "and the noisy link read the same (0.63-0.71); the robot reads lower (0.41 "
+                       "[0.29, 0.48]) -- a lead for test 6, not a presence feature.",
+    },
+    {
         "key": "breath_peak10", "label": "breath peak 10 s", "test": "3", "status": "context",
         "reference": BREATH_PEAK, "axis": [0.0, 1.0], "decimals": 2,
         "description": "Highest 10 s FarSense peak in the unit. The logistic regression's strongest "
@@ -225,11 +247,11 @@ FEATURES: list[dict[str, Any]] = [
     {
         "key": "p_occupied", "label": "P(occupied)", "test": "4", "status": "candidate",
         "reference": P_OCCUPIED_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
-        "description": "Six-feature logistic regression on dimensionless inputs only (step over own "
-                       "jitter, ψ̂ phase P90, ψ̂ amp median, breathing runs and peak), fit on 929 units "
-                       "of 09-04..10-05. Held out by link state: specificity 0.93, recall 0.91, "
-                       "balanced 0.918 -- the same as the hand rule, a learned alternative to it. "
-                       "Calls the robot occupied 47 % of the time (rules: 88-90 %) without ever seeing one.",
+        "description": "Seven-feature logistic regression on dimensionless inputs only (step over own "
+                       "jitter, ψ̂ phase P90, ψ̂ amp median, breathing runs and peak, pattern drift), fit "
+                       "on 905 units of 09-04..10-05. Held out by link state: specificity 0.91, recall "
+                       "0.92, balanced 0.917 -- the same as the hand rule, a learned alternative to it. "
+                       "Calls the robot occupied 17 % of the time (rules: 88-90 %) without ever seeing one.",
     },
     {
         "key": "rule_b", "label": "rule B", "test": "4", "status": "candidate verdict",
@@ -317,6 +339,46 @@ def acf_windows(
         gaps = np.diff(tb, axis=1).max(axis=1) > 2.0 * med
         psi[gaps] = np.nan
     return tb.mean(axis=1), psi
+
+
+def coherence_windows(
+    r: np.ndarray, times: np.ndarray, T: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Test 5's two survivors, per T-frame block of the complex ratio.
+
+    Per block, after a linear detrend per subcarrier: the leading-eigenvalue
+    share of the subcarrier covariance (how one-dimensional the fluctuation
+    is across subcarriers), and the drift of its leading eigenvector from the
+    previous block, ``1 - |<v1(w-1), v1(w)>|`` (R-TTWD's idea -- a body
+    changes the pattern, a steady source keeps it). A block across a frame
+    gap is skipped and breaks the drift chain. Returns (lambda share, drift),
+    drift NaN where there was no previous block.
+    """
+    r = np.asarray(r); times = np.asarray(times, dtype=float)
+    n = r.shape[0]; nb = n // int(T)
+    lam = np.full(nb, np.nan); drift = np.full(nb, np.nan)
+    if nb == 0:
+        return lam, drift
+    dt = np.diff(times); med = float(np.median(dt)) if dt.size else 0.0
+    t = np.arange(T, dtype=float)
+    A = np.stack([t, np.ones(T)], axis=1)
+    P = np.eye(T) - A @ np.linalg.pinv(A)
+    v_prev = None
+    for b in range(nb):
+        seg = r[b * T:(b + 1) * T]; tb = times[b * T:(b + 1) * T]
+        ok = np.isfinite(seg).all(axis=0)
+        if (med > 0 and np.max(np.diff(tb)) > 2.0 * med) or ok.sum() < 8:
+            v_prev = None
+            continue
+        R = P @ seg[:, ok]
+        C = (R.conj().T @ R) / T
+        w, V = np.linalg.eigh(C)
+        lam[b] = float(w[-1] / max(float(w.sum()), 1e-30))
+        v1 = np.zeros(r.shape[1], dtype=complex); v1[ok] = V[:, -1]
+        if v_prev is not None:
+            drift[b] = float(1.0 - abs(np.vdot(v_prev, v1)))
+        v_prev = v1
+    return lam, drift
 
 
 def unit_edges(t0: float, t1: float, unit_seconds: float) -> np.ndarray:
@@ -446,6 +508,7 @@ def compute_features(
 
     centres, psi_amp = acf_windows(amp, times, acf_frames)
     _, psi_phase = acf_windows(phase, times, acf_frames)
+    lam_share, ev_drift = coherence_windows(ratio, times, acf_frames)
 
     # The step the range rule reads, on whole seconds of the capture clock.
     seconds = np.arange(np.floor(float(t0)), float(t1), 1.0)
@@ -501,6 +564,8 @@ def compute_features(
         fsel = (times >= a) & ((times <= b) if last else (times < b))
         a_med, a_p90, n_win = _quantiles(psi_amp[wsel])
         p_med, p_p90, _ = _quantiles(psi_phase[wsel])
+        l_med, _, _ = _quantiles(lam_share[wsel])
+        _, d_p90, _ = _quantiles(ev_drift[wsel])
         s_med, s_p90, n_sec = _quantiles(level[ssel])
         j = jitter[ssel]
         j = j[np.isfinite(j)]
@@ -518,6 +583,7 @@ def compute_features(
             "breath_rpm": br20[1],
             "acf_amp_median": a_med, "acf_amp_p90": a_p90,
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
+            "lam_share_median": l_med, "ev_drift_p90": d_p90,
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })

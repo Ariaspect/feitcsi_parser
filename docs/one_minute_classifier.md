@@ -32,6 +32,7 @@ sections below carry the numbers.
 | 2 | one-frame-lag step, P20, trailing minimum (the link's own jitter) | clean link from noisy link, blind to a still person, a phone user or the robot (0.97×, 1.07×, 1.02×); as a ruler, "moves more than the link wobbles" (step/jitter > 2) from empty on every link | a still sitter on a noisy link from empty (1.3–1.5× vs 1.1–2.5×); a robot from a person (2.5×); a very still sitter in the far room (1.7×) |
 | 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
 | 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
+| 5 | cross-subcarrier structure: correlation, λ₁ share, eigenvector drift, delay concentration of the change | **nothing new for presence** — where structure separates (clean link, movers), step/ψ̂/breathing already do; eigenvector drift separates *movers* from the noisy link (0.80) and becomes P(occupied)'s 7th input; the robot's change is low-rank and repeatable (λ₁ 0.41, delay spread 12.7) where no person's is | **a still sitter from the noisy empty room** (AUC ≤ 0.63 on every structure feature; breathing 0.99) — the noisy state has a sitter's structure |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
 tab: the feature bank. A range is cut into units (one-minute captures are
@@ -561,3 +562,78 @@ model: 47 % called occupied.
   calls empty with a person within a metre or two of the link, and the 09-30
   mornings. No feature set in the bank separates those, and they should be
   adjudicated rather than modelled.
+
+## Test 5 — seated-still against noisy-empty on cross-subcarrier structure (2026-10-06)
+
+**What was computed.** The one separation no verified paper demonstrates
+(`docs/literature.md`): a still person from an empty room on a link whose
+own jitter is as large as the person's signal. The idea was structure — a
+body perturbs the subcarriers *coherently* and in a *pattern* that moves,
+receiver noise is independent across them and a steady source keeps its
+pattern. Per 2 s window of the complex ratio after a linear detrend: the mean
+pairwise correlation of the detrended amplitudes across subcarriers (ρ), the
+leading-eigenvalue share of the subcarrier covariance (λ₁ share — how
+one-dimensional the fluctuation is), and the drift of the leading
+eigenvector from the previous window, 1 − |⟨v₁(w−1), v₁(w)⟩| (R-TTWD's
+first-order eigenvector difference). Per frame, the lag-2 s change's FFT
+across subcarriers: its concentration in the strongest delay bin and the
+spread and consistency of that delay over the unit. Script
+`lg:/tmp/test5_coherence.py`, analysis `test5_analyse.py`; 945 units.
+
+### The pair that mattered
+
+AUC, still sitters on 09-16/17 (17 units) against empty units on 09-16/17
+(26); 1 or 0 is a separation, 0.5 is none:
+
+| ρ med | ρ P90 | λ₁ med | λ₁ P90 | drift med | drift P90 | delay conc. med | conc. P90 | delay spread | delay consistency | *step P90* | *ψ̂ phase P90* | ***breath run 20 s*** |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.51 | 0.57 | 0.61 | 0.63 | 0.36 | 0.52 | 0.62 | 0.63 | 0.43 | 0.63 | 0.53 | 0.63 | **0.99** |
+
+Nothing in the structure separates them. The noisy link's fluctuation is
+as coherent across subcarriers as a sitter's (ρ 0.065 against 0.120, both
+with wide tails), as one-dimensional (λ₁ share 0.63 against 0.71), as
+concentrated in delay (0.026 against 0.030), and its pattern drifts as
+much (0.34 against 0.46 at P90). Whatever the noisy state is, it looks
+like a slow change of the channel from the subcarrier axis too. Breathing
+separates the same pair at 0.99 — test 3's answer stands, and it is the
+only one.
+
+### Where structure does separate
+
+| pair | best structure feature (AUC) | step P90 | ψ̂ phase P90 | breath run 20 s |
+|---|---|---|---|---|
+| still vs empty, clean current link | ρ P90 **0.99**, λ₁ 0.90, drift 0.89 | 0.98 | 0.99 | 1.00 |
+| still vs empty, 09-15 | ρ **0.93**, drift med 0.83 | 0.84 | 0.85 | 0.96 |
+| seated movement vs noisy empty | drift **0.80**, delay conc. 0.82 | 0.77 | 0.90 | 0.67 |
+| 1-min quiet occupied vs empty | λ₁ med 0.88 | 0.94 | 0.90 | 0.95 |
+| walking vs empty | ρ **1.00**, delay conc. 0.99 | 1.00 | 1.00 | 0.85 |
+| **robot vs still sitter (noisy / clean)** | λ₁ med **1.00 / 0.99**, delay spread 0.85 | 1.00 / 0.88 | 0.00 / 0.66 | 0.99 / 0.98 |
+| **robot vs empty, current link** | delay conc. **0.96**, ρ P90 0.97 | 0.96 | 0.99 | 0.71 |
+
+Where structure separates, something simpler already does. Two things are
+new. The eigenvector drift is a *mover's* feature: added to the test-4
+transfer logistic it lifts the held-out noisy fold's recall 0.63 → 0.76 at
+unchanged specificity (balanced by link state 0.912 → 0.920), through the
+seated and phone units of 09-16/17, not the still ones (0.89 either way);
+added to the shipped six-feature score it trades a little noisy-fold
+specificity (0.92 → 0.88) for recall (0.72 → 0.80), seated movement 0.60 →
+0.74, and the robot called occupied 0.50 → 0.17, balanced 0.918 → 0.917 by
+link state and 0.916 → 0.922 by day. It is now the score's seventh input.
+Adding all the structure features overfits (0.878). And **the robot's
+change is low-rank and repeatable** in a way no person's is: λ₁ share 0.41
+[0.29, 0.48] against sitters' 0.64–0.71, and the strongest delay of its
+change wanders by 12.7 bins [11.7, 15.1] over a minute where a sitter's
+wanders 21–56 and a seated mover's 36. A machine moves the same way every
+second; a body does not. That is test 6's lead, not a presence feature.
+
+### Verdict
+
+- *Does cross-subcarrier structure tell a still sitter from the noisy
+  link?* **No.** AUC ≤ 0.63 on every structure feature; the noisy state
+  has a sitter's structure. The literature's silence on this pair was not
+  an oversight. Breathing remains the only channel that reaches it (0.99).
+- The eigenvector drift earns a place as a mover's feature and the seventh
+  input of `P(occupied)`; λ₁ share goes in as context for test 6.
+- With this, the still-sitter problem is settled as far as this link can
+  settle it: motion over the link floor for anyone who moves, breathing for
+  anyone who does not, and nothing else to be had from the ratio.
