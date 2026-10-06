@@ -230,6 +230,22 @@ def test_the_test6_columns_are_well_formed(tmp_path: Path) -> None:
     assert units[1]["verdict3"] == 2
 
 
+def test_trailing_floor_reads_the_minimum_recent_jitter_and_forgets_the_night() -> None:
+    """Test 7's policy. The floor is the smallest jitter among the units of the
+    last six hours; a lone unit after a long gap has no floor (the threshold
+    then falls back to the absolute 0.035); an occupied stretch cannot lower
+    it below the quiet units around it, and a noisier link is learned once
+    its units are all that is left in the window."""
+    t = np.arange(12) * 60.0
+    j = np.array([0.011, 0.010, 0.012, 0.05, 0.06, 0.055, 0.010, 0.011, 0.012, 0.09, 0.095, 0.092])
+    assert classifier.trailing_floor(j, t, now=t[3]) == pytest.approx(0.010)        # three quiet units
+    assert classifier.trailing_floor(j, t, now=t[6]) == pytest.approx(0.010)        # a mover does not raise it
+    assert classifier.trailing_floor(j, t, now=t[2]) is None                        # only two units before
+    assert classifier.trailing_floor(j, t, now=t[11] + 7 * 3600) is None            # the night erased it
+    noisy_t = t[9:] + 7 * 3600
+    assert classifier.trailing_floor(j[9:], noisy_t, now=noisy_t[-1] + 60) == pytest.approx(0.09)
+
+
 def test_lr_probability_is_nan_on_a_missing_input() -> None:
     u = {k: 0.0 for k in classifier.LR_FEATURES}
     assert 0.0 <= classifier.lr_probability(u) <= 1.0

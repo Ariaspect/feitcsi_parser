@@ -34,6 +34,7 @@ sections below carry the numbers.
 | 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
 | 5 | cross-subcarrier structure: correlation, λ₁ share, eigenvector drift, delay concentration of the change | **nothing new for presence** — where structure separates (clean link, movers), step/ψ̂/breathing already do; eigenvector drift separates *movers* from the noisy link (0.80) and becomes P(occupied)'s 7th input; the robot's change is low-rank and repeatable (λ₁ 0.41, delay spread 12.7) where no person's is | **a still sitter from the noisy empty room** (AUC ≤ 0.63 on every structure feature; breathing 0.99) — the noisy state has a sitter's structure |
 | 6 (partial) | breathing peak + λ₁ share + delay spread → P(human \| moving), gating rule B's "present" | **the robot from a human** — the only thing required of it: 3 % of robot units called human held out by session (0 % with P(occupied) as a second condition), 91 % (86 %) of people kept; what a robot lacks is breathing, rank and variety | a fan, a curtain, any mover not yet recorded (plan pending); seated movers and walkers are the people it loses (their motion repeats too); P(occupied) alone is not a robot gate (23 % pass) |
+| 7 | the link floor kept online: smallest one-frame jitter of the last 6 h (≥ 3 units), else the fixed 0.035 | **today's link from yesterday's** — matches an oracle that knows each day's true jitter (0.898 vs 0.896; fixed rule 0.877), learns a new noisy link within 5–10 empty units, needs no camera and no shift trigger | the camera-empty windows with a person near the link (0.45–0.68 even for the oracle); the first five empties after a clean → noisy change (0.40) |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
 tab: the feature bank. A range is cut into units (one-minute captures are
@@ -772,3 +773,118 @@ walkers (0.83), whose motion is repetitive too.
   11 rpm floor and the 20 s window are the defence) are still predictions;
   the `20261006_132922` unit says a slow mechanical motion can reach the
   breathing band, so H2 is not idle.
+
+## Test 7 — the operational floor, run as a system runs (2026-10-06)
+
+**What was computed.** Every unit of the 945 in time order across all
+thirteen days, the link floor estimated only from the units before it, and
+the verdict — rule B (step > max(2 × floor, 0.035) OR a 20 s breathing run)
+with the human gate of test 6 — scored per day. Policies for the floor:
+*none* (the fixed 0.035); *day-reset* (tests 2–4's trailing minimum of ten
+units, which restarts each day — an operator's knowledge); *count-N* (the
+last N units regardless of time); *hours-H* (the last 20 units within H
+hours, at least three, else no floor and the fixed threshold); *shift*
+(count-10, but the window is cut to the last three units when they all read
+3 × the floor); *camera-5* (WiSH's practice: the median jitter of the last
+five camera-empty units within 24 h); and an *oracle* that knows each
+day's true empty jitter. Script `test7_online.py`.
+
+### Per day
+
+Specificity on camera-empty units / recall of the human label on occupied:
+
+| day | nE / nO | none (0.035) | day-reset-10 | count-10 | count-20 | hours-2 | **hours-6** | shift | camera-5 | oracle |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 09-11 | 22 / 36 | 0.45 / 0.89 | 0.64 / 0.89 | 0.45 / 0.89 | 0.45 / 0.89 | 0.59 / 0.89 | 0.59 / 0.89 | 0.59 / 0.89 | 0.59 / 0.89 | 0.45 / 0.89 |
+| 09-14 | 23 / 14 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 | 0.52 / 0.93 |
+| 09-15 | 29 / 22 | 0.31 / 0.91 | 0.83 / 0.91 | 0.52 / 0.91 | 0.38 / 0.91 | 0.72 / 0.91 | 0.72 / 0.91 | 0.66 / 0.91 | 0.72 / 0.91 | 0.83 / 0.91 |
+| **09-16** | 14 / 36 | **0.00** / 1.00 | 0.79 / 0.75 | 0.50 / 0.75 | 0.14 / 0.89 | 0.57 / 0.75 | **0.57 / 0.89** | 0.71 / 0.75 | 0.64 / 0.72 | 0.79 / 0.69 |
+| **09-17** | 12 / 18 | **0.00** / 1.00 | 0.92 / 0.89 | 0.92 / 0.89 | 0.83 / 0.89 | 0.67 / 0.89 | **0.67 / 0.89** | 0.92 / 0.89 | 0.92 / 0.83 | 0.92 / 0.89 |
+| 09-21 | 95 / 49 | 0.93 / 0.90 | 0.93 / 0.80 | 0.93 / 0.80 | 0.93 / 0.88 | 0.93 / 0.88 | 0.93 / 0.88 | 0.93 / **0.76** | 0.93 / 0.90 | 0.93 / 0.90 |
+| 09-22 | 22 / 8 | 0.64 / 1.00 | 0.64 / 1.00 | 0.68 / 1.00 | 0.68 / 1.00 | 0.64 / 1.00 | 0.64 / 1.00 | 0.68 / 1.00 | 0.64 / 1.00 | 0.64 / 1.00 |
+| 09-29 → 10-02 | 295 / 138 | 0.95 / 0.96 | 0.95 / 0.96 | 0.95 / 0.96 | 0.95 / 0.96 | 0.95 / 0.96 | 0.95 / 0.96 | 0.96 / 0.96 | 0.96 / 0.94 | 0.95 / 0.96 |
+| 10-05 env2 | 0 / 66 | — / 0.97 | — / 0.97 | — / 0.97 | — / 0.97 | — / 0.97 | — / 0.97 | — / 0.97 | — / 0.97 | — / 0.97 |
+| robot called human | 40 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 |
+| **all** | 514 / 391 | 0.81 / 0.95 | 0.89 / 0.91 | 0.86 / 0.91 | 0.84 / 0.93 | 0.87 / 0.92 | **0.87 / 0.93** | 0.88 / 0.90 | 0.88 / 0.91 | 0.88 / 0.91 |
+| balanced | | 0.877 | 0.896 | 0.881 | 0.882 | 0.892 | **0.898** | 0.890 | 0.895 | 0.896 |
+
+### Recovery after a link change
+
+Specificity on the first five / next five / remaining empties of the day,
+and the floor the policy held at the day's first unit as a multiple of the
+day's true jitter (0 = no estimate, threshold fell back to 0.035):
+
+| day (true jitter) | none | day-reset | count-10 | count-20 | hours-6 | shift | camera-5 |
+|---|---|---|---|---|---|---|---|
+| 09-15 (0.043) | .00/.00/.47 | 1.0/.80/.79 ×1.2 | .00/.00/.79 ×0.2 | .00/.00/.58 ×0.2 | .40/.80/.79 ×0 | .40/.40/.79 ×0.2 | .40/.80/.79 ×0.2 |
+| 09-16 (0.077) | .00/.00/.00 | 1.0/.80/.50 ×1.0 | .40/.60/.50 ×0.1 | .00/.00/.50 ×0.1 | .40/.80/.50 ×0 | 1.0/.60/.50 ×0.9 | .60/.80/.50 ×0.1 |
+| 09-17 (0.096) | .00/.00/.00 | 1.0/.80/1.0 ×1.0 | 1.0/.80/1.0 ×0.7 | .80/.80/1.0 ×0.7 | .40/.80/1.0 ×0 | 1.0/.80/1.0 ×0.7 | 1.0/.80/1.0 ×0.7 |
+| 09-21 (0.010) | 1.0/1.0/.92 | 1.0/1.0/.92 ×1.0 | 1.0/1.0/.92 ×7.2 | 1.0/1.0/.92 ×7.2 | 1.0/1.0/.92 ×0 | 1.0/1.0/.92 ×7.2 | 1.0/1.0/.92 ×0 |
+| 09-22 (0.016) | .40/1.0/.58 | .40/1.0/.58 ×1.1 | .60/1.0/.58 ×4.8 | .60/1.0/.58 ×4.7 | .40/1.0/.58 ×0 | .60/1.0/.58 ×4.8 | .40/1.0/.58 ×0.8 |
+
+### Reading it
+
+- **A time-limited trailing minimum matches the oracle.** *hours-6* —
+  the smallest jitter among the last twenty units of the last six hours,
+  at least three of them, else the fixed 0.035 — scores 0.898 balanced
+  against the oracle's 0.896 and the fixed rule's 0.877, with recall
+  unchanged (0.93) and the robot gate untouched. On the noisy days it
+  takes specificity from 0.00 to 0.57–0.67 overall and to 0.80–1.00 once
+  the first five empty units have passed: **a new link state is learned
+  within five to ten empty units**, five to ten minutes at the one-minute
+  cadence.
+- **Stale floors are worse than no floor.** A count-only window carries
+  yesterday's jitter into today — 0.1–0.2 × the truth after a clean → noisy
+  night (first-five specificity 0.00), 5–7 × after a noisy → clean one — and
+  scores 0.881; falling back to the absolute threshold when nothing recent
+  exists is the better start, which is why the time limit matters.
+- **Day-reset is the optimist**, 0.896: it knew where the days began. The
+  online policy is two points short of it on 09-15/16 and reaches it by the
+  tenth empty unit.
+- **A shift trigger is harmful**: cutting the window when three units read
+  3 × the floor learns 09-16 in one unit (1.00) but fires on occupied
+  stretches too — 09-21's recall 0.90 → 0.76 — because a person moving for
+  three units looks like a noisier link. Not used.
+- **The camera is not needed for the floor.** WiSH's camera-confirmed
+  refresh scores 0.895; the occupancy-blind minimum does the same without
+  it. The camera stays what it was: the truth for evaluation.
+- **What no floor fixes**: 09-11, 09-14, 09-22 — the camera-empty windows
+  of occupied five-minute captures with a person near the link (0.45–0.68
+  for the oracle too), and 09-16's remaining empties (0.50). Label-limited,
+  as tests 4 and 5 found.
+
+### Verdict
+
+- *Does specificity recover on a new link state, and within how many
+  empty captures?* **Yes, within five to ten**, with the trailing minimum
+  of the last six hours (`classifier.trailing_floor`); the fixed threshold
+  is the right fallback when the window is empty, and nothing is to be
+  gained from a camera-confirmed refresh or a shift trigger.
+- This is the operational form of test 2's floor and closes the programme's
+  calibration question: a running system keeps one number, the smallest
+  one-frame jitter of the last six hours, and reads its motion threshold
+  off it.
+
+## Where this leaves the programme
+
+Seven tests, one link, 945 units. The one-minute verdict the bank can
+support today — every piece measured held out by day and by link state:
+
+1. **Floor:** the smallest one-frame jitter among the units of the last six
+   hours (≥ 3), else none (test 7).
+2. **Present:** step P90 > max(2 × floor, 0.035) OR a 20 s breathing run ≥ 5
+   with the 11 rpm floor — rule B (tests 2, 3).
+3. **Human:** present AND P(human | moving) > 0.5 (test 6, user's choice);
+   otherwise motion-unconfirmed.
+4. **Beside it,** `P(occupied)` — the seven-feature logistic (tests 4, 5) —
+   as the learned alternative to rule B, indistinguishable from it held out
+   by link state (0.917 vs 0.922).
+
+Measured: balanced 0.898 online across all days (fixed rule 0.877; the
+range rule's own number with the human gate 0.877), the noisy link 0.57–0.67
+specificity rising to 0.80–1.00 after ten units where the range rule had 0,
+still sitters 100 % on every link, env2 sitters 97 %, the robot called human
+3 %. What is left is not in the ratio: the camera-empty windows with a
+person a metre from the link, and the movers not yet recorded. **Which of
+these pieces becomes the default is the user's decision**; none has been
+made default here.

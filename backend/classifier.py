@@ -140,6 +140,35 @@ HUMAN_INTERCEPT = 6.539183
 P_HUMAN_REFERENCE = 0.5
 
 
+# Test 7: how a running system keeps the link floor. Replayed over every unit
+# in time order (945 units, 13 days): the smallest link jitter among the
+# units of the last LINK_FLOOR_HOURS, at least LINK_FLOOR_MIN_UNITS of them,
+# else no floor and the threshold falls back to STEP_P90_REFERENCE. Scores
+# balanced 0.898 (spec 0.87 / human recall 0.93) against 0.877 for the fixed
+# rule and 0.896 for an oracle that knows each day's true empty jitter; a new
+# noisy link is learned within 5-10 empty units. A count-only window carries
+# a stale floor across the night (0.881); a camera-confirmed refresh is no
+# better than this (0.895); a "shift" trigger that cuts the window when
+# three units read 3x the floor costs recall on occupied stretches (09-21
+# 0.90 -> 0.76) and is not used.
+LINK_FLOOR_HOURS = 6.0
+LINK_FLOOR_MIN_UNITS = 3
+LINK_FLOOR_MAX_UNITS = 20
+
+
+def trailing_floor(jitters: np.ndarray, times: np.ndarray, now: float) -> float | None:
+    """The link floor a running system would hold at ``now``: the minimum
+    ``lag1_p20`` over the last LINK_FLOOR_MAX_UNITS units that ended within
+    LINK_FLOOR_HOURS before ``now`` (strictly before it), or None when fewer
+    than LINK_FLOOR_MIN_UNITS did -- then the caller uses the absolute
+    threshold. Occupancy can only raise the jitter, so the minimum reads the
+    link through whoever was in the room."""
+    j = np.asarray(jitters, dtype=float); t = np.asarray(times, dtype=float)
+    ok = np.isfinite(j) & (j > 0) & (t < now) & (now - t <= 3600.0 * LINK_FLOOR_HOURS)
+    recent = j[ok][-LINK_FLOOR_MAX_UNITS:]
+    return float(recent.min()) if recent.size >= LINK_FLOOR_MIN_UNITS else None
+
+
 def human_probability(unit: dict[str, Any]) -> float:
     """P(human | moving) from the test-6 logistic; NaN if an input is."""
     x = []
