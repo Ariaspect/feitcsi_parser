@@ -165,6 +165,28 @@ def test_the_breath_run_is_the_range_rules_run(tmp_path: Path) -> None:
     assert u["breath_rpm"] != u["breath_rpm"] or u["breath_rpm"] >= classifier.BREATH_RATE_FLOOR_RPM
 
 
+def test_the_learned_score_and_the_rule_follow_the_slow_swing(tmp_path: Path) -> None:
+    """Test 4's columns. The slow fixture's middle unit breathes at 18 rpm, so
+    both the logistic score and rule B should call it and not the still ones;
+    the score is a probability and the rule a 0/1."""
+    units = classifier.compute_features(_slow_capture(tmp_path), 0.0, 200.0)["units"]
+    for u in units:
+        assert u["p_occupied"] != u["p_occupied"] or 0.0 <= u["p_occupied"] <= 1.0
+        assert u["rule_b"] in (0, 1)
+    assert units[1]["p_occupied"] > max(units[0]["p_occupied"], units[2]["p_occupied"])
+    assert units[1]["rule_b"] == 1
+    # the rule's floor is the smallest jitter seen so far, so it can only fall along the range
+    floors = [u["rule_b_floor"] for u in units]
+    assert floors == sorted(floors, reverse=True)
+
+
+def test_lr_probability_is_nan_on_a_missing_input() -> None:
+    u = {k: 0.0 for k in classifier.LR_FEATURES}
+    assert 0.0 <= classifier.lr_probability(u) <= 1.0
+    u["breath_peak10"] = float("nan")
+    assert classifier.lr_probability(u) != classifier.lr_probability(u)   # NaN
+
+
 def test_units_span_the_frames_not_the_request(tmp_path: Path) -> None:
     """A range asked wider than the capture still yields units over the
     capture's own extent -- three for 200 s -- rather than units over nothing."""

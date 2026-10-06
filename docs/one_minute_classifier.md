@@ -31,6 +31,7 @@ sections below carry the numbers.
 | 1 | ψ̂ — lag-1 autocorrelation of the ratio level (persistence of change) | slow coherent motion from receiver noise, with an empty floor that holds across link states (0.011 → 0.11 step floor; ψ̂ −0.009 → +0.02); ~half of still sitters | a still sitter whose signal is under the link's jitter from an empty room; anything that moves slowly near the link (out-of-view people, robot) from a person |
 | 2 | one-frame-lag step, P20, trailing minimum (the link's own jitter) | clean link from noisy link, blind to a still person, a phone user or the robot (0.97×, 1.07×, 1.02×); as a ruler, "moves more than the link wobbles" (step/jitter > 2) from empty on every link | a still sitter on a noisy link from empty (1.3–1.5× vs 1.1–2.5×); a robot from a person (2.5×); a very still sitter in the far room (1.7×) |
 | 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
+| 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
 tab: the feature bank. A range is cut into units (one-minute captures are
@@ -445,3 +446,118 @@ already works; the difference is all on the days it did not.
   in the bank, with the rate.
 - *For test 6:* breathing is the human check — robot 5–10 % — but not a
   sufficient one, since walking people show no peak 55 % of the time.
+
+## Test 4 — a capture-level feature set and a small classifier (2026-10-06)
+
+**What was computed.** The per-unit features of tests 1–3 joined on 969
+units (929 without the robot: 526 camera-empty, 403 occupied), three feature
+sets, two models, two held-out schemes, three fixed rules for comparison.
+Feature sets: *transfer* — dimensionless only (step over the trailing floor,
+log; median level over the floor; step over own jitter; ψ̂ amp P90 and
+median; ψ̂ phase P90; breathing runs at 10 s and 20 s; breathing peaks);
+*rule inputs* — log step and the 10 s run; *all* — transfer plus the
+absolute step, level, floor, jitter, RSSI and gain crossings. Models:
+class-balanced logistic regression on standardised inputs, and a depth-3
+gradient-boosted tree. Held out **leave-one-day-out** (13 days) and
+**leave-one-link-state-out** (six groups: 09-04/11/14 at 19.6 Hz, 09-15,
+09-16/17, 09-21/22, 09-29→10-02, env2). Script `test4_classifier.py`;
+table `test4_features.json`.
+
+### Pooled held-out
+
+| rule / model | by day: spec | rec | bal | AUC | by link state: spec | rec | bal | AUC |
+|---|---|---|---|---|---|---|---|---|
+| range rule (step > .035 OR 10 s run ≥ 5) | 0.816 | 0.998 | 0.907 | — | 0.816 | 0.998 | 0.907 | — |
+| hand A: step > max(2 × floor, .035) OR 10 s run | 0.897 | 0.945 | 0.921 | — | 0.897 | 0.945 | 0.921 | — |
+| hand B: … OR 20 s run | 0.888 | 0.955 | 0.922 | — | 0.888 | 0.955 | **0.922** | — |
+| LR / transfer | 0.930 | 0.921 | 0.925 | 0.975 | 0.924 | 0.906 | 0.915 | 0.970 |
+| LR / rule inputs | 0.880 | 0.933 | 0.907 | 0.969 | 0.884 | 0.908 | 0.896 | 0.962 |
+| LR / all | 0.924 | 0.948 | 0.936 | 0.982 | 0.922 | 0.928 | **0.925** | 0.978 |
+| HGB / transfer | 0.916 | 0.933 | 0.925 | 0.975 | 0.920 | 0.888 | 0.904 | 0.968 |
+| HGB / all | 0.928 | 0.958 | **0.943** | 0.981 | 0.895 | 0.921 | 0.908 | 0.968 |
+
+By link state, the harder split, group by group (balanced [spec / rec]):
+
+| held-out link state | nE / nO | range rule | hand B | LR transfer | LR all | HGB all |
+|---|---|---|---|---|---|---|
+| 09-04/11/14 (19.6 Hz) | 47 / 54 | 0.75 [0.51/0.98] | 0.79 [0.60/0.98] | 0.81 [0.64/0.98] | 0.82 [0.66/0.98] | 0.82 [0.66/0.98] |
+| 09-15 | 29 / 22 | 0.66 [0.31/1.00] | 0.91 [0.83/1.00] | **0.94** [0.93/0.95] | 0.88 [0.76/1.00] | 0.86 [0.86/0.86] |
+| **09-16/17 (noisy)** | 26 / 54 | **0.50 [0.00/1.00]** | **0.82 [0.85/0.80]** | 0.80 [0.96/0.63] | 0.78 [0.69/0.87] | **0.58 [0.15/1.00]** |
+| 09-21/22 | 117 / 58 | 0.94 [0.88/1.00] | 0.88 [0.87/0.90] | 0.88 [0.91/0.84] | 0.94 [0.97/0.91] | 0.94 [0.93/0.95] |
+| 09-29 → 10-02 (current) | 307 / 149 | **0.98** [0.95/1.00] | 0.97 [0.95/1.00] | 0.97 [0.97/0.96] | 0.94 [0.98/0.91] | 0.91 [0.98/0.83] |
+| env2 (10-05), occupied only | 0 / 66 | rec 1.00 | rec 1.00 | rec 0.98 | rec 0.95 | rec 1.00 |
+
+Per class, held out by day (recall):
+
+| class | n | range rule | hand B | LR transfer | HGB all |
+|---|---|---|---|---|---|
+| still sitters, clean / noisy link | 8 / 26 | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
+| seated movement | 35 | 1.00 | 0.83 | 0.71 | 0.91 |
+| phone, walking | 28, 22 | 1.00 | 1.00 | 1.00 | 1.00 |
+| 1-min occupied / of which quiet | 131 / 34 | 1.00 / 1.00 | 1.00 / 1.00 | 0.98 / 0.94 | 0.95 / 0.91 |
+| env2 occupied | 66 | 1.00 | 1.00 | 0.98 | 1.00 |
+| other September occupied | 87 | 0.99 | 0.86 | 0.78 | 0.91 |
+
+Robot units, never trained on, called occupied: range rule 0.90, hand rules
+0.88, **LR transfer 0.17, HGB transfer 0.12, HGB all 0.07, LR all 0.85**.
+
+Logistic coefficients on the standardised *transfer* set, fit on all units:
+breath peak 10 s **+1.97**, ψ̂ phase P90 **+1.81**, breath run 20 s **+1.63**,
+log step over floor +1.08, level over floor +0.92, ψ̂ amp median −0.77,
+breath run 10 s +0.57, ψ̂ amp P90 −0.30, breath peak 20 s +0.10, step over
+own jitter −0.04.
+
+### Reading it
+
+- **On days the fixed rule already works, nothing beats it; on the days it
+  fails, everything beats it.** The range rule is 0.98 on the current link
+  and 0.50 on 09-16/17 — specificity zero, every minute called present. The
+  hand rule and the learned models are 0.78–0.82 there with specificity
+  0.69–0.96, and give up 0.01–0.07 on the current link for it. Pooled, the
+  spread between the hand rule and the best learned model is one point.
+- **Absolute features do not cross link states** — M-WiFi's lesson, measured
+  here: the tree on *all* features is the best model by day (0.943) and
+  collapses on the held-out noisy link (specificity 0.15), because it
+  learned a step threshold in absolute units. The logistic model survives
+  the same features because it weights the dimensionless ones; the
+  *transfer* sets lose nothing between the two splits.
+- **The learned models earn their point on the September "empties"** — the
+  camera-empty windows next to a present person (09-04/11/14: everyone's
+  specificity is 0.5–0.7) — and on seated movement they lose it, as every
+  rule that ties the threshold to the link jitter does (test 2).
+- **Robot:** the dimensionless classifiers reject most robot units without
+  having seen one (12–17 % called occupied against the rules' 88–90 %), on
+  the strength of no breathing peak and a ψ̂ profile unlike a sitter's. Not
+  designed, not yet trusted; test 6 measures it.
+- **Breathing is the strongest input** (peak +1.97, 20 s run +1.63), then
+  persistence of change (ψ̂ phase +1.81), then the normalised step (+1.08).
+  The 20 s run outweighs the 10 s run three to one.
+
+### What goes in the bank
+
+A six-feature **own-floor** logistic regression — step over the unit's own
+jitter (log), ψ̂ phase P90, ψ̂ amp median, the 20 s run, the 10 s peak, the
+10 s run — so a unit can be scored on its own without a trailing window.
+Held out by link state it reads 0.926 / 0.911 / **0.918**, the same as the
+trailing form (0.915) and the hand rule (0.922); on the noisy fold 0.92 /
+0.72; on the current fold 0.98 / 0.97. Fit on all 929 units it is
+`P(occupied)` in the bank, with `rule B` beside it as the candidate verdict
+(its floor the smallest jitter seen so far in the range). The robot, on this
+model: 47 % called occupied.
+
+### Verdict
+
+- *Does a small learned classifier on the bank beat the rules?* **By a
+  point, at most, and only with dimensionless inputs.** Under the honest
+  split the hand rule (0.922), the logistic model on transferable features
+  (0.915–0.925) and its six-feature own-floor form (0.918) are
+  indistinguishable; the tree with absolute inputs looks best by day and is
+  the worst on a new link state.
+- *What decides between them* is not accuracy but what each misses: the
+  rules keep seated movement (0.83 vs 0.71–0.91) and the learned models keep
+  more of the near-presence empties and reject the robot. That is a choice
+  for the user, and test 6 (non-human movers) bears on it directly.
+- The remaining errors are label-limited: the September windows the camera
+  calls empty with a person within a metre or two of the link, and the 09-30
+  mornings. No feature set in the bank separates those, and they should be
+  adjudicated rather than modelled.

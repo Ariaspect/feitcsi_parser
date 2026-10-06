@@ -101,6 +101,35 @@ BREATH_RUN_REFERENCE = hybrid2.RANGE_BREATH_RUN
 BREATH_WINDOW_LONG_SECONDS = 20.0
 BREATH_RATE_FLOOR_RPM = 11.0
 
+# Test 4: a six-feature logistic regression on dimensionless inputs only, fit
+# on the 929 non-robot units of 09-04 .. 10-05 (class-balanced, C = 1). The
+# own-floor form -- every input is computable from one unit -- so the tab can
+# score a unit on its own; its held-out balanced accuracy is 0.917 by day and
+# 0.918 by link state, the same as the hand rule and as the trailing-floor
+# form (0.925 / 0.915). Standardise with LR_MEAN / LR_SCALE, dot with LR_COEF.
+LR_FEATURES = ("log_step_norm_own", "acf_phase_p90", "acf_amp_median",
+               "breath_run20", "breath_peak10", "breath_run")
+LR_MEAN = (0.736253, 0.268186, 0.143688, 5.558665, 0.3191, 4.512379)
+LR_SCALE = (0.841415, 0.294841, 0.22634, 10.810983, 0.113858, 8.712246)
+LR_COEF = (0.862745, 1.816749, -0.694167, 1.671751, 1.987941, 0.516279)
+LR_INTERCEPT = 0.128836
+P_OCCUPIED_REFERENCE = 0.5
+# The hand rule of tests 2-3, as a candidate verdict: the step over a floor
+# that is the smaller of 2x the link jitter and 0.035, or a 20 s breathing run.
+RULE_FLOOR_MULTIPLE = 2.0
+
+
+def lr_probability(unit: dict[str, Any]) -> float:
+    """P(occupied) from the test-4 logistic regression; NaN if an input is."""
+    x = []
+    for key in LR_FEATURES:
+        v = unit.get(key)
+        if v is None or not np.isfinite(v):
+            return float("nan")
+        x.append(float(v))
+    z = LR_INTERCEPT + sum(c * (xi - m) / s for xi, m, s, c in zip(x, LR_MEAN, LR_SCALE, LR_COEF))
+    return float(1.0 / (1.0 + np.exp(-z)))
+
 # The bank. ``key`` is the unit field; ``test`` says where the feature came
 # from; ``status`` is "in rule" for the inputs of the current range rule and
 # "candidate" for everything the programme has produced since; ``reference``
@@ -186,6 +215,30 @@ FEATURES: list[dict[str, Any]] = [
         "reference": None, "axis": [0.0, 40.0], "decimals": 1,
         "description": "Median FarSense rate over the seconds in the 20 s run, rpm. Empty-room artefacts "
                        "cluster at 8-11 rpm; sitters at 14-22.",
+    },
+    {
+        "key": "breath_peak10", "label": "breath peak 10 s", "test": "3", "status": "context",
+        "reference": BREATH_PEAK, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Highest 10 s FarSense peak in the unit. The logistic regression's strongest "
+                       "input (standardised coefficient +1.99).",
+    },
+    {
+        "key": "p_occupied", "label": "P(occupied)", "test": "4", "status": "candidate",
+        "reference": P_OCCUPIED_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Six-feature logistic regression on dimensionless inputs only (step over own "
+                       "jitter, ψ̂ phase P90, ψ̂ amp median, breathing runs and peak), fit on 929 units "
+                       "of 09-04..10-05. Held out by link state: specificity 0.93, recall 0.91, "
+                       "balanced 0.918 -- the same as the hand rule, a learned alternative to it. "
+                       "Calls the robot occupied 47 % of the time (rules: 88-90 %) without ever seeing one.",
+    },
+    {
+        "key": "rule_b", "label": "rule B", "test": "4", "status": "candidate verdict",
+        "reference": 0.5, "axis": [0.0, 1.0], "decimals": 0,
+        "description": "The hand rule of tests 2-3: step P90 > max(2 x link floor, 0.035) OR a 20 s "
+                       "breathing run >= 5. The floor is the smallest link jitter of this unit and the "
+                       "units before it in the range (one unit: its own). Held out by link state: "
+                       "specificity 0.89, recall 0.96, balanced 0.922; on the noisy 09-16/17 link 0.85 / "
+                       "0.80 where the range rule reads 0.00 / 1.00.",
     },
     {
         "key": "gain_crossings", "label": "gain steps", "test": "context", "status": "context",
@@ -423,7 +476,7 @@ def compute_features(
         except ValueError:
             breath[W] = (np.zeros(0), np.zeros(0), np.zeros(0))
 
-    def _breath_run(W: float, a: float, b: float, floor_rpm: float | None) -> tuple[int, float]:
+    def _breath_run(W: float, a: float, b: float, floor_rpm: float | None) -> tuple[int, float, float]:
         ts, pk, rpm = breath[W]
         sel = (ts >= a) & (ts <= b)
         q = np.isfinite(pk[sel]) & (pk[sel] >= BREATH_PEAK)
@@ -431,7 +484,8 @@ def compute_features(
             q &= rpm[sel] >= floor_rpm
         run = hybrid2.longest_run(q)
         med = float(np.nanmedian(rpm[sel][q])) if q.any() else float("nan")
-        return int(run), med
+        peak = float(np.nanmax(pk[sel])) if np.isfinite(pk[sel]).any() else float("nan")
+        return int(run), med, peak
 
     gain = lvl["gain_state"]
     # Units span the frames, not the request: a range asked wider than the
@@ -458,7 +512,8 @@ def compute_features(
             "step_p90": s_p90, "step_p50": s_med,
             "lag1_p20": j_p20,
             "step_norm": s_p90 / j_p20 if np.isfinite(j_p20) and j_p20 > 0 else float("nan"),
-            "breath_run": _breath_run(hybrid.BREATH_WINDOW_SECONDS, a, b, None)[0],
+            "breath_run": (br10 := _breath_run(hybrid.BREATH_WINDOW_SECONDS, a, b, None))[0],
+            "breath_peak10": br10[2],
             "breath_run20": (br20 := _breath_run(BREATH_WINDOW_LONG_SECONDS, a, b, BREATH_RATE_FLOOR_RPM))[0],
             "breath_rpm": br20[1],
             "acf_amp_median": a_med, "acf_amp_p90": a_p90,
@@ -466,6 +521,21 @@ def compute_features(
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })
+
+    # Test 4: the learned score and the hand rule, from the fields above. The
+    # rule's floor is the smallest jitter seen so far in the range -- occupancy
+    # can only push the jitter up, so the minimum reads the link through it.
+    floor = float("inf")
+    for u in units:
+        if np.isfinite(u["lag1_p20"]) and u["lag1_p20"] > 0:
+            floor = min(floor, u["lag1_p20"])
+        u["log_step_norm_own"] = (float(np.log(u["step_norm"]))
+                                  if np.isfinite(u["step_norm"]) and u["step_norm"] > 0 else float("nan"))
+        u["p_occupied"] = lr_probability(u)
+        thr = max(RULE_FLOOR_MULTIPLE * floor, STEP_P90_REFERENCE) if np.isfinite(floor) else STEP_P90_REFERENCE
+        by_motion = np.isfinite(u["step_p90"]) and u["step_p90"] > thr
+        u["rule_b"] = 1 if (by_motion or u["breath_run20"] >= BREATH_RUN_REFERENCE) else 0
+        u["rule_b_floor"] = floor if np.isfinite(floor) else float("nan")
 
     return {
         "acf": {
