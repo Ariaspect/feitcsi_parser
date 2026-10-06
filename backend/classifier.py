@@ -331,7 +331,11 @@ def compute_features(
     level = np.asarray(level, dtype=float)
 
     gain = lvl["gain_state"]
-    edges = unit_edges(t0, t1, unit_seconds)
+    # Units span the frames, not the request: a range asked wider than the
+    # capture would otherwise put its last units over nothing and cut the
+    # capture's own minute short of its end.
+    lo, hi = max(float(t0), float(times[0])), min(float(t1), float(times[-1]))
+    edges = unit_edges(lo, hi, unit_seconds) if hi > lo else np.array([float(t0), float(t1)])
     units: list[dict[str, Any]] = []
     for i, (a, b) in enumerate(zip(edges[:-1], edges[1:])):
         last = i == len(edges) - 2

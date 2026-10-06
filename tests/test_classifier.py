@@ -139,6 +139,16 @@ def test_white_per_frame_modulation_is_noise_to_the_autocorrelation(tmp_path: Pa
     assert units[1]["acf_amp_median"] <= max(units[0]["acf_amp_median"], units[2]["acf_amp_median"]) + 0.05
 
 
+def test_units_span_the_frames_not_the_request(tmp_path: Path) -> None:
+    """A range asked wider than the capture still yields units over the
+    capture's own extent -- three for 200 s -- rather than units over nothing."""
+    p = _capture(tmp_path)
+    out = classifier.compute_features(p, 0.0, 1000.0)
+    assert len(out["units"]) == 3
+    assert out["units"][-1]["t1"] == pytest.approx(199.95, abs=0.1)
+    assert all(u["n_windows"] > 0 for u in out["units"])
+
+
 def test_the_step_is_the_range_rules_step(tmp_path: Path) -> None:
     """Same frames, same lag: a unit's step P90 here is what range_verdict
     would compute over the same seconds, so the tab and the rule agree."""
