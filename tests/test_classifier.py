@@ -246,6 +246,20 @@ def test_trailing_floor_reads_the_minimum_recent_jitter_and_forgets_the_night() 
     assert classifier.trailing_floor(j[9:], noisy_t, now=noisy_t[-1] + 60) == pytest.approx(0.09)
 
 
+def test_every_feature_says_what_it_decides_and_what_it_separates() -> None:
+    """The tab explains each column from the bank itself, so every entry
+    carries a role and both answers, and the decision flow names columns
+    that exist."""
+    keys = {f["key"] for f in classifier.FEATURES}
+    for f in classifier.FEATURES:
+        for k in ("role", "separates", "not_separates"):
+            assert f.get(k), (f["key"], k)
+    for d in classifier.DECISION:
+        assert d["key"] in keys and d["text"] and d["evidence"]
+    assert [d["step"] for d in classifier.DECISION] == ["floor", "present", "human", "alternative"]
+    assert len(classifier.STEPS) == 7
+
+
 def test_lr_probability_is_nan_on_a_missing_input() -> None:
     u = {k: 0.0 for k in classifier.LR_FEATURES}
     assert 0.0 <= classifier.lr_probability(u) <= 1.0

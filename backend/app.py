@@ -1653,6 +1653,8 @@ def classifier_features(
         "source_mac": out["source_mac"],
         "mimo": out["mimo"],
         "features": out["features"],
+        "decision": classifier.DECISION,
+        "steps": classifier.STEPS,
         "truth": truth_out,
         "truth_excluded": _truth_exclusion(p),
     }

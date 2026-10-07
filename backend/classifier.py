@@ -766,3 +766,120 @@ def compute_features(
         "mimo": lvl["mimo"],
         "features": FEATURES,
     }
+
+
+# --------------------------------------------------------------------------- #
+#  What decides what, and what separates what -- served with the bank so the  #
+#  tab can say it                                                             #
+# --------------------------------------------------------------------------- #
+
+# Per feature: its role in the verdict, and the one-line answer each test gave
+# about what it separates and what it does not. Merged into FEATURES below.
+FEATURE_NOTES: dict[str, dict[str, str]] = {
+    "step_p90": {"role": "input of rule B (motion)",
+                 "separates": "a moving person from an empty room on the link it was set on (AUC 0.996)",
+                 "not_separates": "anything once the link changes -- its empty floor moves 10x between link states (09-16/17: 0 % specificity at 0.035)"},
+    "step_p50": {"role": "context", "separates": "the unit's typical level, for reading the P90 against", "not_separates": "--"},
+    "acf_amp_median": {"role": "input of P(occupied)",
+                       "separates": "slow coherent motion from receiver noise, with an empty floor that holds across link states",
+                       "not_separates": "a sitter whose signal is under the link's jitter from an empty room"},
+    "acf_amp_p90": {"role": "candidate (test 1)",
+                    "separates": "about half of still sitters from empties on any link at one threshold (90 % home specificity holds 96 % on the noisy link)",
+                    "not_separates": "out-of-view movers or the robot from a person; a sitter under the jitter"},
+    "acf_phase_median": {"role": "context", "separates": "as the amplitude form, on the ratio phase", "not_separates": "--"},
+    "acf_phase_p90": {"role": "input of P(occupied)",
+                      "separates": "seated movement from the noisy empty room better than the amplitude form (0.90 vs 0.85)",
+                      "not_separates": "a still sitter from the noisy empty room (0.63)"},
+    "lag1_p20": {"role": "the floor (via trailing_floor)",
+                 "separates": "a clean link from a noisy one, blind to a still person, a phone user and the robot (0.97x, 1.07x, 1.02x of empty)",
+                 "not_separates": "occupancy -- by design; continuous movement does raise it, which is why the floor is a trailing minimum"},
+    "step_norm": {"role": "rule B's motion half, as a ratio",
+                  "separates": "'moves more than the link wobbles' from empty on every link (empties 1.1-1.9, threshold 2)",
+                  "not_separates": "a still sitter on a noisy link from empty (1.3-1.5x); the robot from a person (2.3x)"},
+    "breath_run": {"role": "the range rule's breathing half",
+                   "separates": "a still person from an empty room on every link and in the far room (85 % / 75 %) at 0 false alarms on 307 current-link empties",
+                   "not_separates": "a fidgeting person (23 %); motion does that"},
+    "breath_run20": {"role": "input of rule B (breathing)",
+                     "separates": "the same, more of them: still sitters 94 %, noisy-link sitters 96 %, for 1 % false alarms",
+                     "not_separates": "a fidgeting person (34 %); a slow machine that puts a line in the band (one robot unit)"},
+    "breath_rpm": {"role": "context", "separates": "where the breathing line sits: artefacts 8-11 rpm, sitters 14-22", "not_separates": "--"},
+    "ev_drift_p90": {"role": "input of P(occupied)",
+                     "separates": "moving people from the noisy link (seated movement 0.80); lifts the noisy fold's recall 0.63 -> 0.76",
+                     "not_separates": "a still sitter from the noisy empty room (0.52)"},
+    "lam_share_median": {"role": "input of P(human | moving)",
+                         "separates": "the robot's low-rank fluctuation (0.41) from a sitter's (0.6-0.7)",
+                         "not_separates": "a sitter from the noisy link (same 0.63-0.71)"},
+    "breath_peak10": {"role": "input of P(occupied) and of P(human | moving)",
+                      "separates": "a person from the robot (0.92) -- the strongest input of both scores",
+                      "not_separates": "a still sitter from a mover (both breathe)"},
+    "p_occupied": {"role": "learned alternative to rule B",
+                   "separates": "occupied from empty at 0.917 balanced on a link state never seen -- the same as rule B",
+                   "not_separates": "the robot from a person on its own (23 % of one robot session passes it)"},
+    "rule_b": {"role": "decides PRESENT",
+               "separates": "occupied from empty at 0.922 held out by link state; the noisy link at 0.85 specificity where the range rule has 0",
+               "not_separates": "the robot from a person (88 % present); seated fidgeting in part (0.83) because its jitter rises with its step"},
+    "delay_spread": {"role": "input of P(human | moving)",
+                     "separates": "a machine's repeated change (12.7 bins) from a body's (21-56)",
+                     "not_separates": "walkers (10) from machines -- a gait repeats too"},
+    "machine_like": {"role": "candidate (test 6)",
+                     "separates": "the robot, 0.80-0.93 flagged on a session it was not set on",
+                     "not_separates": "phone users and walkers from machines (0.25-0.42 flagged)"},
+    "p_human": {"role": "decides HUMAN (user's choice, 2026-10-06)",
+                "separates": "a robot from a human: 3 % of robot units pass held out by session, 91 % of people",
+                "not_separates": "a fan, a curtain or a second robot -- never seen; seated movers (74 %) and walkers (83 %) are the people it loses"},
+    "verdict3": {"role": "the verdict",
+                 "separates": "empty / motion-unconfirmed / human, from rule B and P(human | moving)",
+                 "not_separates": "a robot from an empty room -- not required"},
+    "gain_crossings": {"role": "context", "separates": "how hard the receiver's gain control worked",
+                       "not_separates": "link states (09-21 had 1,271 a minute and the cleanest floor)"},
+    "rssi_median": {"role": "context", "separates": "signal strength", "not_separates": "link states (noisy 09-16/17 -42 dBm, clean 09-21 -41)"},
+}
+for _f in FEATURES:
+    _f.update(FEATURE_NOTES.get(_f["key"], {"role": "context", "separates": "--", "not_separates": "--"}))
+
+# The verdict, step by step, with the numbers the tab should print beside it.
+DECISION: list[dict[str, Any]] = [
+    {"step": "floor", "test": "7", "key": "lag1_p20",
+     "text": f"the smallest one-frame jitter among the units of the last {LINK_FLOOR_HOURS:g} h (at least "
+             f"{LINK_FLOOR_MIN_UNITS}), else none -- on this tab, the smallest seen so far in the range",
+     "evidence": "replayed over 13 days it matches an oracle that knows each day's true jitter (0.898 vs 0.896); "
+                 "a new noisy link is learned within 5-10 empty units"},
+    {"step": "present", "test": "2, 3", "key": "rule_b",
+     "text": f"step P90 > max({RULE_FLOOR_MULTIPLE:g} x floor, {STEP_P90_REFERENCE:g})  OR  breathing run (20 s windows, "
+             f"peak >= {BREATH_PEAK:g}, rate >= {BREATH_RATE_FLOOR_RPM:g} rpm) >= {BREATH_RUN_REFERENCE} s",
+     "evidence": "0.922 balanced held out by link state; still sitters 100 % on every link; noisy link 0.85 specificity "
+                 "where the fixed rule has 0"},
+    {"step": "human", "test": "6", "key": "p_human",
+     "text": f"present AND P(human | moving) > {P_HUMAN_REFERENCE:g} -- a logistic on the breathing peak, the lambda-1 share "
+             f"and the delay spread; otherwise motion-unconfirmed",
+     "evidence": "3 % of robot units called human held out by session, 91 % of people kept; one device, one room"},
+    {"step": "alternative", "test": "4, 5", "key": "p_occupied",
+     "text": f"P(occupied) > {P_OCCUPIED_REFERENCE:g} -- a seven-input logistic on dimensionless features only",
+     "evidence": "0.917 balanced held out by link state, indistinguishable from rule B; not a robot gate on its own"},
+]
+
+# What each test separated, one line each -- the compounding table of
+# docs/one_minute_classifier.md, for the tab.
+STEPS: list[dict[str, str]] = [
+    {"step": "1", "feature": "psi-hat -- persistence of change in the ratio level",
+     "separates": "slow coherent motion from receiver noise, with a floor that holds across link states; about half of still sitters",
+     "not_separates": "a sitter under the link's jitter from empty; out-of-view movers or the robot from a person"},
+    {"step": "2", "feature": "the one-frame jitter, as a trailing minimum",
+     "separates": "a clean link from a noisy one, blind to still people and the robot; 'moves more than the link wobbles' on every link",
+     "not_separates": "a still sitter on a noisy link from empty; the robot from a person"},
+    {"step": "3", "feature": "FarSense breathing run (10 s as in the rule; 20 s with an 11 rpm floor)",
+     "separates": "a still person from empty on every link and in the far room (85-96 %, 0-1 % false alarms); a person from the robot",
+     "not_separates": "a fidgeting person; 'motion without breathing' from non-human"},
+    {"step": "4", "feature": "the bank as a classifier: rule B and the logistic P(occupied)",
+     "separates": "occupied from empty at 0.92 on a link never seen (the noisy link at 0.85 specificity where the range rule has 0)",
+     "not_separates": "more than the rule on the days it already works; seated fidgeting under a jitter-tied threshold; camera-empty windows with a person a metre from the link"},
+    {"step": "5", "feature": "cross-subcarrier structure: correlation, lambda-1 share, eigenvector drift, delay concentration",
+     "separates": "nothing new for presence; the drift separates movers from the noisy link and is the 7th input of P(occupied); the robot's change is low-rank and repeatable",
+     "not_separates": "a still sitter from the noisy empty room (AUC <= 0.63; breathing 0.99)"},
+    {"step": "6 (partial)", "feature": "P(human | moving) = breathing peak + lambda-1 share + delay spread, gating 'present'",
+     "separates": "a robot from a human -- the one thing asked of it: 3 % of robot units called human, 91 % of people kept",
+     "not_separates": "fans, curtains, other movers not yet recorded; seated movers and walkers it loses"},
+    {"step": "7", "feature": "the link floor kept online: smallest jitter of the last 6 h, else the fixed 0.035",
+     "separates": "today's link from yesterday's -- matches the oracle (0.898 vs 0.896; fixed rule 0.877), learns a new link in 5-10 empty units, no camera needed",
+     "not_separates": "camera-empty windows with a person near the link; the first five empties after a clean-to-noisy change"},
+]

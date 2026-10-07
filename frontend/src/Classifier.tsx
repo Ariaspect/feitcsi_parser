@@ -23,6 +23,12 @@ const STRIP = 16;
 const STEP_AXIS: [number, number] = [0, 0.3];
 const ACF_AXIS: [number, number] = [-0.2, 1];
 
+// Strip rows, in the order the verdict is made: what it says, what decided
+// it, the two scores, then the rule's own inputs.
+const STRIP_KEYS = ["verdict3", "rule_b", "p_human", "p_occupied", "step_p90", "breath_run20"];
+
+const VERDICT_LABEL: Record<number, string> = { 0: "empty", 1: "motion-unconfirmed", 2: "human" };
+
 function NumberField({
   id, label, value, onChange, min, max, step, width = "w-20", title,
 }: {
@@ -133,12 +139,14 @@ export function Classifier({
     [data],
   );
 
-  // The features that carry a reference are the ones a strip can be drawn
-  // for; the rest are read in the table.
+  // The strip draws the columns that decide or feed the verdict and carry a
+  // reference -- the verdict, rule B, the two scores and the rule's two inputs;
+  // the candidates and the context are read in the table and the explainer.
   const guided = useMemo(
-    () => (data ? data.features.filter((f) => f.reference != null) : []),
+    () => (data ? data.features.filter((f) => f.reference != null && STRIP_KEYS.includes(f.key)) : []),
     [data],
   );
+  const byKey = useMemo(() => new Map((data?.features ?? []).map((f) => [f.key, f])), [data]);
 
   const innerWidth = Math.max(1, width - CHART_MARGIN.left - CHART_MARGIN.right);
   const x = linearScale(domain, [0, innerWidth]);
@@ -212,7 +220,9 @@ export function Classifier({
                             stroke={dark ? "#1b1f25" : "#ffffff"} strokeWidth={1}
                           >
                             <title>
-                              {f.label} {fmt(f, u.values[f.key])} {s === "over" ? ">" : "≤"} {f.reference}
+                              {f.key === "verdict3"
+                                ? `verdict: ${VERDICT_LABEL[u.values.verdict3 ?? 0] ?? "—"}`
+                                : `${f.label} ${fmt(f, u.values[f.key])} ${s === "over" ? ">" : "≤"} ${f.reference}`}
                               {" · "}{formatTime(u.t0, span)} – {formatTime(u.t1, span)} · {occupancyLabel(u)}
                             </title>
                           </rect>
@@ -228,9 +238,10 @@ export function Classifier({
             </svg>
           </ChartBusy>
           <p className="text-[11px] text-muted-foreground">
-            One cell per unit, filled where the feature is over its reference. The references are
-            measured operating points (docs/one_minute_classifier.md), not the verdict — the
-            verdict rule is what the remaining tests decide.
+            One cell per unit, filled where the row is over its reference: the verdict (filled =
+            human), rule B (filled = present), the two scores, and rule B&apos;s two inputs. The
+            candidates and the context columns are in the table below, and what each one decides
+            and separates is in the explainer under it.
           </p>
 
           <ChartBusy busy={busy} height={150} label="computing">
@@ -313,6 +324,92 @@ export function Classifier({
               This capture is flagged {data.truthExcluded} — its camera column is shown but is not truth.
             </p>
           )}
+
+          <section className="space-y-2">
+            <h3 className="text-xs font-semibold">How the verdict is made</h3>
+            <ol className="space-y-1.5 text-[11px] leading-relaxed">
+              {data.decision.map((d, i) => {
+                const f = byKey.get(d.key);
+                return (
+                  <li key={d.step} className="flex gap-2">
+                    <span className="w-5 shrink-0 text-muted-foreground tabular-nums">{i + 1}.</span>
+                    <span>
+                      <b className="uppercase tracking-wide text-[10px]">{d.step}</b>
+                      {f && <span className="text-muted-foreground"> · column <i>{f.label}</i></span>}
+                      <span className="text-muted-foreground"> · test {d.test}</span>
+                      <br />
+                      {d.text}
+                      <br />
+                      <span className="text-muted-foreground">measured: {d.evidence}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs font-semibold">Each column: what it is, what it decides, what it separates</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="text-muted-foreground">
+                    <th className="px-2 py-1 text-left font-medium">column</th>
+                    <th className="px-2 py-1 text-left font-medium">test</th>
+                    <th className="px-2 py-1 text-left font-medium">role</th>
+                    <th className="px-2 py-1 text-left font-medium">what it measures</th>
+                    <th className="px-2 py-1 text-left font-medium">separates</th>
+                    <th className="px-2 py-1 text-left font-medium">does not separate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.features.map((f) => (
+                    <tr key={f.key} className="border-t border-border/50 align-top">
+                      <td className="px-2 py-1 whitespace-nowrap font-medium">
+                        {f.label}
+                        {f.reference != null && <span className="text-muted-foreground font-normal"> › {f.reference}</span>}
+                      </td>
+                      <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">{f.test}</td>
+                      <td className="px-2 py-1 whitespace-nowrap">{f.role}</td>
+                      <td className="px-2 py-1 text-muted-foreground max-w-[28rem]">{f.description}</td>
+                      <td className="px-2 py-1 max-w-[20rem]">{f.separates}</td>
+                      <td className="px-2 py-1 max-w-[20rem] text-muted-foreground">{f.notSeparates}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs font-semibold">What each step of the programme separated</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="text-muted-foreground">
+                    <th className="px-2 py-1 text-left font-medium">step</th>
+                    <th className="px-2 py-1 text-left font-medium">feature</th>
+                    <th className="px-2 py-1 text-left font-medium">separates</th>
+                    <th className="px-2 py-1 text-left font-medium">does not separate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.steps.map((s) => (
+                    <tr key={s.step} className="border-t border-border/50 align-top">
+                      <td className="px-2 py-1 whitespace-nowrap">{s.step}</td>
+                      <td className="px-2 py-1 max-w-[18rem]">{s.feature}</td>
+                      <td className="px-2 py-1 max-w-[24rem]">{s.separates}</td>
+                      <td className="px-2 py-1 max-w-[24rem] text-muted-foreground">{s.notSeparates}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Full numbers, held out by day and by link state, in docs/one_minute_classifier.md. None of
+              the rows above is the default yet — that is the user&apos;s decision.
+            </p>
+          </section>
 
           <p className="text-[11px] text-muted-foreground leading-relaxed">
             <b>The feature bank for the one-minute verdict.</b> Every column is a scalar per unit;

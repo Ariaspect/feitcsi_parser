@@ -467,8 +467,14 @@ describe("fetchClassifier", () => {
     features: [
       { key: "step_p90", label: "step P90", test: "range rule", status: "in rule", reference: 0.035, axis: [0, 0.3], decimals: 4, description: "" },
       { key: "acf_amp_p90", label: "ψ̂ amp · P90w", test: 1, status: "candidate", reference: 0.2, axis: [-0.2, 1], decimals: 3, description: "" },
-      { key: "rssi_median", label: "RSSI", test: "context", status: "context", reference: null, axis: null, decimals: 0, description: "" },
+      { key: "rssi_median", label: "RSSI", test: "context", status: "context", reference: null, axis: null, decimals: 0, description: "",
+        role: "context", separates: "signal strength", not_separates: "link states" },
     ],
+    decision: [
+      { step: "floor", test: "7", key: "lag1_p20", text: "smallest jitter of the last 6 h", evidence: "matches the oracle" },
+      { step: "present", test: "2, 3", key: "rule_b", text: "step over the floor OR a breathing run", evidence: "0.922" },
+    ],
+    steps: [{ step: "1", feature: "psi-hat", separates: "slow motion from noise", not_separates: "a sitter under the jitter" }],
     truth: { time_s: [0, 1], present: [false, true] },
     truth_excluded: null,
   };
@@ -490,6 +496,12 @@ describe("fetchClassifier", () => {
     expect(out.acf.nullMean).toBeCloseTo(-1 / 84);
     expect(out.step.lagSeconds).toBe(2);
     expect(out.truth?.present).toEqual([false, true]);
+    expect(out.features[2].role).toBe("context");
+    expect(out.features[2].notSeparates).toBe("link states");
+    expect(out.features[0].role).toBe("");
+    expect(out.decision.map((d) => d.step)).toEqual(["floor", "present"]);
+    expect(out.decision[1].key).toBe("rule_b");
+    expect(out.steps[0].notSeparates).toBe("a sitter under the jitter");
   });
 
   it("sends the unit length, the window and the lag", async () => {

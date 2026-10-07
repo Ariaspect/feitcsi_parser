@@ -1225,6 +1225,28 @@ export interface ClassifierFeature {
   axis: [number, number] | null;
   decimals: number;
   description: string;
+  /** What the column decides or feeds: "decides PRESENT", "input of P(occupied)", "context", … */
+  role: string;
+  /** The one-line answers the test gave: what this column separates, and what it does not. */
+  separates: string;
+  notSeparates: string;
+}
+
+/** One step of the verdict, with the evidence behind it. */
+export interface ClassifierDecision {
+  step: string;
+  test: string;
+  key: string;
+  text: string;
+  evidence: string;
+}
+
+/** One row of the compounding table: what each test separated. */
+export interface ClassifierStep {
+  step: string;
+  feature: string;
+  separates: string;
+  notSeparates: string;
 }
 
 export interface ClassifierUnit {
@@ -1261,6 +1283,8 @@ export interface Classifier {
   framesDropped: number;
   selectionNote: string;
   features: ClassifierFeature[];
+  decision: ClassifierDecision[];
+  steps: ClassifierStep[];
   truth: { timeS: number[]; present: boolean[] } | null;
   truthExcluded: string | null;
 }
@@ -1303,6 +1327,15 @@ export async function fetchClassifier(
     axis: (f.axis as [number, number] | null) ?? null,
     decimals: (f.decimals as number) ?? 3,
     description: (f.description as string) ?? "",
+    role: (f.role as string) ?? "",
+    separates: (f.separates as string) ?? "",
+    notSeparates: (f.not_separates as string) ?? "",
+  }));
+  const decision: ClassifierDecision[] = (body.decision ?? []).map((d: Record<string, unknown>) => ({
+    step: String(d.step), test: String(d.test), key: String(d.key), text: String(d.text ?? ""), evidence: String(d.evidence ?? ""),
+  }));
+  const steps: ClassifierStep[] = (body.steps ?? []).map((d: Record<string, unknown>) => ({
+    step: String(d.step), feature: String(d.feature ?? ""), separates: String(d.separates ?? ""), notSeparates: String(d.not_separates ?? ""),
   }));
   const units: ClassifierUnit[] = (body.units ?? []).map((u: Record<string, unknown>) => ({
     t0: u.t0 as number,
@@ -1337,6 +1370,8 @@ export async function fetchClassifier(
     framesDropped: body.frames_dropped,
     selectionNote: body.selection_note,
     features,
+    decision,
+    steps,
     truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
     truthExcluded: body.truth_excluded ?? null,
   };

@@ -47,7 +47,13 @@ unit cells per referenced feature against the camera, the per-window and
 per-second series behind the scalars, and a table of units × features — so
 a feature a later test adds appears without new column code. The references
 are measured operating points, not the verdict; the verdict rule is what
-the remaining tests decide.
+the remaining tests decide. Since 2026-10-07 the bank also carries, per
+feature, its **role** in the verdict and the one-line answers to *what it
+separates* and *what it does not* (`classifier.FEATURE_NOTES`), the verdict
+step by step with its evidence (`classifier.DECISION`) and the table above
+(`classifier.STEPS`); the tab prints all three under the units table, and
+its strip is reduced to the rows that decide — verdict, rule B, the two
+scores, and rule B's two inputs.
 
 Units throughout: a one-minute capture is one unit; a longer capture is cut
 into 60 s windows. Truth per unit from the camera sidecar: occupied when
