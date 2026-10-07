@@ -765,6 +765,28 @@ keeps 91 % of people; combined with `P(occupied)` it passes none and keeps
 86 %. The people either gate loses are the seated movers (0.66–0.74) and
 walkers (0.83), whose motion is repetitive too.
 
+### A third robot session, 10-07 (33 units, robot only, two runs)
+
+Scored through the live tab the next day. Rule B called **1 of 33 present**
+— the robot's lag-2 step sat at 1.2–1.9 × its own one-frame jitter in both
+runs (14:26–14:39: step 0.043–0.052 over a jitter of 0.035–0.041;
+15:36–16:03: 0.021–0.028 over 0.014–0.016), under the 2 × threshold — and
+that one unit (`153722`) was present by a 20 s breathing run of exactly 5 s
+and passed the gate: **robot called human 1 / 33 (3 %)**, the other 32
+*empty*. Two things to record. First, the machine signature of 10-05/06
+(λ₁ share 0.30–0.38, delay spread 12–13) was **absent**: λ₁ 0.55–0.73,
+spread 26–69, a person's or an empty room's structure. The structure
+features describe whatever dominates the change, and on 10-07 that was not
+the robot — either the link was in a noisier state (the first run's
+jitter, 0.04, is the 09-15 level) or the robot moved faster and raised the
+one-frame step along with the two-second one. Without a robot-free unit
+from the same hour the two cannot be told apart. Second, `P(human | moving)`
+read 0.5–1.0 on all 33 units, and the tab drew its strip row filled — on
+units that were not present at all. It is conditional on moving and was
+never meant to be read there; from this commit it is blank unless rule B
+says present. The requirement holds either way: the robot was not called
+human, except through a breathing line a 5 s run let through.
+
 ### Verdict
 
 - *Can the bank keep the robot out of the human label?* **Yes:** rule B,

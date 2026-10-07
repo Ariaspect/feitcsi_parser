@@ -342,8 +342,9 @@ FEATURES: list[dict[str, Any]] = [
         "description": "Three-input logistic -- breathing peak, λ₁ share, delay spread -- fit on the 40 "
                        "robot units against 373 people units called present by rule B. Held out by robot "
                        "session: AUC 0.995, robot called human 3 %, people kept 94 % (walkers 83 %). "
-                       "Meaningful only for a unit that is present by motion; weak evidence until other "
-                       "movers are recorded.",
+                       "Conditional on moving: shown only where rule B says present (blank otherwise -- an "
+                       "empty room has no machine signature either, so unconditioned it would read "
+                       "'human' for nothing). Weak evidence until other movers are recorded.",
     },
     {
         "key": "verdict3", "label": "verdict (3-way)", "test": "6", "status": "candidate verdict",
@@ -734,7 +735,11 @@ def compute_features(
         lam_ok = np.isfinite(u["lam_share_median"]) and np.isfinite(u["delay_spread"])
         u["machine_like"] = (1 if (lam_ok and u["lam_share_median"] < MACHINE_LAM_MAX
                                    and u["delay_spread"] < MACHINE_SPREAD_MAX) else 0) if lam_ok else None
-        u["p_human"] = human_probability(u)
+        # P(human | moving) is conditional on moving: it reads a mover's
+        # breathing, rank and variety, and an empty room has none of the
+        # machine's signature either, so on a unit rule B does not call present
+        # it would read "human" for nothing. Defined only where rule B is 1.
+        u["p_human"] = human_probability(u) if u["rule_b"] else float("nan")
         # The human gate is P(human | moving), the user's choice of 2026-10-06:
         # a robot need not be told from an empty room, it must not be called
         # human. 3 % of robot units pass it held out by session, 91 % of

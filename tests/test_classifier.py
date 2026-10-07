@@ -226,6 +226,9 @@ def test_the_test6_columns_are_well_formed(tmp_path: Path) -> None:
         assert u["delay_spread"] != u["delay_spread"] or u["delay_spread"] >= 0.0
         if not u["rule_b"]:
             assert u["verdict3"] == 0
+            assert u["p_human"] != u["p_human"]          # conditional on moving: blank when not present
+        else:
+            assert 0.0 <= u["p_human"] <= 1.0
     # the breathing unit is confirmed human by P(occupied), so the three-way verdict says so
     assert units[1]["verdict3"] == 2
 
