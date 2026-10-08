@@ -74,7 +74,6 @@ from typing import Any
 from collections.abc import Sequence
 
 import numpy as np
-from scipy.signal import butter, filtfilt
 
 # The per-subcarrier signal the detector runs on. "complex" is the default and
 # the one to trust: amplitude and phase have *complementary* Fresnel blind
@@ -619,6 +618,11 @@ def bandpass(sig: np.ndarray, fs: float, band: tuple[float, float]) -> np.ndarra
     hi = min(float(band[1]), 0.95 * nyq)
     if hi <= lo:
         return sig
+
+    # Imported here rather than at the top: nothing else in this module needs
+    # scipy, and the board calculator (backend.hybrid2_calc) imports this
+    # module for its numpy-only helpers on an interpreter without scipy.
+    from scipy.signal import butter, filtfilt
 
     b, a = butter(2, [lo / nyq, hi / nyq], btype="band")
     padlen = 3 * max(len(a), len(b))

@@ -14,7 +14,10 @@ from pathlib import Path
 
 import numpy as np
 
-from CSIKit.reader import FeitCSIBeamformReader
+# CSIKit is imported where a FeitCSI file is actually walked, not here: an
+# MTK capture never needs it, and mtk.py imports this module, so a top-level
+# import would make every MTK reader -- the board's included -- carry CSIKit
+# and the plotting stack it installs with.
 
 HEADER_BYTES = 272
 
@@ -277,6 +280,8 @@ class FrameIndex:
         self._scan_end = count * stride
 
     def _scan_sequential(self, size: int) -> None:
+        from CSIKit.reader import FeitCSIBeamformReader
+
         reader = FeitCSIBeamformReader()
         offsets: list[int] = []
         ftm_list: list[int] = []
@@ -476,6 +481,8 @@ class FrameIndex:
 
         if size <= last_end:
             return 0
+
+        from CSIKit.reader import FeitCSIBeamformReader
 
         reader = FeitCSIBeamformReader()
         offsets: list[int] = []
