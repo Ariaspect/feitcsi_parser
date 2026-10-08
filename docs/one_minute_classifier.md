@@ -33,7 +33,7 @@ sections below carry the numbers.
 | 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
 | 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
 | 5 | cross-subcarrier structure: correlation, λ₁ share, eigenvector drift, delay concentration of the change | **nothing new for presence** — where structure separates (clean link, movers), step/ψ̂/breathing already do; eigenvector drift separates *movers* from the noisy link (0.80) and becomes P(occupied)'s 7th input; the robot's change is low-rank and repeatable (λ₁ 0.41, delay spread 12.7) where no person's is | **a still sitter from the noisy empty room** (AUC ≤ 0.63 on every structure feature; breathing 0.99) — the noisy state has a sitter's structure |
-| 6 (partial) | breathing peak + λ₁ share + delay spread → P(human \| moving), gating rule B's "present" | **the robot from a human** — the only thing required of it: 3 % of robot units called human held out by session (0 % with P(occupied) as a second condition), 91 % (86 %) of people kept; what a robot lacks is breathing, rank and variety | a fan, a curtain, any mover not yet recorded (plan pending); seated movers and walkers are the people it loses (their motion repeats too); P(occupied) alone is not a robot gate (23 % pass) |
+| 6 (partial) | breathing peak + λ₁ share + delay spread → P(human \| moving), gating rule B's "present" | **the robot from a human** — the only thing required of it: 3 % of robot units called human held out by session (0 % with P(occupied) as a second condition), 91 % (86 %) of people kept; what a robot lacks is breathing, rank and variety | **the oscillating fan from a human — 5 of 5 called human** (high-rank, wandering, the robot's opposite); its tell is periodicity: a 6.1 rpm fundamental with a harmonic comb to 0.40 Hz, which the bank does not yet measure; seated movers and walkers it loses; P(occupied) alone is not a robot gate |
 | 7 | the link floor kept online: smallest one-frame jitter of the last 6 h (≥ 3 units), else the fixed 0.035 | **today's link from yesterday's** — matches an oracle that knows each day's true jitter (0.898 vs 0.896; fixed rule 0.877), learns a new noisy link within 5–10 empty units, needs no camera and no shift trigger | the camera-empty windows with a person near the link (0.45–0.68 even for the oracle); the first five empties after a clean → noisy change (0.40) |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
@@ -786,6 +786,53 @@ units that were not present at all. It is conditional on moving and was
 never meant to be read there; from this commit it is blank unless rule B
 says present. The requirement holds either way: the robot was not called
 human, except through a breathing line a 5 s run let through.
+
+### The oscillating fan, 10-08 20:33–20:37 (5 units, no person)
+
+The first non-robot mover. **The bank calls all five human**: rule B present
+by motion (step P90 0.163–0.170, 5.2 × the jitter), no breathing run (0–2 s;
+peak 0.24–0.27, just under 0.25), and the human gate passes them at
+0.96–1.00 — because a sweeping fan has the *opposite* structure to the
+robot: λ₁ share 0.51–0.64 (a person's), delay spread 67–97 (a person's and
+more). The gate was built on one machine's signature and this machine has
+another. What the fan does have, and no person does, is **periodicity with
+a harmonic comb**:
+
+| | fan (5 units) | robot 10-06 | still sitters | seated movement | walking | empties |
+|---|---|---|---|---|---|---|
+| FarSense opened to 4–60 rpm, 30 s windows: rate / peak / run ≥ 0.25 | **6.1 rpm / 0.39–0.43 / 14–26 s** | 7.2 / 0.12 / 0 | 4.2–18.3 / 0.62–0.65 / 3–30 | 18.6 / 0.39 / 2 | 4.8 / 0.28 / 3 | 5.2–5.3 / 0.12–0.20 / 0 |
+| step-series spectrum: strongest line, prominence over the local median | **0.403–0.405 Hz, 17–40** | 0.05 Hz, 3.2 | 0.02 Hz 1.8; one sitter 0.62 Hz 32 | 0.02 Hz, 3.3 | 0.03 Hz, 1.4 | 1.6 Hz 10.8; 0.02 Hz 1.9 |
+| step-series autocorrelation: first peak lag / height | **2.3–2.5 s / 0.20–0.32** | 0.6 s / 0.67 | 1.9–2.8 s / 0.01 | 0.7 s / 0.61 | 0.9 s / 0.20 | 0.8 s / 0.09–0.41 |
+| level spectrum lines | 0.10 / 0.20 / 0.30 Hz — a comb on 0.10 Hz | 0.11 Hz | — | — | 0.23 Hz | — |
+
+The fan's sweep takes 9.8 s (0.102 Hz = 6.1 rpm); its motion is strongest
+twice a sweep, so the step series rings at the harmonics — 0.20, 0.30 and,
+loudest, 0.40 Hz, the same to 0.5 % across all five minutes — and the
+breathing channel, confined to 10–30 rpm, read the third harmonic (18.3–
+18.5 rpm) at a peak just under its threshold. That is H2 of the plan,
+confirmed: a slow mechanical oscillation reaches the breathing band through
+its harmonics. Opened to 4 rpm the FarSense sweep finds the fundamental
+directly and holds it for 14–26 s, which no empty room or walker does; the
+one person with a line as strong (the 10-02 20:00 sitter, 0.62 Hz, 32) is a
+breather at 18.3 rpm whose second harmonic the step series emphasises — a
+*human* rate with a *small* motion (step 0.02), where the fan is a sub-human
+rate with a large one (0.16).
+
+The twenty captures before it (20:08–20:28, likely the fan fixed — to be
+confirmed) read step 0.036 at 1.2–1.3 × a jitter of 0.03 (twice the clean
+link's), λ₁ share **0.82–0.85** — the most one-dimensional fluctuation in
+the corpus — and rule B present on 1 of 20 (a 5 s breathing run); no line
+in the step spectrum beyond the 1.3–1.7 Hz the clean empty of 10-02 also
+has.
+
+**What this changes.** Non-human is not one signature: the robot is
+low-rank and repeats its *pattern*; the fan is high-rank and repeats its
+*timing*. The human gate needs a periodicity input — the wide-band
+fundamental rate, the step-series line prominence and its steadiness across
+windows — before it can be trusted on anything but the robot, and the
+breathing floor at 11 rpm needs a harmonic check beside it. Five units from
+one fan; the fixed-fan and oscillating-fan-with-person captures of the plan
+are still the measurement.
 
 ### Verdict
 
