@@ -1,0 +1,952 @@
+"""The one-minute capture classifier: a feature bank per unit of a range.
+
+The application verdict is **one call per one-minute capture**
+(``docs/one_minute_classifier.md``). A one-minute capture is almost always a
+single state, which rules out every within-capture self-calibration, so the
+classifier has to be built from features whose empty-room level either does
+not depend on the link state or can be normalised by something that does not
+depend on occupancy. Seven tests were agreed to find those features; this
+module is where the ones that survive accumulate, computed on one decode so
+the tab can show them side by side and the classifier of test 4 is fitted on
+the same numbers the tab draws.
+
+A range is cut into *units* (one-minute captures are one unit; a longer range
+is divided into equal units nearest the requested length). Every feature is a
+scalar per unit, listed in ``FEATURES`` with its origin and, where one has
+been measured, a reference operating point. The per-window and per-second
+series behind the scalars are returned too, so a reader can see *why* a unit
+scored what it did.
+
+**What is in the bank so far.**
+
+*The range rule's input* -- the lag-2 s ratio-complex frame step, per-second
+median, P90 over the unit (``hybrid2.range_verdict``). Sharp on its own link
+(AUC 0.996, still sitter against empty) and at chance across the 09-16/17
+link-state shift, because its empty floor moves 10x with the link.
+
+*Test 1 -- WiDetect's statistic* (Zhang et al., IMWUT 2019): per T-frame
+window, per subcarrier, the lag-1 sample autocorrelation of the linearly
+detrended ratio level, averaged over subcarriers (``acf_windows``). Receiver
+noise, clean or ten times noisier, is white at the frame rate and lands this
+at the same place -- measured on 1,043 units over 14 days the empty floor is
+-0.009 on the clean 09-30 link and +0.022 / +0.008 on the noisy 09-16/17
+one, inside one null width, where the step reads 0.011 against 0.105 /
+0.123. What moves it is slow coherent variation in 0.1-2 Hz: a sitter's
+micro-motion and breathing, a robot, and whatever moved near the link on the
+camera-empty mornings of 09-30. Two things the paper promised do not hold
+here: the subcarriers of the ratio move together (F_eff ~ 2, not 244), so
+the null is 0.08 wide rather than 0.007, and its tails are heavy -- the
+closed-form threshold is not usable and the reference below is an
+empirical operating point (90 % specificity on the current link's empties,
+96 % on 09-16/17, 56 % recall of still sitters). A feature, not a
+replacement: it buys a floor that transfers across link states at the price
+of same-link sensitivity.
+
+*Test 2 -- the link's own jitter.* The hypothesis was that the across-
+subcarrier roughness of one frame would read the receiver's noise and not the
+room. It does not read the room (occupied / empty 0.9-1.3x) but it does not
+read the link either: 0.012-0.023 on every day while the step floor spans
+10x. The noisy link is not per-subcarrier estimation noise; it is a frame-to-
+frame change that is smooth across frequency, mostly frequency-selective, and
+only partly a transmit-delay switch (09-17: 44 % of frames jump > 3 ns, but
+pairs in the same state still read 0.090 against 0.110; 09-16 never jumps).
+What does read the link is the **step at one frame of lag**: its 20th
+percentile tracks the empty lag-2 s floor 1:1 across every day (ratio
+1.1-1.9) and a still sitter, a phone user or the robot leave it at 0.97x,
+1.07x, 1.02x of the empties -- continuous movement inflates it, so the
+operational floor is its minimum over a trailing window of units, which came
+within 0.9-1.06x of the true empty floor on 10 of 13 days with no knowledge of
+occupancy. A threshold relative to that floor recovers cross-link
+specificity (09-16/17: 0 % -> 100 %) and loses the still sitter there
+(recall 0.14-0.40), because on that link the sitter's slow signal is smaller
+than the link's own jitter. ``lag1_p20`` and ``step_norm`` are in the bank;
+the mechanism behind the noisy state is still unknown.
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from pathlib import Path
+from threading import Lock
+from typing import Any
+
+import numpy as np
+
+from backend import hybrid, hybrid2
+
+# One unit per one-minute capture.
+UNIT_SECONDS = 60.0
+
+# T for the autocorrelation window. ~2 s at 42 Hz; WiDetect's T = 60 at 30 Hz
+# is also 2 s. Fixed in frames, not seconds, because the null distribution is
+# a function of the sample count.
+ACF_WINDOW_FRAMES = 84
+
+# The step is read at the range rule's lag, so the P90 here is the P90 there.
+STEP_LAG_SECONDS = hybrid2.RANGE_LAG_SECONDS
+
+# Reference operating points, drawn as guides. Measured, not chosen: test 1's
+# threshold at 90 % specificity on the current link's clean empties (301
+# units, 09-29 .. 10-02), which held 96 % on the 09-16/17 link.
+ACF_AMP_P90W_REFERENCE = 0.20
+ACF_PHASE_P90W_REFERENCE = 0.22
+STEP_P90_REFERENCE = hybrid2.RANGE_MOTION_P90
+# Test 2: the step as a multiple of the link's own one-frame jitter. Empty
+# units sit at 1.1-1.9 on every link state measured; 2.0 is where 09-16/17
+# specificity reaches 100 % (and still-sitter recall there falls to 0.14-0.40).
+STEP_NORM_REFERENCE = 2.0
+# Test 3: breathing. The range rule's run, and the 20 s-window variant.
+BREATH_PEAK = hybrid2.RANGE_BREATH_PEAK
+BREATH_RUN_REFERENCE = hybrid2.RANGE_BREATH_RUN
+BREATH_WINDOW_LONG_SECONDS = 20.0
+BREATH_RATE_FLOOR_RPM = 11.0
+# Test 6, the fan: the structure function's dip (see revisit_statistic).
+REVISIT_TAUS = np.arange(0.5, 30.01, 0.5)   # lags of the structure function, s
+REVISIT_MIN_TAU = 4.0                        # dips at shorter lags are gait and fidget, not a cycle
+REVISIT_REFERENCE = 0.45                     # fan min 0.46, people max 0.40 on 80 vs 391 units
+
+# Test 4: a six-feature logistic regression on dimensionless inputs only, fit
+# on the 929 non-robot units of 09-04 .. 10-05 (class-balanced, C = 1). The
+# own-floor form -- every input is computable from one unit -- so the tab can
+# score a unit on its own; its held-out balanced accuracy is 0.917 by day and
+# 0.918 by link state, the same as the hand rule and as the trailing-floor
+# form (0.925 / 0.915). Standardise with LR_MEAN / LR_SCALE, dot with LR_COEF.
+LR_FEATURES = ("log_step_norm_own", "acf_phase_p90", "acf_amp_median",
+               "breath_run20", "breath_peak10", "breath_run", "ev_drift_p90")
+LR_MEAN = (0.722792, 0.263424, 0.136982, 5.510497, 0.317754, 4.485083, 0.378312)
+LR_SCALE = (0.832182, 0.29003, 0.21645, 10.793192, 0.112859, 8.754102, 0.331219)
+LR_COEF = (0.927663, 1.260349, -0.381335, 1.869359, 2.057399, 0.807373, 0.878329)
+LR_INTERCEPT = -0.029666
+# Test 5 added the seventh input, the pattern drift: held out by link state
+# 0.917 balanced (six features: 0.918) with the noisy fold's recall 0.72 ->
+# 0.80, seated movement 0.60 -> 0.74, and the robot called occupied 0.50 ->
+# 0.17; by day 0.916 -> 0.922. Fit on 905 non-robot units with all inputs.
+P_OCCUPIED_REFERENCE = 0.5
+# The hand rule of tests 2-3, as a candidate verdict: the step over a floor
+# that is the smaller of 2x the link jitter and 0.035, or a 20 s breathing run.
+RULE_FLOOR_MULTIPLE = 2.0
+
+
+# Test 6: is the mover a machine? Measured on 40 robot-vacuum units from one
+# device in one room against 373 units of people called present by rule B --
+# weak evidence until other movers are recorded (docs/plans/
+# nonhuman_motion_plan.pdf). A fixed pair of thresholds, chosen on the 10-06
+# session and tested on 10-05 (robot machine-like 0.80; people 0.03-0.36 by
+# class, phone users and walkers most), and a three-input logistic that holds
+# out by robot session at AUC 0.995 (robot called human 3 %, people kept 94 %).
+MACHINE_LAM_MAX = 0.5
+MACHINE_SPREAD_MAX = 18.0
+HUMAN_FEATURES = ("breath_peak10", "lam_share_median", "delay_spread")
+HUMAN_MEAN = (0.398829, 0.578781, 40.938499)
+HUMAN_SCALE = (0.103143, 0.161842, 39.289416)
+HUMAN_COEF = (3.496855, 2.33978, 3.62858)
+HUMAN_INTERCEPT = 6.539183
+P_HUMAN_REFERENCE = 0.5
+
+
+# Test 7: how a running system keeps the link floor. Replayed over every unit
+# in time order (945 units, 13 days): the smallest link jitter among the
+# units of the last LINK_FLOOR_HOURS, at least LINK_FLOOR_MIN_UNITS of them,
+# else no floor and the threshold falls back to STEP_P90_REFERENCE. Scores
+# balanced 0.898 (spec 0.87 / human recall 0.93) against 0.877 for the fixed
+# rule and 0.896 for an oracle that knows each day's true empty jitter; a new
+# noisy link is learned within 5-10 empty units. A count-only window carries
+# a stale floor across the night (0.881); a camera-confirmed refresh is no
+# better than this (0.895); a "shift" trigger that cuts the window when
+# three units read 3x the floor costs recall on occupied stretches (09-21
+# 0.90 -> 0.76) and is not used.
+LINK_FLOOR_HOURS = 6.0
+LINK_FLOOR_MIN_UNITS = 3
+LINK_FLOOR_MAX_UNITS = 20
+
+
+def trailing_floor(jitters: np.ndarray, times: np.ndarray, now: float) -> float | None:
+    """The link floor a running system would hold at ``now``: the minimum
+    ``lag1_p20`` over the last LINK_FLOOR_MAX_UNITS units that ended within
+    LINK_FLOOR_HOURS before ``now`` (strictly before it), or None when fewer
+    than LINK_FLOOR_MIN_UNITS did -- then the caller uses the absolute
+    threshold. Occupancy can only raise the jitter, so the minimum reads the
+    link through whoever was in the room."""
+    j = np.asarray(jitters, dtype=float); t = np.asarray(times, dtype=float)
+    ok = np.isfinite(j) & (j > 0) & (t < now) & (now - t <= 3600.0 * LINK_FLOOR_HOURS)
+    recent = j[ok][-LINK_FLOOR_MAX_UNITS:]
+    return float(recent.min()) if recent.size >= LINK_FLOOR_MIN_UNITS else None
+
+
+def human_probability(unit: dict[str, Any]) -> float:
+    """P(human | moving) from the test-6 logistic; NaN if an input is."""
+    x = []
+    for key in HUMAN_FEATURES:
+        v = unit.get(key)
+        if v is None or not np.isfinite(v):
+            return float("nan")
+        x.append(float(v))
+    z = HUMAN_INTERCEPT + sum(c * (xi - m) / s for xi, m, s, c in zip(x, HUMAN_MEAN, HUMAN_SCALE, HUMAN_COEF))
+    return float(1.0 / (1.0 + np.exp(-z)))
+
+
+def lr_probability(unit: dict[str, Any]) -> float:
+    """P(occupied) from the test-4 logistic regression; NaN if an input is."""
+    x = []
+    for key in LR_FEATURES:
+        v = unit.get(key)
+        if v is None or not np.isfinite(v):
+            return float("nan")
+        x.append(float(v))
+    z = LR_INTERCEPT + sum(c * (xi - m) / s for xi, m, s, c in zip(x, LR_MEAN, LR_SCALE, LR_COEF))
+    return float(1.0 / (1.0 + np.exp(-z)))
+
+# The bank. ``key`` is the unit field; ``test`` says where the feature came
+# from; ``status`` is "in rule" for the inputs of the current range rule and
+# "candidate" for everything the programme has produced since; ``reference``
+# is the guide value or None; ``axis`` is the y range a chart of it should
+# use. Future tests append here and set the matching unit field in
+# ``compute_features`` -- the tab renders this list, so a new feature needs
+# no new column code.
+FEATURES: list[dict[str, Any]] = [
+    {
+        "key": "step_p90", "label": "step P90", "test": "range rule", "status": "in rule",
+        "reference": STEP_P90_REFERENCE, "axis": [0.0, 0.3], "decimals": 4,
+        "description": "90th percentile over the unit of the per-second median of the lag-2 s "
+                       "ratio-complex frame step. The motion half of the range rule.",
+    },
+    {
+        "key": "step_p50", "label": "step P50", "test": "range rule", "status": "context",
+        "reference": None, "axis": [0.0, 0.3], "decimals": 4,
+        "description": "Median over the unit of the same per-second step; the unit's typical level.",
+    },
+    {
+        "key": "acf_amp_median", "label": "ψ̂ amp · med", "test": "1", "status": "candidate",
+        "reference": None, "axis": [-0.2, 1.0], "decimals": 3,
+        "description": "Median over the unit's 2 s windows of the lag-1 autocorrelation of the "
+                       "detrended ratio amplitude, averaged over subcarriers.",
+    },
+    {
+        "key": "acf_amp_p90", "label": "ψ̂ amp · P90w", "test": "1", "status": "candidate",
+        "reference": ACF_AMP_P90W_REFERENCE, "axis": [-0.2, 1.0], "decimals": 3,
+        "description": "90th percentile over the unit's windows of the same statistic. The "
+                       "aggregate that caught intermittent motion; reference 0.20 is 90 % "
+                       "specificity on the current link, 96 % on 09-16/17.",
+    },
+    {
+        "key": "acf_phase_median", "label": "ψ̂ phase · med", "test": "1", "status": "candidate",
+        "reference": None, "axis": [-0.2, 1.0], "decimals": 3,
+        "description": "As ψ̂ amp · med, on the unwrapped ratio phase.",
+    },
+    {
+        "key": "acf_phase_p90", "label": "ψ̂ phase · P90w", "test": "1", "status": "candidate",
+        "reference": ACF_PHASE_P90W_REFERENCE, "axis": [-0.2, 1.0], "decimals": 3,
+        "description": "As ψ̂ amp · P90w, on the unwrapped ratio phase. Marginally better than the "
+                       "amplitude for seated movement against the noisy link (AUC 0.90 vs 0.85).",
+    },
+    {
+        "key": "lag1_p20", "label": "link jitter", "test": "2", "status": "candidate",
+        "reference": None, "axis": [0.0, 0.15], "decimals": 4,
+        "description": "20th percentile over the unit of the per-second median frame step at ONE frame "
+                       "of lag: the link's own frame-to-frame jitter. Tracks the empty lag-2 s floor 1:1 "
+                       "across every link state (lag-2 P90 / this = 1.1-1.9 on 13 days whose floors span "
+                       "10x) and a still sitter, a phone user or the robot leave it alone (0.97x, 1.07x, "
+                       "1.02x of the same day's empties); continuous movement does inflate it (seated "
+                       "fidgeting 7.5x), so the operational floor is the MINIMUM of this over a trailing "
+                       "window of units, which occupancy can only push up.",
+    },
+    {
+        "key": "step_norm", "label": "step / jitter", "test": "2", "status": "candidate",
+        "reference": STEP_NORM_REFERENCE, "axis": [0.0, 10.0], "decimals": 2,
+        "description": "step P90 divided by this unit's own link jitter. Empty units read 1.1-1.9 "
+                       "(p90 2.5) on every link state; a still sitter 3.0 median but 1.3 at p10, and on "
+                       "the noisy 09-16/17 link at the floor -- a relative threshold recovers cross-link "
+                       "specificity (0 % -> 100 % at 2x) and loses the still sitter there (recall 0.14-0.40). "
+                       "A continuously moving person inflates the denominator too, so read it with the "
+                       "jitter column.",
+    },
+    {
+        "key": "breath_run", "label": "breath run 10 s", "test": "range rule", "status": "in rule",
+        "reference": BREATH_RUN_REFERENCE, "axis": [0.0, 60.0], "decimals": 0,
+        "description": "Longest run of consecutive seconds whose 10 s FarSense window has a normalised "
+                       "autocorrelation peak >= 0.25 -- the breathing half of the range rule (run >= 5). "
+                       "Finds 85 % of still sitters, on the noisy 09-15/16/17 link as well as the clean "
+                       "one, with 0 % false alarms on the current link's empties.",
+    },
+    {
+        "key": "breath_run20", "label": "breath run 20 s", "test": "3", "status": "candidate",
+        "reference": BREATH_RUN_REFERENCE, "axis": [0.0, 60.0], "decimals": 0,
+        "description": "The same run with 20 s FarSense windows and a rate floor at 11 rpm (DeMan's "
+                       "longer-window finding; the floor steps over the 7.5-10.9 rpm artefact of empty "
+                       "rooms). Still sitters 85 % -> 94 % (noisy link 96 %) for 0 -> 1 % false alarms "
+                       "on the current link's empties.",
+    },
+    {
+        "key": "breath_rpm", "label": "breath rpm", "test": "3", "status": "context",
+        "reference": None, "axis": [0.0, 40.0], "decimals": 1,
+        "description": "Median FarSense rate over the seconds in the 20 s run, rpm. Empty-room artefacts "
+                       "cluster at 8-11 rpm; sitters at 14-22.",
+    },
+    {
+        "key": "ev_drift_p90", "label": "pattern drift", "test": "5", "status": "candidate",
+        "reference": None, "axis": [0.0, 1.0], "decimals": 3,
+        "description": "P90 over 2 s windows of 1 - |<v1(w-1), v1(w)>|: how much the leading pattern "
+                       "of the fluctuation across subcarriers changes from one window to the next "
+                       "(R-TTWD's idea). Does not tell a still sitter from the noisy link (AUC 0.52) "
+                       "but separates moving people from it (seated movement 0.79) and, added to the "
+                       "test-4 logistic, lifts the held-out noisy fold's recall 0.63 -> 0.76 at the "
+                       "same specificity.",
+    },
+    {
+        "key": "lam_share_median", "label": "λ₁ share", "test": "5", "status": "context",
+        "reference": None, "axis": [0.0, 1.0], "decimals": 3,
+        "description": "Median over 2 s windows of the leading-eigenvalue share of the subcarrier "
+                       "covariance: how one-dimensional the fluctuation is across subcarriers. A sitter "
+                       "and the noisy link read the same (0.63-0.71); the robot reads lower (0.41 "
+                       "[0.29, 0.48]) -- a lead for test 6, not a presence feature.",
+    },
+    {
+        "key": "breath_peak10", "label": "breath peak 10 s", "test": "3", "status": "context",
+        "reference": BREATH_PEAK, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Highest 10 s FarSense peak in the unit. The logistic regression's strongest "
+                       "input (standardised coefficient +1.99).",
+    },
+    {
+        "key": "p_occupied", "label": "P(occupied)", "test": "4", "status": "candidate",
+        "reference": P_OCCUPIED_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Seven-feature logistic regression on dimensionless inputs only (step over own "
+                       "jitter, ψ̂ phase P90, ψ̂ amp median, breathing runs and peak, pattern drift), fit "
+                       "on 905 units of 09-04..10-05. Held out by link state: specificity 0.91, recall "
+                       "0.92, balanced 0.917 -- the same as the hand rule, a learned alternative to it. "
+                       "Calls the robot occupied 17 % of the time (rules: 88-90 %) without ever seeing one.",
+    },
+    {
+        "key": "rule_b", "label": "rule B", "test": "4", "status": "candidate verdict",
+        "reference": 0.5, "axis": [0.0, 1.0], "decimals": 0,
+        "description": "The hand rule of tests 2-3: step P90 > max(2 x link floor, 0.035) OR a 20 s "
+                       "breathing run >= 5. The floor is the smallest link jitter of this unit and the "
+                       "units before it in the range (one unit: its own). Held out by link state: "
+                       "specificity 0.89, recall 0.96, balanced 0.922; on the noisy 09-16/17 link 0.85 / "
+                       "0.80 where the range rule reads 0.00 / 1.00.",
+    },
+    {
+        "key": "delay_spread", "label": "delay spread", "test": "6", "status": "candidate",
+        "reference": MACHINE_SPREAD_MAX, "axis": [0.0, 120.0], "decimals": 1,
+        "description": "Spread (std, bins) over the unit's frames of the dominant delay of the lag-2 s "
+                       "change across subcarriers. A machine repeats its change: the robot reads 12.7 "
+                       "[11.7, 15.1]; sitters 21-56, seated movement 36 -- but walking 10, so it is read "
+                       "with the breathing peak. Below the reference counts towards machine-like.",
+    },
+    {
+        "key": "revisit", "label": "revisit", "test": "6", "status": "candidate",
+        "reference": REVISIT_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Deepest fall of the frame step's structure function D(τ) below its running "
+                       "maximum, over lags 4-30 s: how far the channel comes back to an earlier state. "
+                       "A fan sweeping back to the same angle every cycle: 0.46-0.80 with the dip at "
+                       "19.5-20.5 s (80 units, 10-08/09); people at most 0.40, empties at most 0.51, the "
+                       "robot at most 0.11. AUC 1.000 fan against people; 0.45 flags 80/80 fan units and "
+                       "0/391 people. The peer session's C3, reproduced on this pipeline.",
+    },
+    {
+        "key": "revisit_tau", "label": "revisit lag (s)", "test": "6", "status": "context",
+        "reference": None, "axis": [0.0, 30.0], "decimals": 1,
+        "description": "Lag of that dip: the mover's cycle. The rotating fan: 19.5-20.5 s every time; "
+                       "a person's deepest dip lands anywhere from 5 to 30 s.",
+    },
+    {
+        "key": "machine_like", "label": "machine-like", "test": "6", "status": "candidate",
+        "reference": 0.5, "axis": [0.0, 1.0], "decimals": 0,
+        "description": "1 when λ₁ share < 0.5 AND delay spread < 18: a low-rank, repeated change. "
+                       "Thresholds chosen on the 10-06 robot session, tested on 10-05 (robot 0.80 "
+                       "machine-like; still sitters 0.12, seated movement 0.03, 1-min occupants 0.03, "
+                       "phone users 0.36, walkers 0.25). One device, one room, 40 units.",
+    },
+    {
+        "key": "p_human", "label": "P(human | moving)", "test": "6", "status": "candidate",
+        "reference": P_HUMAN_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Three-input logistic -- breathing peak, λ₁ share, delay spread -- fit on the 40 "
+                       "robot units against 373 people units called present by rule B. Held out by robot "
+                       "session: AUC 0.995, robot called human 3 %, people kept 94 % (walkers 83 %). "
+                       "Conditional on moving: shown only where rule B says present (blank otherwise -- an "
+                       "empty room has no machine signature either, so unconditioned it would read "
+                       "'human' for nothing). Weak evidence until other movers are recorded.",
+    },
+    {
+        "key": "verdict3", "label": "verdict (3-way)", "test": "6", "status": "candidate verdict",
+        "reference": 1.5, "axis": [0.0, 2.0], "decimals": 0,
+        "description": "0 empty (rule B says so), 2 human (rule B present AND P(human | moving) > 0.5), "
+                       "1 motion-unconfirmed (present by rule B, not passed as human). The requirement is "
+                       "that a robot is never called human, not that it is told from an empty room: this "
+                       "gate passes 1 robot unit in 40 held out by session and keeps 91 % of people "
+                       "(still 97 %, phone 93 %, 1-min 96 %, env2 97 %, walking 83 %, seated movement "
+                       "74 %); empties called human 9 %. The user's choice of 2026-10-06 over "
+                       "P(occupied) > 0.5 (23 % of one robot session) and the AND of both (0 % / 86 %).",
+    },
+    {
+        "key": "gain_crossings", "label": "gain steps", "test": "context", "status": "context",
+        "reference": None, "axis": None, "decimals": 0,
+        "description": "Receiver gain-state changes (rssi_1) inside the unit. The ratio divides the "
+                       "common gain out; this says how hard it had to.",
+    },
+    {
+        "key": "rssi_median", "label": "RSSI", "test": "context", "status": "context",
+        "reference": None, "axis": None, "decimals": 0,
+        "description": "Median reported rssi_1 over the unit, dBm. A link-state indicator, not a feature.",
+    },
+]
+
+_CACHE_SIZE = 4
+_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+_cache_lock = Lock()
+
+
+def reset_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+# --------------------------------------------------------------------------- #
+#  The statistic                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def acf_windows(
+    X: np.ndarray, times: np.ndarray, T: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """WiDetect's ψ̂ per T-frame block of ``X`` (frames × subcarriers).
+
+    Per block and subcarrier: subtract the least-squares line, take the lag-1
+    sample autocorrelation ``Σ r_t r_{t+1} / Σ r_t²``; ψ̂ is the mean over the
+    subcarriers that are finite throughout the block. A block that spans a
+    frame gap (any interval over twice the median) is NaN rather than a
+    statistic of two different stretches. Returns the block centres and ψ̂.
+
+    Under WiDetect's model ψ̂ is N(−1/T, 1/(F·T)) with no motion, whatever the
+    noise variance; on this link the F is effective, not nominal.
+    """
+    X = np.asarray(X, dtype=float)
+    times = np.asarray(times, dtype=float)
+    if X.ndim != 2 or X.shape[0] != times.shape[0]:
+        raise ValueError(f"X {X.shape} and times {times.shape} must share the frame axis")
+    T = int(T)
+    if T < 4:
+        raise ValueError(f"an autocorrelation window needs at least 4 frames, got {T}")
+    nb = X.shape[0] // T
+    if nb == 0:
+        return np.zeros(0), np.zeros(0)
+    blocks = X[: nb * T].reshape(nb, T, X.shape[1])
+    tb = times[: nb * T].reshape(nb, T)
+
+    t = np.arange(T, dtype=float)
+    A = np.stack([t, np.ones(T)], axis=1)
+    P = np.eye(T) - A @ np.linalg.pinv(A)              # residual projector
+    ok = np.isfinite(blocks).all(axis=1)                # (nb, F)
+    R = np.einsum("ij,bjk->bik", P, np.nan_to_num(blocks))
+    R = np.where(ok[:, None, :], R, 0.0)
+    num = (R[:, :-1, :] * R[:, 1:, :]).sum(axis=1)
+    den = (R * R).sum(axis=1)
+    valid = ok & (den > 0)
+    phi = np.where(valid, num / np.where(den > 0, den, 1.0), np.nan)
+    count = valid.sum(axis=1)
+    psi = np.full(nb, np.nan)
+    enough = count >= 4
+    if enough.any():
+        psi[enough] = np.nanmean(np.where(valid, phi, np.nan)[enough], axis=1)
+
+    dt = np.diff(times)
+    med = float(np.median(dt)) if dt.size else 0.0
+    if med > 0 and T > 1:
+        gaps = np.diff(tb, axis=1).max(axis=1) > 2.0 * med
+        psi[gaps] = np.nan
+    return tb.mean(axis=1), psi
+
+
+def coherence_windows(
+    r: np.ndarray, times: np.ndarray, T: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Test 5's two survivors, per T-frame block of the complex ratio.
+
+    Per block, after a linear detrend per subcarrier: the leading-eigenvalue
+    share of the subcarrier covariance (how one-dimensional the fluctuation
+    is across subcarriers), and the drift of its leading eigenvector from the
+    previous block, ``1 - |<v1(w-1), v1(w)>|`` (R-TTWD's idea -- a body
+    changes the pattern, a steady source keeps it). A block across a frame
+    gap is skipped and breaks the drift chain. Returns (lambda share, drift),
+    drift NaN where there was no previous block.
+    """
+    r = np.asarray(r); times = np.asarray(times, dtype=float)
+    n = r.shape[0]; nb = n // int(T)
+    lam = np.full(nb, np.nan); drift = np.full(nb, np.nan)
+    if nb == 0:
+        return lam, drift
+    dt = np.diff(times); med = float(np.median(dt)) if dt.size else 0.0
+    t = np.arange(T, dtype=float)
+    A = np.stack([t, np.ones(T)], axis=1)
+    P = np.eye(T) - A @ np.linalg.pinv(A)
+    v_prev = None
+    for b in range(nb):
+        seg = r[b * T:(b + 1) * T]; tb = times[b * T:(b + 1) * T]
+        ok = np.isfinite(seg).all(axis=0)
+        if (med > 0 and np.max(np.diff(tb)) > 2.0 * med) or ok.sum() < 8:
+            v_prev = None
+            continue
+        R = P @ seg[:, ok]
+        C = (R.conj().T @ R) / T
+        w, V = np.linalg.eigh(C)
+        lam[b] = float(w[-1] / max(float(w.sum()), 1e-30))
+        v1 = np.zeros(r.shape[1], dtype=complex); v1[ok] = V[:, -1]
+        if v_prev is not None:
+            drift[b] = float(1.0 - abs(np.vdot(v_prev, v1)))
+        v_prev = v1
+    return lam, drift
+
+
+def change_delay_spread(r: np.ndarray, times: np.ndarray, lag_seconds: float) -> float:
+    """Test 6: how repeatable the change's shape across subcarriers is.
+
+    Per frame, the lag change ``r_t - r_{t-L}`` (mean over subcarriers
+    removed) is transformed across subcarriers (4x zero-padded) and the
+    strongest bin -- the dominant delay of the change -- is kept; the result
+    is the standard deviation of that bin over the unit's frames, in bins. A
+    machine moves the same way every second (the robot: 12.7 [11.7, 15.1]);
+    a body does not (sitters 21-56, seated movement 36). Walking is the
+    exception people make (10), so this is read with the breathing peak.
+    """
+    r = np.asarray(r); times = np.asarray(times, dtype=float)
+    dt = np.diff(times)
+    if dt.size == 0:
+        return float("nan")
+    step = float(np.median(dt))
+    L = max(1, int(round(lag_seconds / step))) if step > 0 else 1
+    if r.shape[0] <= L:
+        return float("nan")
+    d = r[L:] - r[:-L]
+    ok = np.isfinite(d).all(axis=1)
+    d = d[ok]
+    if d.shape[0] < 4:
+        return float("nan")
+    d = d - d.mean(axis=1, keepdims=True)
+    NP = 4 * d.shape[1]
+    pk = np.abs(np.fft.fft(d, n=NP, axis=1)).argmax(axis=1).astype(float)
+    pk[pk > NP / 2] -= NP
+    return float(np.std(pk))
+
+
+def revisit_statistic(r: np.ndarray, times: np.ndarray) -> tuple[float, float]:
+    """Does the channel come back to where it was? The structure function of
+    the frame step, D(τ) = median over the unit of the per-frame step at lag τ
+    for τ = 0.5 … 30 s, rises as the channel wanders and *falls* again at the
+    lag where it revisits an earlier state -- a fan that sweeps back to the
+    same angle every cycle. ``revisit`` is the deepest such fall relative to
+    the running maximum, over lags of REVISIT_MIN_TAU or more; the second
+    value is its lag. Measured 2026-10-09 against lg_csi_experiments' C3: the
+    rotating fan 0.46-0.80 with the dip at 19.5-20.5 s (80 units), people at
+    most 0.40, empties at most 0.51, the robot at most 0.11 -- AUC 1.000 fan
+    against people. Returns (NaN, NaN) when the unit is too short."""
+    r = np.asarray(r); times = np.asarray(times, dtype=float)
+    dt = np.diff(times)
+    if dt.size < 10:
+        return float("nan"), float("nan")
+    step = float(np.median(dt))
+    n = r.shape[0]
+    D = np.full(REVISIT_TAUS.size, np.nan)
+    for i, tau in enumerate(REVISIT_TAUS):
+        L = int(round(tau / step))
+        if L < 1 or L >= n - 10:
+            continue
+        a, b = r[L:], r[:-L]
+        D[i] = float(np.nanmedian(np.nanmedian(np.abs(a - b) / (np.abs(a) + np.abs(b) + 1e-12), axis=1)))
+    ok = np.isfinite(D)
+    if ok.sum() < 10:
+        return float("nan"), float("nan")
+    runmax = np.maximum.accumulate(np.where(ok, D, -np.inf))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dip = np.where(ok & (runmax > 0), (runmax - D) / runmax, -1.0)
+    m = REVISIT_TAUS >= REVISIT_MIN_TAU
+    dip = np.where(m, dip, -1.0)
+    i = int(np.argmax(dip))
+    return (float(dip[i]), float(REVISIT_TAUS[i])) if dip[i] >= 0 else (float("nan"), float("nan"))
+
+
+def unit_edges(t0: float, t1: float, unit_seconds: float) -> np.ndarray:
+    """Equal units across the range, as many as fit nearest ``unit_seconds``.
+
+    A one-minute capture is one unit whatever its exact length; a five-minute
+    capture is five. Equal division rather than a fixed length with a
+    remainder, so every unit in a range is comparable to the others.
+    """
+    span = float(t1) - float(t0)
+    if span <= 0 or unit_seconds <= 0:
+        raise ValueError("the range and the unit length must be positive")
+    n = max(1, int(round(span / float(unit_seconds))))
+    return np.linspace(float(t0), float(t1), n + 1)
+
+
+# --------------------------------------------------------------------------- #
+#  Over a capture                                                             #
+# --------------------------------------------------------------------------- #
+
+
+def ratio_level(
+    path,
+    t0: float,
+    t1: float,
+    *,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> dict[str, Any]:
+    """The complex CSI ratio, per frame and subcarrier, on the uniform frame set.
+
+    The same selection as the frame step's (``framediff._uniform_selection``:
+    one transmitter, one MIMO mode, full width), so a feature here and the
+    step on the Hybrid 2 tab are read from the same frames. Cached; the decode
+    dominates and everything downstream is cheap.
+    """
+    from backend.framediff import _uniform_selection
+    from backend.presence import complex_ratio
+    from backend.tiles import _decode_for_doppler, get_index
+
+    path = Path(path)
+    st = path.stat()
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
+           mimo, source_mac, bool(interpolate))
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit
+
+    index = get_index(path)
+    times_all = np.asarray(index.times, dtype=float)
+    sel = _uniform_selection(index, mimo, source_mac)
+    in_range = (times_all >= t0) & (times_all <= t1)
+    ids = np.flatnonzero(sel["mask"] & in_range)
+    if ids.size < 2:
+        raise ValueError(
+            f"fewer than 2 frames in range once the set was made uniform ({sel['note']})"
+        )
+    amp_db = _decode_for_doppler(path, index, ids, "csi_ratio_amplitude", None, interpolate)
+    phase = _decode_for_doppler(path, index, ids, "csi_ratio_phase", None, interpolate)
+    ratio = complex_ratio(amp_db, phase)
+    # Subcarriers that are null in every frame (structural, with interpolation
+    # off) carry nothing; the ones that drop out now and then are handled per
+    # window by acf_windows.
+    ever = np.isfinite(ratio).any(axis=0)
+    rssi = np.asarray(getattr(index, "rssi_1", None))
+    gain = rssi[ids] if rssi.ndim == 1 and rssi.size > int(ids[-1]) else None
+
+    out = {
+        "time_s": times_all[ids],
+        "ratio": ratio[:, ever],
+        "n_subcarriers": int(ever.sum()),
+        "gain_state": gain,
+        "source_mac": sel["source_mac"],
+        "mimo": sel["mimo"],
+        "selection_note": sel["note"],
+        "frames_used": int(ids.size),
+        "frames_dropped": int((in_range & ~sel["mask"]).sum()),
+    }
+    with _cache_lock:
+        _cache[key] = out
+        while len(_cache) > _CACHE_SIZE:
+            _cache.popitem(last=False)
+    return out
+
+
+def _quantiles(values: np.ndarray) -> tuple[float, float, int]:
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    if not v.size:
+        return float("nan"), float("nan"), 0
+    return float(np.median(v)), float(np.percentile(v, 90)), int(v.size)
+
+
+def compute_features(
+    path,
+    t0: float,
+    t1: float,
+    *,
+    unit_seconds: float = UNIT_SECONDS,
+    acf_frames: int = ACF_WINDOW_FRAMES,
+    lag_seconds: float = STEP_LAG_SECONDS,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> dict[str, Any]:
+    """Every feature in the bank, per unit of the range, plus the series behind them.
+
+    Times are on the capture's clock. ``units`` carries one dict per unit
+    with a field per ``FEATURES`` key (NaN where the unit had nothing to
+    measure); ``acf`` the per-window ψ̂ series on amplitude and phase;
+    ``step`` the per-second lag step the range rule reads.
+    """
+    lvl = ratio_level(path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate)
+    times = lvl["time_s"]
+    ratio = lvl["ratio"]
+    dt = np.diff(times)
+    fs = 1.0 / float(np.median(dt)) if dt.size and np.median(dt) > 0 else float("nan")
+
+    amp = np.abs(ratio)
+    ang = np.angle(ratio)
+    missing = ~np.isfinite(ang)
+    phase = np.unwrap(np.where(missing, 0.0, ang), axis=0)
+    phase[missing] = np.nan
+
+    centres, psi_amp = acf_windows(amp, times, acf_frames)
+    _, psi_phase = acf_windows(phase, times, acf_frames)
+    lam_share, ev_drift = coherence_windows(ratio, times, acf_frames)
+
+    # The step the range rule reads, on whole seconds of the capture clock.
+    seconds = np.arange(np.floor(float(t0)), float(t1), 1.0)
+    level, steps = hybrid2.motion_per_second(
+        path, t0, t1, seconds, mimo=mimo, source_mac=source_mac,
+        interpolate=interpolate, gate_gain=False, lag_seconds=lag_seconds,
+    )
+    level = np.asarray(level, dtype=float)
+    # Test 2: the same step at one frame of lag -- the link's own jitter, which a
+    # still occupant does not move. Read on the same seconds.
+    jitter, _ = hybrid2.motion_per_second(
+        path, t0, t1, seconds, mimo=mimo, source_mac=source_mac,
+        interpolate=interpolate, gate_gain=False, lag_seconds=0.0,
+    )
+    jitter = np.asarray(jitter, dtype=float)
+
+    # Test 3: the breathing channel, through hybrid2 so the 10 s run is the
+    # range rule's own number; the 20 s run adds the rate floor.
+    breath: dict[float, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for W in (hybrid.BREATH_WINDOW_SECONDS, BREATH_WINDOW_LONG_SECONDS):
+        try:
+            h = hybrid2.compute_hybrid2(
+                path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+                lag_seconds=lag_seconds, breath_window_seconds=W,
+            )
+            breath[W] = (np.asarray(h["time_s"], float), np.asarray(h["breath_peak"], float),
+                         np.asarray(h["breath_rpm"], float))
+        except ValueError:
+            breath[W] = (np.zeros(0), np.zeros(0), np.zeros(0))
+
+    def _breath_run(W: float, a: float, b: float, floor_rpm: float | None) -> tuple[int, float, float]:
+        ts, pk, rpm = breath[W]
+        sel = (ts >= a) & (ts <= b)
+        q = np.isfinite(pk[sel]) & (pk[sel] >= BREATH_PEAK)
+        if floor_rpm is not None:
+            q &= rpm[sel] >= floor_rpm
+        run = hybrid2.longest_run(q)
+        med = float(np.nanmedian(rpm[sel][q])) if q.any() else float("nan")
+        peak = float(np.nanmax(pk[sel])) if np.isfinite(pk[sel]).any() else float("nan")
+        return int(run), med, peak
+
+    gain = lvl["gain_state"]
+    # Units span the frames, not the request: a range asked wider than the
+    # capture would otherwise put its last units over nothing and cut the
+    # capture's own minute short of its end.
+    lo, hi = max(float(t0), float(times[0])), min(float(t1), float(times[-1]))
+    edges = unit_edges(lo, hi, unit_seconds) if hi > lo else np.array([float(t0), float(t1)])
+    units: list[dict[str, Any]] = []
+    for i, (a, b) in enumerate(zip(edges[:-1], edges[1:])):
+        last = i == len(edges) - 2
+        wsel = (centres >= a) & ((centres <= b) if last else (centres < b))
+        ssel = (seconds + 0.5 >= a) & ((seconds + 0.5 <= b) if last else (seconds + 0.5 < b))
+        fsel = (times >= a) & ((times <= b) if last else (times < b))
+        a_med, a_p90, n_win = _quantiles(psi_amp[wsel])
+        p_med, p_p90, _ = _quantiles(psi_phase[wsel])
+        l_med, _, _ = _quantiles(lam_share[wsel])
+        _, d_p90, _ = _quantiles(ev_drift[wsel])
+        spread = change_delay_spread(ratio[fsel], times[fsel], lag_seconds)
+        revisit, revisit_tau = revisit_statistic(ratio[fsel], times[fsel])
+        s_med, s_p90, n_sec = _quantiles(level[ssel])
+        j = jitter[ssel]
+        j = j[np.isfinite(j)]
+        j_p20 = float(np.percentile(j, 20)) if j.size else float("nan")
+        g = gain[fsel] if gain is not None else None
+        units.append({
+            "t0": float(a), "t1": float(b),
+            "n_windows": n_win, "n_seconds": n_sec, "n_frames": int(fsel.sum()),
+            "step_p90": s_p90, "step_p50": s_med,
+            "lag1_p20": j_p20,
+            "step_norm": s_p90 / j_p20 if np.isfinite(j_p20) and j_p20 > 0 else float("nan"),
+            "breath_run": (br10 := _breath_run(hybrid.BREATH_WINDOW_SECONDS, a, b, None))[0],
+            "breath_peak10": br10[2],
+            "breath_run20": (br20 := _breath_run(BREATH_WINDOW_LONG_SECONDS, a, b, BREATH_RATE_FLOOR_RPM))[0],
+            "breath_rpm": br20[1],
+            "acf_amp_median": a_med, "acf_amp_p90": a_p90,
+            "acf_phase_median": p_med, "acf_phase_p90": p_p90,
+            "lam_share_median": l_med, "ev_drift_p90": d_p90, "delay_spread": spread,
+            "revisit": revisit, "revisit_tau": revisit_tau,
+            "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
+            "rssi_median": float(np.median(g)) if g is not None and g.size else None,
+        })
+
+    # Test 4: the learned score and the hand rule, from the fields above. The
+    # rule's floor is the smallest jitter seen so far in the range -- occupancy
+    # can only push the jitter up, so the minimum reads the link through it.
+    floor = float("inf")
+    for u in units:
+        if np.isfinite(u["lag1_p20"]) and u["lag1_p20"] > 0:
+            floor = min(floor, u["lag1_p20"])
+        u["log_step_norm_own"] = (float(np.log(u["step_norm"]))
+                                  if np.isfinite(u["step_norm"]) and u["step_norm"] > 0 else float("nan"))
+        u["p_occupied"] = lr_probability(u)
+        thr = max(RULE_FLOOR_MULTIPLE * floor, STEP_P90_REFERENCE) if np.isfinite(floor) else STEP_P90_REFERENCE
+        by_motion = np.isfinite(u["step_p90"]) and u["step_p90"] > thr
+        u["rule_b"] = 1 if (by_motion or u["breath_run20"] >= BREATH_RUN_REFERENCE) else 0
+        u["rule_b_floor"] = floor if np.isfinite(floor) else float("nan")
+        # Test 6: is the mover a machine? Two readings -- a fixed pair of
+        # thresholds, and a three-input logistic -- and a three-way verdict
+        # that passes a rule-B "present" as human only through the logistic.
+        lam_ok = np.isfinite(u["lam_share_median"]) and np.isfinite(u["delay_spread"])
+        u["machine_like"] = (1 if (lam_ok and u["lam_share_median"] < MACHINE_LAM_MAX
+                                   and u["delay_spread"] < MACHINE_SPREAD_MAX) else 0) if lam_ok else None
+        # P(human | moving) is conditional on moving: it reads a mover's
+        # breathing, rank and variety, and an empty room has none of the
+        # machine's signature either, so on a unit rule B does not call present
+        # it would read "human" for nothing. Defined only where rule B is 1.
+        u["p_human"] = human_probability(u) if u["rule_b"] else float("nan")
+        # The human gate is P(human | moving), the user's choice of 2026-10-06:
+        # a robot need not be told from an empty room, it must not be called
+        # human. 3 % of robot units pass it held out by session, 91 % of
+        # people; P(occupied) alone let 23 % of one robot session through.
+        if not u["rule_b"]:
+            u["verdict3"] = 0
+        else:
+            u["verdict3"] = 2 if (np.isfinite(u["p_human"]) and u["p_human"] > P_HUMAN_REFERENCE) else 1
+
+    return {
+        "acf": {
+            "time_s": centres, "amp": psi_amp, "phase": psi_phase,
+            "window_frames": int(acf_frames),
+            "window_seconds": float(acf_frames / fs) if np.isfinite(fs) else float("nan"),
+            "null_mean": -1.0 / float(acf_frames),
+        },
+        "step": {
+            "time_s": seconds + 0.5, "level": level,
+            "lag_seconds": float(lag_seconds), "lag_frames": int(steps.get("lag_frames", 1)),
+        },
+        "units": units,
+        "unit_seconds": float(edges[1] - edges[0]),
+        "fs_hz": fs,
+        "n_subcarriers": lvl["n_subcarriers"],
+        "frames_used": lvl["frames_used"],
+        "frames_dropped": lvl["frames_dropped"],
+        "selection_note": lvl["selection_note"],
+        "source_mac": lvl["source_mac"],
+        "mimo": lvl["mimo"],
+        "features": FEATURES,
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  What decides what, and what separates what -- served with the bank so the  #
+#  tab can say it                                                             #
+# --------------------------------------------------------------------------- #
+
+# Per feature: its role in the verdict, and the one-line answer each test gave
+# about what it separates and what it does not. Merged into FEATURES below.
+FEATURE_NOTES: dict[str, dict[str, str]] = {
+    "step_p90": {"role": "input of rule B (motion)",
+                 "separates": "a moving person from an empty room on the link it was set on (AUC 0.996)",
+                 "not_separates": "anything once the link changes -- its empty floor moves 10x between link states (09-16/17: 0 % specificity at 0.035)"},
+    "step_p50": {"role": "context", "separates": "the unit's typical level, for reading the P90 against", "not_separates": "--"},
+    "acf_amp_median": {"role": "input of P(occupied)",
+                       "separates": "slow coherent motion from receiver noise, with an empty floor that holds across link states",
+                       "not_separates": "a sitter whose signal is under the link's jitter from an empty room"},
+    "acf_amp_p90": {"role": "candidate (test 1)",
+                    "separates": "about half of still sitters from empties on any link at one threshold (90 % home specificity holds 96 % on the noisy link)",
+                    "not_separates": "out-of-view movers or the robot from a person; a sitter under the jitter"},
+    "acf_phase_median": {"role": "context", "separates": "as the amplitude form, on the ratio phase", "not_separates": "--"},
+    "acf_phase_p90": {"role": "input of P(occupied)",
+                      "separates": "seated movement from the noisy empty room better than the amplitude form (0.90 vs 0.85)",
+                      "not_separates": "a still sitter from the noisy empty room (0.63)"},
+    "lag1_p20": {"role": "the floor (via trailing_floor)",
+                 "separates": "a clean link from a noisy one, blind to a still person, a phone user and the robot (0.97x, 1.07x, 1.02x of empty)",
+                 "not_separates": "occupancy -- by design; continuous movement does raise it, which is why the floor is a trailing minimum"},
+    "step_norm": {"role": "rule B's motion half, as a ratio",
+                  "separates": "'moves more than the link wobbles' from empty on every link (empties 1.1-1.9, threshold 2)",
+                  "not_separates": "a still sitter on a noisy link from empty (1.3-1.5x); the robot from a person (2.3x)"},
+    "breath_run": {"role": "the range rule's breathing half",
+                   "separates": "a still person from an empty room on every link and in the far room (85 % / 75 %) at 0 false alarms on 307 current-link empties",
+                   "not_separates": "a fidgeting person (23 %); motion does that"},
+    "breath_run20": {"role": "input of rule B (breathing)",
+                     "separates": "the same, more of them: still sitters 94 %, noisy-link sitters 96 %, for 1 % false alarms",
+                     "not_separates": "a fidgeting person (34 %); a slow machine that puts a line in the band (one robot unit)"},
+    "breath_rpm": {"role": "context", "separates": "where the breathing line sits: artefacts 8-11 rpm, sitters 14-22", "not_separates": "--"},
+    "ev_drift_p90": {"role": "input of P(occupied)",
+                     "separates": "moving people from the noisy link (seated movement 0.80); lifts the noisy fold's recall 0.63 -> 0.76",
+                     "not_separates": "a still sitter from the noisy empty room (0.52)"},
+    "lam_share_median": {"role": "input of P(human | moving)",
+                         "separates": "the robot's low-rank fluctuation (0.41) from a sitter's (0.6-0.7)",
+                         "not_separates": "a sitter from the noisy link (same 0.63-0.71)"},
+    "breath_peak10": {"role": "input of P(occupied) and of P(human | moving)",
+                      "separates": "a person from the robot (0.92) -- the strongest input of both scores",
+                      "not_separates": "a still sitter from a mover (both breathe)"},
+    "p_occupied": {"role": "learned alternative to rule B",
+                   "separates": "occupied from empty at 0.917 balanced on a link state never seen -- the same as rule B",
+                   "not_separates": "the robot from a person on its own (23 % of one robot session passes it)"},
+    "rule_b": {"role": "decides PRESENT",
+               "separates": "occupied from empty at 0.922 held out by link state; the noisy link at 0.85 specificity where the range rule has 0",
+               "not_separates": "the robot from a person (88 % present); seated fidgeting in part (0.83) because its jitter rises with its step"},
+    "delay_spread": {"role": "input of P(human | moving)",
+                     "separates": "a machine's repeated change (12.7 bins) from a body's (21-56)",
+                     "not_separates": "walkers (10) from machines -- a gait repeats too"},
+    "revisit": {"role": "candidate (test 6) -- the periodic-machine tell",
+                "separates": "the rotating fan from people, empties and the robot (AUC 1.000; fan >= 0.46, people <= 0.40)",
+                "not_separates": "the robot from a person (0.11 -- a robot does not cycle); the static fan from an empty room (0.06)"},
+    "revisit_tau": {"role": "context", "separates": "the fan's 20 s cycle from a person's drifting dips", "not_separates": "--"},
+    "machine_like": {"role": "candidate (test 6)",
+                     "separates": "the robot, 0.80-0.93 flagged on a session it was not set on",
+                     "not_separates": "phone users and walkers from machines (0.25-0.42 flagged)"},
+    "p_human": {"role": "decides HUMAN (user's choice, 2026-10-06)",
+                "separates": "a robot from a human: 3 % of robot units pass held out by session, 91 % of people",
+                "not_separates": "a fan, a curtain or a second robot -- never seen; seated movers (74 %) and walkers (83 %) are the people it loses"},
+    "verdict3": {"role": "the verdict",
+                 "separates": "empty / motion-unconfirmed / human, from rule B and P(human | moving)",
+                 "not_separates": "a robot from an empty room -- not required"},
+    "gain_crossings": {"role": "context", "separates": "how hard the receiver's gain control worked",
+                       "not_separates": "link states (09-21 had 1,271 a minute and the cleanest floor)"},
+    "rssi_median": {"role": "context", "separates": "signal strength", "not_separates": "link states (noisy 09-16/17 -42 dBm, clean 09-21 -41)"},
+}
+for _f in FEATURES:
+    _f.update(FEATURE_NOTES.get(_f["key"], {"role": "context", "separates": "--", "not_separates": "--"}))
+
+# The verdict, step by step, with the numbers the tab should print beside it.
+DECISION: list[dict[str, Any]] = [
+    {"step": "floor", "test": "7", "key": "lag1_p20",
+     "text": f"the smallest one-frame jitter among the units of the last {LINK_FLOOR_HOURS:g} h (at least "
+             f"{LINK_FLOOR_MIN_UNITS}), else none -- on this tab, the smallest seen so far in the range",
+     "evidence": "replayed over 13 days it matches an oracle that knows each day's true jitter (0.898 vs 0.896); "
+                 "a new noisy link is learned within 5-10 empty units"},
+    {"step": "present", "test": "2, 3", "key": "rule_b",
+     "text": f"step P90 > max({RULE_FLOOR_MULTIPLE:g} x floor, {STEP_P90_REFERENCE:g})  OR  breathing run (20 s windows, "
+             f"peak >= {BREATH_PEAK:g}, rate >= {BREATH_RATE_FLOOR_RPM:g} rpm) >= {BREATH_RUN_REFERENCE} s",
+     "evidence": "0.922 balanced held out by link state; still sitters 100 % on every link; noisy link 0.85 specificity "
+                 "where the fixed rule has 0"},
+    {"step": "human", "test": "6", "key": "p_human",
+     "text": f"present AND P(human | moving) > {P_HUMAN_REFERENCE:g} -- a logistic on the breathing peak, the lambda-1 share "
+             f"and the delay spread; otherwise motion-unconfirmed",
+     "evidence": "3 % of robot units called human held out by session, 91 % of people kept; one device, one room"},
+    {"step": "alternative", "test": "4, 5", "key": "p_occupied",
+     "text": f"P(occupied) > {P_OCCUPIED_REFERENCE:g} -- a seven-input logistic on dimensionless features only",
+     "evidence": "0.917 balanced held out by link state, indistinguishable from rule B; not a robot gate on its own"},
+]
+
+# What each test separated, one line each -- the compounding table of
+# docs/one_minute_classifier.md, for the tab.
+STEPS: list[dict[str, str]] = [
+    {"step": "1", "feature": "psi-hat -- persistence of change in the ratio level",
+     "separates": "slow coherent motion from receiver noise, with a floor that holds across link states; about half of still sitters",
+     "not_separates": "a sitter under the link's jitter from empty; out-of-view movers or the robot from a person"},
+    {"step": "2", "feature": "the one-frame jitter, as a trailing minimum",
+     "separates": "a clean link from a noisy one, blind to still people and the robot; 'moves more than the link wobbles' on every link",
+     "not_separates": "a still sitter on a noisy link from empty; the robot from a person"},
+    {"step": "3", "feature": "FarSense breathing run (10 s as in the rule; 20 s with an 11 rpm floor)",
+     "separates": "a still person from empty on every link and in the far room (85-96 %, 0-1 % false alarms); a person from the robot",
+     "not_separates": "a fidgeting person; 'motion without breathing' from non-human"},
+    {"step": "4", "feature": "the bank as a classifier: rule B and the logistic P(occupied)",
+     "separates": "occupied from empty at 0.92 on a link never seen (the noisy link at 0.85 specificity where the range rule has 0)",
+     "not_separates": "more than the rule on the days it already works; seated fidgeting under a jitter-tied threshold; camera-empty windows with a person a metre from the link"},
+    {"step": "5", "feature": "cross-subcarrier structure: correlation, lambda-1 share, eigenvector drift, delay concentration",
+     "separates": "nothing new for presence; the drift separates movers from the noisy link and is the 7th input of P(occupied); the robot's change is low-rank and repeatable",
+     "not_separates": "a still sitter from the noisy empty room (AUC <= 0.63; breathing 0.99)"},
+    {"step": "6 (partial)", "feature": "P(human | moving) = breathing peak + lambda-1 share + delay spread, gating 'present'",
+     "separates": "a robot from a human -- the one thing asked of it: 3 % of robot units called human, 91 % of people kept",
+     "not_separates": "fans, curtains, other movers not yet recorded; seated movers and walkers it loses"},
+    {"step": "7", "feature": "the link floor kept online: smallest jitter of the last 6 h, else the fixed 0.035",
+     "separates": "today's link from yesterday's -- matches the oracle (0.898 vs 0.896; fixed rule 0.877), learns a new link in 5-10 empty units, no camera needed",
+     "not_separates": "camera-empty windows with a person near the link; the first five empties after a clean-to-noisy change"},
+]

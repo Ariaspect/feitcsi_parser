@@ -66,7 +66,7 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 warnings.filterwarnings("ignore")
 
-from backend import presence, tiles  # noqa: E402
+from backend import presence, truth as truthmod, tiles  # noqa: E402
 
 CONF = 0.5          # camera box confidence below this is not a person
 BOARD_VENV = REPO / ".venv-board" / "bin" / "python"
@@ -96,7 +96,7 @@ def survey(roots, days=None):
                 t0 = frames[0]["epoch"]
                 occ = np.array([
                     [f["epoch"] - t0,
-                     1.0 if (f.get("n", 0) > 0 and f.get("max_conf", 0) >= CONF) else 0.0]
+                     1.0 if truthmod.frame_occupied(f, CONF) else 0.0]
                     for f in frames])
                 out.append({
                     "stamp": stamp,

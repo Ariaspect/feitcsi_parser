@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePath
+from typing import NamedTuple
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -15,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import lgdetect, lgproc, truth as truthmod
+from . import classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -747,12 +748,42 @@ def phase1(
     return out
 
 
-def _camera_truth(capture: Path) -> np.ndarray | None:
-    """(time_s, present) per camera frame, relative to the capture's start."""
+def _truth_exclusion(capture: Path) -> str | None:
+    """The reason a capture's labels must not be scored, if its sidecar says so.
+
+    A sidecar may carry a top-level ``exclude_from_eval`` (a string, or an
+    object with ``reason``) when the user has judged the capture
+    contaminated -- people outside the room, a mislabelled stretch. Such a
+    capture keeps its frames for viewing but yields no truth, so every
+    scorer and the corpus scripts drop it without a hand-kept list.
+    """
     cv_path = capture.with_name(f"{capture.stem}_cv.json")
     if not cv_path.is_file():
         return None
-    frames = (json.loads(cv_path.read_text()).get("frames") or [])
+    try:
+        flag = json.loads(cv_path.read_text()).get("exclude_from_eval")
+    except (OSError, ValueError):
+        return None
+    if not flag:
+        return None
+    if isinstance(flag, dict):
+        return str(flag.get("reason") or "excluded from evaluation")
+    return str(flag) if isinstance(flag, str) else "excluded from evaluation"
+
+
+def _camera_truth(capture: Path) -> np.ndarray | None:
+    """(time_s, present) per camera frame, relative to the capture's start.
+
+    ``None`` when there is no sidecar, no frames, or the sidecar is flagged
+    ``exclude_from_eval`` (see ``_truth_exclusion``).
+    """
+    cv_path = capture.with_name(f"{capture.stem}_cv.json")
+    if not cv_path.is_file():
+        return None
+    data = json.loads(cv_path.read_text())
+    if data.get("exclude_from_eval"):
+        return None
+    frames = (data.get("frames") or [])
     if not frames:
         return None
     base = frames[0].get("epoch")
@@ -761,8 +792,8 @@ def _camera_truth(capture: Path) -> np.ndarray | None:
         e = f.get("epoch")
         if e is None:
             continue
-        present = bool(f.get("n", 0) > 0 and float(f.get("max_conf") or 0.0) >= 0.5)
-        rows.append([float(e) - float(base), 1.0 if present else 0.0])
+        rows.append([float(e) - float(base),
+                     1.0 if truthmod.frame_occupied(f) else 0.0])
     return np.asarray(rows) if rows else None
 
 
@@ -1009,8 +1040,11 @@ def labels(
                     if e is None:
                         continue
                     times.append(float(e) - float(base))
-                    boxes = f.get("boxes") or []
-                    present.append(bool(boxes))
+                    # The same rule the scorers use, so the strip a reader
+                    # looks at is the truth the numbers came from -- manual
+                    # corrections included. `maxConf` still reports what the
+                    # detector saw, so a forced frame is visible as one.
+                    present.append(truthmod.frame_occupied(f))
                     conf.append(float(f.get("max_conf") or 0.0))
                 out["present"] = {
                     "timeS": times,
@@ -1136,12 +1170,680 @@ def presence(
     }
 
 
+def _nullable_rows(values: np.ndarray, decimals: int = 5) -> list[list[float | None]]:
+    """``_nullable`` over each row of a 2-D array, rounded to keep the JSON small."""
+    arr = np.round(np.asarray(values, dtype=float), decimals)
+    return [_nullable(row) for row in arr]
+
+
+@app.get("/api/farsense")
+def farsense_detector(   # not `farsense`: that name is the module this calls
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    window_seconds: float = Query(farsense.WINDOW_SECONDS, gt=0, le=120, description="Projection window; the paper uses 12 s"),
+    hop_seconds: float = Query(farsense.HOP_SECONDS, gt=0, le=60, description="Step between windows in seconds"),
+    rpm_lo: float = Query(farsense.RATE_BAND_RPM[0], gt=0, le=120, description="Slowest breathing rate considered; the paper uses 10"),
+    rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate considered; the paper uses 37"),
+    n_theta: int = Query(farsense.N_THETA, ge=2, le=720, description="Projection angles swept over 0..2pi; the paper uses 100"),
+    keep_fraction: float = Query(farsense.BNR_KEEP_FRACTION, ge=0, le=1, description="Subcarriers with BNR below this fraction of the best are excluded; the paper uses 0.7"),
+    savgol_seconds: float = Query(farsense.SAVGOL_SECONDS, ge=0, le=5, description="Savitzky-Golay window in seconds; 0 disables it"),
+    savgol_order: int = Query(farsense.SAVGOL_ORDER, ge=1, le=7, description="Savitzky-Golay polynomial order"),
+    highpass_hz: float = Query(0.0, ge=0, le=5, description="Zero-phase high-pass before smoothing, in Hz; 0 reproduces the paper"),
+    motion_frac_hi: float = Query(farsense.MOTION_FRAC_HI, gt=0, le=5, description="Median fractional channel change above which a window is non-stationary and reports no rate"),
+    min_peak: float = Query(farsense.MIN_PEAK, ge=-1, le=1, description="Rates whose normalised autocorrelation peak is below this are blanked; 0 reproduces the paper"),
+    max_gap_fraction: float = Query(farsense.MAX_GAP_FRACTION, gt=0, le=1, description="A window more than this fraction interpolated across dropouts reports nothing"),
+    detail_t: float | None = Query(None, description="Return the window nearest this time in full: I/Q trajectory, patterns, autocorrelation"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """FarSense (Zeng et al. 2019) replayed over a capture range, as JSON.
+
+    One entry per 12 s window: whether the target was stationary, the rate
+    the paper's autocorrelation method reads, and the numbers it was read
+    from. ``pattern`` is the best subcarrier's respiration pattern stitched
+    across windows, on the sample grid, which is what the paper's GUI draws.
+    See ``backend.farsense`` for what is copied and what is not.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = farsense.compute_farsense(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            detail_t=detail_t,
+            window_seconds=window_seconds,
+            hop_seconds=hop_seconds,
+            band_rpm=(rpm_lo, rpm_hi),
+            n_theta=n_theta,
+            keep_fraction=keep_fraction,
+            savgol_seconds=savgol_seconds,
+            savgol_order=savgol_order,
+            highpass_hz=highpass_hz,
+            motion_frac_hi=motion_frac_hi,
+            min_peak=min_peak,
+            max_gap_fraction=max_gap_fraction,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    detail = result["detail"]
+    detail_out = None
+    if detail is not None:
+        detail_out = {
+            "index": detail["index"],
+            "start_s": detail["start_s"],
+            "t_s": [float(v) for v in detail["t_s"]],
+            "best_sc": detail["best_sc"],
+            "best_theta": detail["best_theta"],
+            "iq": [[float(a), float(b)] for a, b in np.nan_to_num(detail["iq"])],
+            "pattern": _nullable(detail["pattern"]),
+            "acf": _nullable(detail["acf"]),
+            "lag_lo": detail["lag_lo"],
+            "lag_hi": detail["lag_hi"],
+            "lag": float(detail["lag"]) if np.isfinite(detail["lag"]) else None,
+            "sc_index": [int(v) for v in detail["sc_index"]],
+            "bnr": _nullable(detail["bnr"]),
+            "theta": _nullable(detail["theta"]),
+            "selected": [bool(v) for v in detail["selected"]],
+        }
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "stationary": [bool(v) for v in result["stationary"]],
+        "motion_level": _nullable(result["motion_level"]),
+        "unknown": [bool(v) for v in result["unknown"]],
+        "rpm": _nullable(result["rpm"]),
+        "lag": _nullable(result["lag"]),
+        "acf_peak": _nullable(result["acf_peak"]),
+        "acf_peak_norm": _nullable(result["acf_peak_norm"]),
+        "bnr_max": _nullable(result["bnr_max"]),
+        "n_selected": [int(v) for v in result["n_selected"]],
+        "best_sc": [int(v) for v in result["best_sc"]],
+        "best_theta": _nullable(result["best_theta"]),
+        "sc_index": [int(v) for v in result["sc_index"]],
+        "bnr_map": _nullable_rows(result["bnr_map"]),
+        # A pure tone scores win / fft_size, so this factor puts BNR on a
+        # 0..1 scale that does not move with the sample rate.
+        "bnr_norm_factor": float(result["params"]["fft_size"]) / float(result["win"]),
+        "pattern_t": [float(v) for v in result["pattern_t"]],
+        "pattern": _nullable(np.round(result["pattern"], 4)),
+        "detail": detail_out,
+        "win": result["win"],
+        "hop": result["hop"],
+        "window_seconds": result["window_seconds"],
+        "fs_hz": result["fs_hz"],
+        "lag_lo": result["lag_lo"],
+        "lag_hi": result["lag_hi"],
+        "params": result["params"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
+    }
+
+
+@app.get("/api/hybrid")
+def hybrid_detector(   # not `hybrid`: that name is the module this calls
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    use_amplitude: bool = Query(False, description="Also count bursts on the raw amplitude frame-diff channel"),
+    hold_s: float = Query(hybrid.HOLD_SECONDS, ge=0, le=600, description="Seconds presence is held after the last evidence"),
+    burst_s: float = Query(hybrid.BURST_SECONDS, ge=1, le=60, description="Consecutive seconds above the motion threshold that make a burst"),
+    motion_rel: float = Query(hybrid.MOTION_REL, ge=1, le=100, description="Ratio-motion threshold as a multiple of the range's own floor"),
+    motion_abs: float = Query(hybrid.MOTION_ABS, ge=0, le=10, description="Ratio-motion threshold never below this |dr|/|r|"),
+    amp_rel: float = Query(hybrid.AMP_REL, ge=1, le=100, description="Amplitude-motion threshold as a multiple of its floor"),
+    amp_abs: float = Query(hybrid.AMP_ABS, ge=0, le=60, description="Amplitude-motion threshold never below this many dB"),
+    floor_pct: float = Query(hybrid.FLOOR_PERCENTILE, ge=0, le=100, description="Percentile of the per-second level taken as the range's quiet floor"),
+    breath_min_peak: float = Query(hybrid.BREATH_MIN_PEAK, ge=-1, le=1, description="Normalised FarSense peak a window needs to count as breathing"),
+    breath_persist_s: float = Query(hybrid.BREATH_PERSIST_SECONDS, ge=1, le=120, description="Seconds of consecutive qualifying windows that must agree on the rate"),
+    breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=60, description="How far the rates in that run may differ, rpm"),
+    sparse_fraction: float = Query(hybrid.SPARSE_FRACTION, ge=0, le=1, description="Sparse breathing: a second counts as breathing when at least this fraction of the windows within sparse_window of it clear breath_min_peak, rate not required. 0 = off"),
+    sparse_window: float = Query(hybrid.SPARSE_WINDOW_SECONDS, ge=2, le=600, description="Span of the sparse-breathing window, seconds"),
+    breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
+    breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
+    rpm_lo: float = Query(farsense.RATE_BAND_RPM[0], gt=0, le=120, description="Slowest breathing rate the FarSense search considers"),
+    rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate the FarSense search considers"),
+    n_theta: int = Query(farsense.N_THETA, ge=2, le=720, description="FarSense projection angles swept"),
+    fft_size: int = Query(farsense.FFT_SIZE, ge=64, le=65536, description="FarSense BNR spectrum size"),
+    keep_fraction: float = Query(farsense.BNR_KEEP_FRACTION, ge=0, le=1, description="Subcarriers with BNR below this fraction of the best are excluded"),
+    savgol_seconds: float = Query(farsense.SAVGOL_SECONDS, ge=0, le=5, description="Savitzky-Golay window in seconds; 0 disables it"),
+    savgol_order: int = Query(farsense.SAVGOL_ORDER, ge=1, le=7, description="Savitzky-Golay polynomial order"),
+    motion_frac_hi: float | None = Query(None, gt=0, le=5, description="FarSense stationary gate: windows whose median fractional change is above this report no peak. Omitted: off (the hybrid's burst rule decides)"),
+    positive_only: bool = Query(True, description="Take the first POSITIVE local maximum of the autocorrelation as the breath; off reproduces the paper's literal first peak"),
+    max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
+    motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet |dr|/|r| level in place of the range's own 20th percentile"),
+    lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it; a gap whose holds meet is present throughout"),
+    bridge_bursts: str = Query("off", description="'run': the whole stretch between two bursts is present when a breathing run lies between them; 'any': when any single window's peak clears breath_min_peak there; 'off': neither"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The calibration-free motion/breathing detector, one verdict per second.
+
+    See ``backend.hybrid``. Scored against the camera when the capture has a
+    sidecar, through ``backend.truth`` with the same margin the other
+    scorers use, and the confusion matrix travels with the series.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rpm_lo >= rpm_hi:
+        raise HTTPException(status_code=400, detail="rpm_lo must be below rpm_hi")
+    if bridge_bursts not in ("off", "run", "any"):
+        raise HTTPException(status_code=400, detail="bridge_bursts must be 'off', 'run' or 'any'")
+
+    try:
+        result = hybrid.compute_hybrid(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            use_amplitude=use_amplitude,
+            hold_seconds=hold_s,
+            burst_seconds=burst_s,
+            motion_rel=motion_rel,
+            motion_abs=motion_abs,
+            amp_rel=amp_rel,
+            amp_abs=amp_abs,
+            floor_percentile=floor_pct,
+            breath_min_peak=breath_min_peak,
+            breath_persist_seconds=breath_persist_s,
+            breath_rate_tol=breath_rate_tol,
+            sparse_fraction=sparse_fraction,
+            sparse_window_seconds=sparse_window,
+            breath_window_seconds=breath_window,
+            breath_highpass_hz=breath_highpass,
+            max_gap_fraction=max_gap_fraction,
+            band_rpm=(rpm_lo, rpm_hi),
+            n_theta=n_theta,
+            fft_size=fft_size,
+            keep_fraction=keep_fraction,
+            savgol_seconds=savgol_seconds,
+            savgol_order=savgol_order,
+            motion_frac_hi=motion_frac_hi,
+            positive_only=positive_only,
+            motion_floor=motion_floor,
+            lead_hold=lead_hold,
+            bridge_bursts=bridge_bursts,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    truth_out = None
+    confusion_out = None
+    cam = _camera_truth(p)
+    if cam is not None and cam.size:
+        cells, excluded = truthmod.cell_truth(
+            result["time_s"], cam[:, 0], cam[:, 1] > 0.5, 0.5, margin_s
+        )
+        c = truthmod.confusion(cells, result["present"], excluded)
+        scored = np.isfinite(cells)
+        c["base_rate"] = float(np.mean(cells[scored] > 0.5)) if scored.any() else None
+        c["margin_s"] = float(margin_s)
+        confusion_out = c
+        truth_out = {
+            "time_s": [float(v) for v in cam[:, 0]],
+            "present": [bool(v > 0.5) for v in cam[:, 1]],
+        }
+
+    def _nan(v: float) -> float | None:
+        return float(v) if np.isfinite(v) else None
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "present": [bool(v) for v in result["present"]],
+        "state": result["state"],
+        "unknown": [bool(v) for v in result["unknown"]],
+        "motion_ratio": _nullable(result["motion_ratio"]),
+        "motion_amp": _nullable(result["motion_amp"]),
+        "burst": [bool(v) for v in result["burst"]],
+        "breathing": [bool(v) for v in result["breathing"]],
+        "breath_peak": _nullable(result["breath_peak"]),
+        "breath_rpm": _nullable(result["breath_rpm"]),
+        "ratio_floor": _nan(result["ratio_floor"]),
+        "ratio_threshold": _nan(result["ratio_threshold"]),
+        "amp_floor": _nan(result["amp_floor"]),
+        "amp_threshold": _nan(result["amp_threshold"]),
+        "breath_note": result["breath_note"],
+        "fs_hz": result["fs_hz"],
+        "params": result["params"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
+        "floor_scope": "explicit" if motion_floor is not None else "own",
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
+        "confusion": confusion_out,
+    }
+
+
+@app.get("/api/hybrid2")
+def hybrid2_detector(   # not `hybrid2`: that name is the module this calls
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    lag_s: float = Query(0.0, ge=0, le=10, description="Difference frames this far apart instead of adjacent ones. 0 keeps the adjacent pair. Measured within a capture against its own empty seconds, small movement goes from 19% of its seconds detected at one frame to 88% at 2 s, while a still occupant stays near chance -- the lag, not the statistic, is what makes small motion visible"),
+    gate_gain: bool = Query(False, description="Blank frame pairs that cross a reported receiver gain state"),
+    hold_s: float = Query(hybrid.HOLD_SECONDS, ge=0, le=600, description="Seconds presence is held after the last evidence"),
+    burst_s: float = Query(hybrid.BURST_SECONDS, ge=1, le=60, description="Consecutive seconds above the motion threshold that make a burst"),
+    motion_rel: float = Query(hybrid2.MOTION_REL, ge=1, le=100, description="Motion threshold as a multiple of the range's own floor"),
+    motion_abs: float = Query(hybrid2.MOTION_ABS, ge=0, le=10, description="Motion threshold never below this step level. Half of hybrid 1's, because this metric is exactly half of |dr|/|r|"),
+    floor_pct: float = Query(hybrid.FLOOR_PERCENTILE, ge=0, le=100, description="Percentile of the per-second level taken as the range's quiet floor"),
+    motion_floor: float | None = Query(None, ge=0, le=10, description="An explicit quiet level in place of the range's own percentile. A range occupied throughout has no quiet stretch -- its own percentile IS the occupant"),
+    breath_min_peak: float = Query(hybrid.BREATH_MIN_PEAK, ge=-1, le=1, description="Normalised FarSense peak a window needs to count as breathing"),
+    breath_persist_s: float = Query(hybrid.BREATH_PERSIST_SECONDS, ge=1, le=120, description="Seconds of consecutive qualifying windows that must agree on the rate"),
+    breath_rate_tol: float = Query(hybrid.BREATH_RATE_TOL, ge=0, le=30, description="Rate tolerance within a breathing run, rpm"),
+    breath_window: float = Query(hybrid.BREATH_WINDOW_SECONDS, gt=0, le=120, description="FarSense window in seconds"),
+    breath_highpass: float = Query(hybrid.BREATH_HIGHPASS_HZ, ge=0, le=5, description="High-pass before the FarSense sweep, Hz"),
+    rpm_lo: float = Query(farsense.RATE_BAND_RPM[0], gt=0, le=120, description="Slowest breathing rate the FarSense search considers"),
+    rpm_hi: float = Query(farsense.RATE_BAND_RPM[1], gt=0, le=120, description="Fastest breathing rate the FarSense search considers"),
+    lead_hold: bool = Query(True, description="Breathing also holds presence hold_s before it"),
+    max_gap_fraction: float = Query(hybrid.MAX_GAP_FRACTION, gt=0, le=1, description="A second or window more than this fraction interpolated across dropouts reports nothing"),
+    range_window: float = Query(hybrid2.RANGE_SERIES_WINDOW_SECONDS, ge=5, le=600, description="The range rule applied every second to this many trailing seconds (the live-system view of the fixed-threshold rule)"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'. Left alone the frame step resolves to the dominant peer at 2x1, full width"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The composite detector: the complex frame step for motion, FarSense for breath.
+
+    See ``backend.hybrid2``. Same shape as ``/api/hybrid`` -- motion opens
+    presence, breathing keeps it open, a hold carries it across gaps -- with
+    the motion channel replaced by ``framediff``'s ratio-complex step on a
+    uniform frame set. The breathing half is hybrid 1's, unchanged, so a
+    difference between the two tabs is never the breath.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rpm_lo >= rpm_hi:
+        raise HTTPException(status_code=400, detail="rpm_lo must be below rpm_hi")
+
+    try:
+        result = hybrid2.compute_hybrid2(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            gate_gain=gate_gain,
+            range_window_seconds=range_window,
+            lag_seconds=lag_s,
+            hold_seconds=hold_s,
+            burst_seconds=burst_s,
+            motion_rel=motion_rel,
+            motion_abs=motion_abs,
+            floor_percentile=floor_pct,
+            motion_floor=motion_floor,
+            breath_min_peak=breath_min_peak,
+            breath_persist_seconds=breath_persist_s,
+            breath_rate_tol=breath_rate_tol,
+            breath_window_seconds=breath_window,
+            breath_highpass_hz=breath_highpass,
+            band_rpm=(rpm_lo, rpm_hi),
+            max_gap_fraction=max_gap_fraction,
+            lead_hold=lead_hold,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    truth_out = None
+    confusion_out = None
+    range_confusion_out = None
+    cam = _camera_truth(p)
+    if cam is not None and cam.size:
+        cells, excluded = truthmod.cell_truth(
+            result["time_s"], cam[:, 0], cam[:, 1] > 0.5, 0.5, margin_s
+        )
+        c = truthmod.confusion(cells, result["present"], excluded)
+        scored = np.isfinite(cells)
+        c["base_rate"] = float(np.mean(cells[scored] > 0.5)) if scored.any() else None
+        c["margin_s"] = float(margin_s)
+        confusion_out = c
+        rc = truthmod.confusion(cells, result["range_series"]["present"], excluded)
+        rc["base_rate"] = c["base_rate"]; rc["margin_s"] = float(margin_s)
+        range_confusion_out = rc
+        truth_out = {
+            "time_s": [float(v) for v in cam[:, 0]],
+            "present": [bool(v > 0.5) for v in cam[:, 1]],
+        }
+
+    def _nan(v: float) -> float | None:
+        return float(v) if np.isfinite(v) else None
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "present": [bool(v) for v in result["present"]],
+        "state": result["state"],
+        "unknown": [bool(v) for v in result["unknown"]],
+        "motion": _nullable(result["motion_ratio"]),
+        "motion_reference": _nullable(result["motion_reference"]),
+        "range_verdict": {
+            **result["range_verdict"],
+            "motion_p90": None if not np.isfinite(result["range_verdict"]["motion_p90"]) else float(result["range_verdict"]["motion_p90"]),
+        },
+        "range_series": {
+            "present": [bool(v) for v in result["range_series"]["present"]],
+            "state": list(result["range_series"]["state"]),
+            "window_seconds": float(result["range_series"]["window_seconds"]),
+        },
+        "range_confusion": range_confusion_out,
+        "burst": [bool(v) for v in result["burst"]],
+        "breathing": [bool(v) for v in result["breathing"]],
+        "breath_peak": _nullable(result["breath_peak"]),
+        "breath_rpm": _nullable(result["breath_rpm"]),
+        "floor": _nan(result["ratio_floor"]),
+        "threshold": _nan(result["ratio_threshold"]),
+        "floor_scope": "explicit" if motion_floor is not None else "own",
+        "signal": result["signal"],
+        "selection_note": result["selection_note"],
+        "lag_seconds": result["lag_seconds"],
+        "lag_frames": result["lag_frames"],
+        "gain_gated": result["gain_gated"],
+        "n_gain_crossed": result["n_gain_crossed"],
+        "breath_note": result["breath_note"],
+        "fs_hz": result["fs_hz"],
+        "params": result["params"],
+        "frames_used": result["frames_used"],
+        "frames_dropped": result["frames_dropped"],
+        "t_min": result["t_min"],
+        "t_max": result["t_max"],
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
+        "confusion": confusion_out,
+    }
+
+
+@app.get("/api/classifier")
+def classifier_features(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    unit_s: float = Query(classifier.UNIT_SECONDS, ge=5, le=600, description="Unit length the range is divided into, seconds. A one-minute capture is one unit; a longer range is cut into equal units nearest this length"),
+    acf_frames: int = Query(classifier.ACF_WINDOW_FRAMES, ge=8, le=4000, description="Frames per autocorrelation window (WiDetect's T). 84 is ~2 s at 42 Hz; fixed in frames because the null distribution is a function of the sample count"),
+    lag_s: float = Query(classifier.STEP_LAG_SECONDS, ge=0, le=10, description="Lag of the frame step, seconds. 2 is what the range rule reads"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'. Left alone the uniform set resolves to the dominant peer at 2x1, full width"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The one-minute classifier's feature bank, per unit of the range.
+
+    See ``backend.classifier`` and ``docs/one_minute_classifier.md``. One
+    scalar per feature per unit, the per-window and per-second series behind
+    them, the camera's occupancy fraction per unit, and the bank's own
+    description of each feature so the tab can draw a column it has never
+    seen.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        out = classifier.compute_features(
+            p, t0, t1, unit_seconds=unit_s, acf_frames=acf_frames, lag_seconds=lag_s,
+            mimo=mimo_filter, source_mac=parse_mac_filter(source_mac), interpolate=interpolate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    cam = _camera_truth(p)
+    truth_out = None
+    if cam is not None and cam.size:
+        truth_out = {
+            "time_s": [float(v) for v in cam[:, 0]],
+            "present": [bool(v > 0.5) for v in cam[:, 1]],
+        }
+
+    def _num(v: object) -> float | int | None:
+        if v is None:
+            return None
+        if isinstance(v, (int, np.integer)):
+            return int(v)
+        return float(v) if np.isfinite(v) else None  # type: ignore[arg-type]
+
+    units = []
+    for u in out["units"]:
+        row = {k: _num(v) for k, v in u.items()}
+        occ, n_cam = None, 0
+        if cam is not None and cam.size:
+            m = (cam[:, 0] >= u["t0"]) & (cam[:, 0] <= u["t1"])
+            n_cam = int(m.sum())
+            occ = float(np.mean(cam[m, 1] > 0.5)) if n_cam else None
+        row["camera_occupancy"] = occ
+        row["camera_frames"] = n_cam
+        units.append(row)
+
+    return {
+        "acf": {
+            "time_s": [float(v) for v in out["acf"]["time_s"]],
+            "amp": _nullable(out["acf"]["amp"]),
+            "phase": _nullable(out["acf"]["phase"]),
+            "window_frames": out["acf"]["window_frames"],
+            "window_seconds": _num(out["acf"]["window_seconds"]),
+            "null_mean": out["acf"]["null_mean"],
+        },
+        "step": {
+            "time_s": [float(v) for v in out["step"]["time_s"]],
+            "level": _nullable(out["step"]["level"]),
+            "lag_seconds": out["step"]["lag_seconds"],
+            "lag_frames": out["step"]["lag_frames"],
+        },
+        "units": units,
+        "unit_seconds": out["unit_seconds"],
+        "fs_hz": _num(out["fs_hz"]),
+        "n_subcarriers": out["n_subcarriers"],
+        "frames_used": out["frames_used"],
+        "frames_dropped": out["frames_dropped"],
+        "selection_note": out["selection_note"],
+        "source_mac": out["source_mac"],
+        "mimo": out["mimo"],
+        "features": out["features"],
+        "decision": classifier.DECISION,
+        "steps": classifier.STEPS,
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
+    }
+
+
+@app.get("/api/motion-signal")
+def motion_signal(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    variance_window_s: float = Query(motionsig.VARIANCE_WINDOW_SECONDS, gt=0, le=120, description="Window the variance is taken over, seconds. Peaks near 4: variance is a spread, not a rhythm, and a longer window averages bursts into calm"),
+    lag1_window_s: float = Query(motionsig.LAG1_WINDOW_SECONDS, gt=0, le=120, description="Window lag-1 is taken over, seconds. Rises monotonically to at least 15: a 2 s window resolves only 0.5 Hz and cannot see a slow occupant at all"),
+    hop_s: float = Query(motionsig.HOP_SECONDS, gt=0, le=30, description="Step between windows in seconds; the experiment fixed 0.5"),
+    highpass_hz: float = Query(motionsig.HIGHPASS_HZ, ge=0.01, le=5, description="High-pass before the variance, Hz; lag-1 is taken before it either way. Must stay below the variance window's first non-DC bin (1/window)"),
+    max_gap_fraction: float = Query(motionsig.MAX_GAP_FRACTION, gt=0, le=1, description="A window more than this fraction interpolated across dropouts reports nothing"),
+    margin_s: float = Query(truthmod.DEFAULT_MARGIN_S, ge=0, le=60, description="Empty camera frames within this many seconds of a transition are not scored"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """The adopted amplitude-motion signal: RATIO, variance and lag-1, per window.
+
+    See ``backend.motionsig``. The logistic weights are fixed constants fitted
+    once over the marked corpus, not re-fitted here, and both normalisations
+    are returned side by side because the gap between them is what a
+    deployment pays.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = motionsig.compute_motion_signal(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac),
+            interpolate=interpolate,
+            variance_window_seconds=variance_window_s,
+            lag1_window_seconds=lag1_window_s,
+            hop_seconds=hop_s,
+            highpass_hz=highpass_hz,
+            max_gap_fraction=max_gap_fraction,
+            margin_s=margin_s,
+            camera=_camera_truth(p),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    modes = {}
+    for name, entry in result["modes"].items():
+        modes[name] = {
+            "variance": _nullable(entry["z"]["variance"]),
+            "lag1": _nullable(entry["z"]["lag1"]),
+            "score": _nullable(entry["score"]),
+            "present": [bool(v) for v in entry["present"]],
+            "threshold": entry["threshold"],
+            "reference": entry["reference"],
+            "coefficients": entry["coefficients"],
+            "note": entry["note"],
+            "confusion": entry.get("confusion"),
+        }
+
+    truth_out = None
+    if result["truth"] is not None:
+        truth_out = {
+            "time_s": [float(v) for v in result["truth"]["time_s"]],
+            "present": [bool(v) for v in result["truth"]["present"]],
+        }
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "variance_raw": _nullable(result["raw"]["variance"]),
+        "lag1_raw": _nullable(result["raw"]["lag1"]),
+        "gap_fraction": _nullable(result["gap_fraction"]),
+        "modes": modes,
+        "fs_hz": result["fs"],
+        "streams": result["streams"],
+        "n_samples": result["n_samples"],
+        "windows": result["windows"],
+        "sources": result["sources"],
+        "window_seconds": result["window_seconds"],
+        "hop_seconds": result["hop_seconds"],
+        "highpass_hz": result["highpass_hz"],
+        "frames_used": result["frames_used"],
+        "frames_without_ratio": result["frames_without_ratio"],
+        "in_corpus": result["in_corpus"],
+        "margin_s": result["margin_s"],
+        "truth": truth_out,
+        "truth_excluded": _truth_exclusion(p),
+    }
+
+
+@app.get("/api/frame-diff")
+def frame_diff(
+    path: str = Query(..., description="Path to capture file"),
+    t0: float = Query(..., description="Start of requested time window (seconds)"),
+    t1: float = Query(..., description="End of requested time window (seconds)"),
+    signal: str = Query(framediff.DEFAULT_SIGNAL, description="Which series to difference: 'amplitude' (raw |H| of tpi slot 0, what the board reads), 'ratio_amp' (|H_tx1/H_tx0| in dB, AGC-immune), or 'ratio_complex' (the ratio kept complex, which alone sees a body rotating it at constant magnitude)"),
+    gate_gain: bool = Query(False, description="Blank the frame pairs that cross a reported gain state, the way a pair spanning a dropout is blanked. Costs 12-52% of the steps and halves the tail; does not change the empty/occupied separation or the 15.5x spread of the empty level across captures. Off by default"),
+    max_points: int = Query(framediff.DEFAULT_MAX_POINTS, ge=16, le=20000, description="Columns returned; the per-step series is reduced to this many with a median and its envelope, never averaged"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before differencing"),
+) -> dict:
+    """The frame-to-frame amplitude step on a bounded -1..1 axis.
+
+    See ``backend.framediff``. This is the raw per-subcarrier dB difference the
+    board's detector reads, expressed as ``(a_t - a_(t-1))/(a_t + a_(t-1))`` --
+    which is ``tanh(dB * ln10 / 40)`` exactly, so it is the same measurement on
+    an axis that needs no per-room constant. No threshold is drawn or counted:
+    measured, the board's 26 dB sits above every step this fold produces.
+
+    One transmitter, one MIMO mode, one bandwidth: left alone the filters
+    resolve to the capture's dominant peer and 2x1 at full width, because a
+    step between two frames of different shape is bookkeeping rather than
+    motion (measured: those pairs read 9-18x the same-width level). What was
+    used comes back as ``source_mac``/``mimo``/``selection_note``.
+
+    No AGC table and no reference, matching ``hybrid.amplitude_diff``. Unlike
+    that per-second median, this is per frame and the receiver's gain control
+    reaches it intact -- 84-100 % of the loudest 1 % of steps are gain
+    crossings. ``n_gain_crossed`` always reports how many there were, and
+    ``gate_gain`` blanks them; the AGC *correction* is not offered because it
+    was measured to make this signal's tail worse. See ``backend.framediff``
+    and ``docs/frame_step.md``.
+    """
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+        mac_filter = parse_mac_filter(source_mac)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = framediff.compute_frame_diff(
+            p, t0, t1,
+            mimo=mimo_filter,
+            source_mac=mac_filter,
+            interpolate=interpolate,
+            signal=signal,
+            gate_gain=gate_gain,
+            max_points=max_points,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "time_s": [float(v) for v in result["time_s"]],
+        "signed": _nullable(result["signed"]),
+        "signed_lo": _nullable(result["signed_lo"]),
+        "signed_hi": _nullable(result["signed_hi"]),
+        "magnitude": _nullable(result["magnitude"]),
+        "magnitude_hi": _nullable(result["magnitude_hi"]),
+        "common": _nullable(result["common"]),
+        "common_hi": _nullable(result["common_hi"]),
+        "count": [int(v) for v in result["count"]],
+        "bin_seconds": result["bin_seconds"],
+        "decimated": bool(result["decimated"]),
+        "frames_used": result["frames_used"],
+        "frames_dropped": result["frames_dropped"],
+        "frames_dropped_narrow": result["frames_dropped_narrow"],
+        "source_mac": result["source_mac"],
+        "mimo": result["mimo"],
+        "selection_note": result["selection_note"],
+        "signal": result["signal"],
+        "n_subcarriers": result["n_subcarriers"],
+        "capture_t_min": result["t_min"],
+        "capture_t_max": result["t_max"],
+        "summary": result["summary"],
+    }
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
 
 
-def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
+class _Found(NamedTuple):
+    """A capture found by :func:`_scan_captures`, with what the walk already knows."""
+
+    path: Path                  # spelled under the root the walk started from
+    stat: os.stat_result
+    dir_fd: int                 # the capture's directory; valid only until the walk resumes
+    siblings: frozenset[str]    # every name in that directory
+
+
+def _scan_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[_Found]:
     """Yield capture files under *root*, descending into subdirectories.
 
     Hand-rolled rather than ``rglob`` because ``rglob`` does not descend into
@@ -1151,29 +1853,88 @@ def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
     *seen* holds the real paths of directories already visited, so a symlink
     cycle terminates instead of recursing forever. Unreadable directories are
     skipped rather than failing the whole listing.
+
+    Everything is done relative to an open directory rather than by full path.
+    On lg the captures sit on a 9p mount of the Windows drive, reached through
+    two symlinks, where a lookup by path costs ~1.3 ms; one ``is_dir`` on every
+    camera frame beside every capture made the listing take 9 s. ``scandir``
+    reads the file types off the directory listing itself, and a stat or open
+    against the directory's descriptor skips the path walk.
     """
-    if depth < 0:
-        return
     try:
-        entries = sorted(root.iterdir())
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
         return
-    for entry in entries:
+    yield from _scan_dir(fd, root, root.resolve(), depth, seen)
+
+
+def _scan_dir(fd: int, path: Path, real: Path, depth: int,
+              seen: set[Path]) -> Iterator[_Found]:
+    """:func:`_scan_captures` below one open directory; closes *fd*."""
+    try:
+        if depth < 0:
+            return
         try:
-            is_dir = entry.is_dir()  # follows symlinks; False if broken
+            entries = sorted(os.scandir(fd), key=lambda e: e.name)
         except OSError:
-            continue
-        if is_dir:
-            real = entry.resolve()
-            if real in seen:
+            return
+        siblings = frozenset(e.name for e in entries)
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()  # follows symlinks; False if broken
+                is_link = entry.is_symlink()
+            except OSError:
                 continue
-            seen.add(real)
-            yield from _walk_captures(entry, depth - 1, seen)
-        elif entry.suffix in CAPTURE_SUFFIXES and entry.is_file():
-            yield entry
+            if is_dir:
+                # A plain subdirectory's real path is its parent's plus its
+                # name; only a symlink needs resolving.
+                sub_real = (real / entry.name).resolve() if is_link else real / entry.name
+                if sub_real in seen:
+                    continue
+                seen.add(sub_real)
+                try:
+                    sub = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                except OSError:
+                    continue
+                yield from _scan_dir(sub, path / entry.name, sub_real, depth - 1, seen)
+            elif PurePath(entry.name).suffix in CAPTURE_SUFFIXES:
+                try:
+                    if not entry.is_file():
+                        continue
+                    st = entry.stat()
+                except OSError:
+                    continue  # vanished or dangling between listing and stat
+                yield _Found(path / entry.name, st, fd, siblings)
+    finally:
+        os.close(fd)
 
 
-def _capture_conditions(capture: Path) -> dict:
+def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
+    """The paths :func:`_scan_captures` finds, for callers that need no more."""
+    for found in _scan_captures(root, depth, seen):
+        yield found.path
+
+
+def _sidecar_json(found: _Found, suffix: str) -> dict | None:
+    """The capture's ``<stem><suffix>`` JSON object, or None if absent or unreadable.
+
+    Presence is read off the directory listing the walk already made and the
+    file is opened through the walk's descriptor, so neither costs a path
+    lookup.
+    """
+    name = f"{found.path.stem}{suffix}"
+    if name not in found.siblings:
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY, dir_fd=found.dir_fd)
+        with os.fdopen(fd, "rb") as fh:
+            obj = json.loads(fh.read())
+    except (OSError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _capture_conditions(found: _Found) -> dict:
     """room/configuration/scenario for a capture, as far as they are recorded.
 
     ``scenario`` falls back to what the camera saw, so the unattended runs sort
@@ -1182,27 +1943,21 @@ def _capture_conditions(capture: Path) -> dict:
     a recorded blank.
     """
     out: dict = {}
-    meta_path = capture.with_name(f"{capture.stem}_meta.json")
-    if meta_path.is_file():
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            meta = {}
-        for key in ("room", "configuration", "scenario", "subject",
-                    "activity", "facing", "distance_m"):
-            if meta.get(key) not in (None, ""):
-                out[key] = meta[key]
+    meta = _sidecar_json(found, "_meta.json") or {}
+    for key in ("room", "configuration", "scenario", "subject",
+                "activity", "facing", "distance_m"):
+        if meta.get(key) not in (None, ""):
+            out[key] = meta[key]
     if "scenario" not in out:
-        cv_path = capture.with_name(f"{capture.stem}_cv.json")
-        if cv_path.is_file():
-            try:
-                frac = json.loads(cv_path.read_text())["summary"]["fraction_occupied"]
-            except (OSError, json.JSONDecodeError, KeyError):
-                frac = None
-            if frac is not None:
-                out["scenario"] = ("empty" if frac == 0.0
-                                   else "occupied" if frac > 0.5 else "partial")
-                out["occupancy"] = float(frac)
+        cv = _sidecar_json(found, "_cv.json") or {}
+        try:
+            frac = cv["summary"]["fraction_occupied"]
+        except (KeyError, TypeError):
+            frac = None
+        if frac is not None:
+            out["scenario"] = ("empty" if frac == 0.0
+                               else "occupied" if frac > 0.5 else "partial")
+            out["occupancy"] = float(frac)
     return out
 
 
@@ -1227,16 +1982,12 @@ def list_captures() -> list[dict]:
         return []
 
     files: list[dict] = []
-    for entry in _walk_captures(root, MAX_CAPTURE_DEPTH, {root.resolve()}):
-        try:
-            st = entry.stat()
-        except OSError:
-            continue  # vanished or dangling between walk and stat
+    for found in _scan_captures(root, MAX_CAPTURE_DEPTH, {root.resolve()}):
         files.append({
-            "filename": entry.relative_to(root).as_posix(),
-            "path": str(entry),
-            "size_bytes": st.st_size,
-            "mtime": st.st_mtime,
+            "filename": found.path.relative_to(root).as_posix(),
+            "path": str(found.path),
+            "size_bytes": found.stat.st_size,
+            "mtime": found.stat.st_mtime,
             # The conditions a capture was recorded under, for grouping the
             # picker. Read from the sidecar rather than from a directory
             # layout: scripts/build_dataset_tree.py can arrange the same
@@ -1244,7 +1995,7 @@ def list_captures() -> list[dict]:
             # at once. Filing them on disk instead would also put a second copy
             # of every capture inside captures/, where the walk above would
             # list it twice and the reference pooling would pick it twice.
-            **_capture_conditions(entry),
+            **_capture_conditions(found),
         })
 
     files.sort(key=lambda f: f["mtime"], reverse=True)

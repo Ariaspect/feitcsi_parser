@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchDoppler, fetchMeta, fetchPresence, fetchTile, truncateCaptureName } from "./api";
+import { fetchClassifier, fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -335,6 +335,79 @@ describe("fetchDoppler", () => {
   });
 });
 
+describe("fetchFrameDiff", () => {
+  const body = {
+    time_s: [1, 2],
+    signed: [0.01, null],
+    signed_lo: [-0.2, null],
+    signed_hi: [0.3, null],
+    magnitude: [0.05, null],
+    magnitude_hi: [0.31, null],
+    count: [12, 12],
+    bin_seconds: 0.6,
+    decimated: true,
+    frames_used: 11100,
+    frames_dropped: 314,
+    frames_dropped_narrow: 0,
+    source_mac: "08:bf:b8:95:80:04",
+    mimo: [2, 1],
+    selection_note: "08:bf:b8:95:80:04, 2x1, full width",
+    n_subcarriers: 242,
+    capture_t_min: 0,
+    capture_t_max: 600,
+    summary: {
+      steps: 11099, steps_measured: 11090, live_median: 245,
+      n_bridged: 9, n_gain_crossed: 2628,
+      gain_gated: false, gap_limit: 0.12,
+      median: 0.04, p99: 0.4, max: 0.7,
+      native_unit: "dB", median_native: 0.7, max_native: 15.1,
+    },
+  };
+
+  function stub() {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ json: body }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("maps the snake_case payload onto the camelCase series", async () => {
+    stub();
+    const out = await fetchFrameDiff("c.dat", 0, 600);
+    expect(out.signedHi).toEqual([0.3, null]);
+    expect(out.magnitudeHi).toEqual([0.31, null]);
+    expect(out.summary.nBridged).toBe(9);
+    expect(out.summary.nGainCrossed).toBe(2628);
+    expect(out.summary.liveMedian).toBe(245);
+    expect(out.mimo).toEqual([2, 1]);
+    expect(out.framesDropped).toBe(314);
+    expect(out.selectionNote).toContain("full width");
+    expect(out.summary.maxNative).toBe(15.1);
+    expect(out.summary.nativeUnit).toBe("dB");
+  });
+
+  it("sends the column budget and the gate only when asked", async () => {
+    const fetchMock = stub();
+    await fetchFrameDiff("c.dat", 0, 600, { maxPoints: 880 });
+    expect(fetchMock.mock.calls[0][0]).toContain("max_points=880");
+    expect(fetchMock.mock.calls[0][0]).not.toContain("gate_gain");
+
+    const gated = stub();
+    await fetchFrameDiff("c.dat", 0, 600, { gateGain: true });
+    expect(gated.mock.calls[0][0]).toContain("gate_gain=true");
+  });
+
+  it("surfaces the server's own reason for a refusal", async () => {
+    // A range with one frame has no step to take, and the endpoint says so.
+    // Swallowing that for a bare status code would leave the panel blank.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse({
+      ok: false, status: 400, json: { detail: "fewer than 2 frames in range" },
+    })));
+    await expect(fetchFrameDiff("c.dat", 0, 0.01)).rejects.toThrow(
+      "fewer than 2 frames in range",
+    );
+  });
+});
+
 describe("truncateCaptureName", () => {
   it("leaves a name that fits alone", () => {
     expect(truncateCaptureName("capture.dat", 30)).toBe("capture.dat");
@@ -371,34 +444,39 @@ describe("truncateCaptureName", () => {
   });
 });
 
-
-describe("fetchPresence", () => {
+describe("fetchClassifier", () => {
   const body = {
-    time_s: [1, 2],
-    state: ["present", "empty"],
-    score: [0.1, null],
-    periodicity: [0.2, 0.3],
-    tonality: [0.4, 0.5],
-    motion_gate: [1, 1],
-    motion_level: [0.09, 0.07],
-    motion_ratio: [1.3, 1.0],
-    baseline_dev: [2.9, 0.4],
-    breathing: [true, false],
-    rate_rpm: [14, null],
-    unknown: [false, false],
-    fs_hz: 17.9,
-    win: 536,
-    hop: 18,
-    window_seconds: 30,
-    rpm_floor_eff: 4,
-    baseline_dev_threshold: 1.53,
-    reference: { dev_scale: 0.51, dev_p95: 0.62, motion_floor: 0.069, n_windows: 167 },
-    frames_used: 11100,
-    frames_without_ratio: 0,
-    t_min: 0,
-    t_max: 600,
-    params: {},
-    warnings: [],
+    acf: { time_s: [1, 3], amp: [0.01, null], phase: [0.02, 0.5], window_frames: 84, window_seconds: 2.0, null_mean: -1 / 84 },
+    step: { time_s: [0.5, 1.5], level: [0.012, null], lag_seconds: 2, lag_frames: 84 },
+    units: [
+      { t0: 0, t1: 60, n_windows: 29, n_seconds: 60, n_frames: 2500, step_p90: 0.02, step_p50: 0.011,
+        acf_amp_median: -0.01, acf_amp_p90: 0.03, acf_phase_median: 0.0, acf_phase_p90: 0.05,
+        gain_crossings: 12, rssi_median: -47, camera_occupancy: 0.0, camera_frames: 60 },
+      { t0: 60, t1: 120, n_windows: 29, n_seconds: 60, n_frames: 2500, step_p90: 0.09, step_p50: 0.04,
+        acf_amp_median: 0.2, acf_amp_p90: 0.45, acf_phase_median: 0.25, acf_phase_p90: 0.5,
+        gain_crossings: 40, rssi_median: -48, camera_occupancy: 1.0, camera_frames: 60 },
+    ],
+    unit_seconds: 60,
+    fs_hz: 42.0,
+    n_subcarriers: 244,
+    frames_used: 5000,
+    frames_dropped: 3,
+    selection_note: "08:bf:b8:95:80:04, 2x1, full width",
+    source_mac: "08:bf:b8:95:80:04",
+    mimo: [2, 1],
+    features: [
+      { key: "step_p90", label: "step P90", test: "range rule", status: "in rule", reference: 0.035, axis: [0, 0.3], decimals: 4, description: "" },
+      { key: "acf_amp_p90", label: "ψ̂ amp · P90w", test: 1, status: "candidate", reference: 0.2, axis: [-0.2, 1], decimals: 3, description: "" },
+      { key: "rssi_median", label: "RSSI", test: "context", status: "context", reference: null, axis: null, decimals: 0, description: "",
+        role: "context", separates: "signal strength", not_separates: "link states" },
+    ],
+    decision: [
+      { step: "floor", test: "7", key: "lag1_p20", text: "smallest jitter of the last 6 h", evidence: "matches the oracle" },
+      { step: "present", test: "2, 3", key: "rule_b", text: "step over the floor OR a breathing run", evidence: "0.922" },
+    ],
+    steps: [{ step: "1", feature: "psi-hat", separates: "slow motion from noise", not_separates: "a sitter under the jitter" }],
+    truth: { time_s: [0, 1], present: [false, true] },
+    truth_excluded: null,
   };
 
   function stub() {
@@ -407,67 +485,39 @@ describe("fetchPresence", () => {
     return fetchMock;
   }
 
-  it("sends the reference range only when both ends are given", async () => {
-    const fetchMock = stub();
-    await fetchPresence("c.dat", 0, 600, { refT0: 400, refT1: 600 });
-    expect(fetchMock.mock.calls[0][0]).toContain("ref_t0=400");
-    expect(fetchMock.mock.calls[0][0]).toContain("ref_t1=600");
-
-    // Half a range is not a range. Sending it alone earns a 400 from the
-    // server, and the panel would show an error instead of a verdict.
-    const half = stub();
-    await fetchPresence("c.dat", 0, 600, { refT0: 400 });
-    expect(half.mock.calls[0][0]).not.toContain("ref_t0");
-    expect(half.mock.calls[0][0]).not.toContain("ref_t1");
-  });
-
-  it("omits the reference entirely when none is set", async () => {
-    const fetchMock = stub();
-    await fetchPresence("c.dat", 0, 600);
-    expect(fetchMock.mock.calls[0][0]).not.toContain("ref_t");
-  });
-
-  it("percent-encodes a reference capture path", async () => {
-    const fetchMock = stub();
-    await fetchPresence("c.dat", 0, 600, {
-      refT0: 0,
-      refT1: 10,
-      refPath: "a b/night one.bin",
-    });
-    expect(fetchMock.mock.calls[0][0]).toContain(
-      `ref_path=${encodeURIComponent("a b/night one.bin")}`,
-    );
-  });
-
-  it("maps the reference summary and threshold onto the result", async () => {
+  it("keys each unit's values by the bank the server sent", async () => {
     stub();
-    const result = await fetchPresence("c.dat", 0, 600, { refT0: 400, refT1: 600 });
-
-    expect(result.baselineDevThreshold).toBe(1.53);
-    expect(result.reference).toEqual({
-      devScale: 0.51,
-      devP95: 0.62,
-      motionFloor: 0.069,
-      nWindows: 167,
-    });
-    expect(result.baselineDev).toEqual([2.9, 0.4]);
-    expect(result.motionRatio).toEqual([1.3, 1.0]);
-    expect(result.breathing).toEqual([true, false]);
+    const out = await fetchClassifier("c.dat", 0, 120);
+    expect(out.features.map((f) => f.key)).toEqual(["step_p90", "acf_amp_p90", "rssi_median"]);
+    expect(out.features[1].test).toBe("1");
+    expect(out.units).toHaveLength(2);
+    expect(out.units[1].values).toEqual({ step_p90: 0.09, acf_amp_p90: 0.45, rssi_median: -48 });
+    expect(out.units[0].cameraOccupancy).toBe(0);
+    expect(out.acf.nullMean).toBeCloseTo(-1 / 84);
+    expect(out.step.lagSeconds).toBe(2);
+    expect(out.truth?.present).toEqual([false, true]);
+    expect(out.features[2].role).toBe("context");
+    expect(out.features[2].notSeparates).toBe("link states");
+    expect(out.features[0].role).toBe("");
+    expect(out.decision.map((d) => d.step)).toEqual(["floor", "present"]);
+    expect(out.decision[1].key).toBe("rule_b");
+    expect(out.steps[0].notSeparates).toBe("a sitter under the jitter");
   });
 
-  it("reports a missing reference as null rather than as zero", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        mockResponse({
-          json: { ...body, baseline_dev_threshold: null, reference: null },
-        }),
-      ),
-    );
-    const result = await fetchPresence("c.dat", 0, 600);
+  it("sends the unit length, the window and the lag", async () => {
+    const fetchMock = stub();
+    await fetchClassifier("c.dat", 0, 120, { unitS: 30, acfFrames: 42, lagS: 0.5 });
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("unit_s=30");
+    expect(url).toContain("acf_frames=42");
+    expect(url).toContain("lag_s=0.5");
+    expect(url).not.toContain("interpolate=false");
+  });
 
-    // Zero would mean "every window is occupied"; null means "no verdict".
-    expect(result.baselineDevThreshold).toBeNull();
-    expect(result.reference).toBeNull();
+  it("surfaces the server's own reason for a refusal", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse({
+      ok: false, status: 400, json: { detail: "fewer than 2 frames in range" },
+    })));
+    await expect(fetchClassifier("c.dat", 0, 0.01)).rejects.toThrow("fewer than 2 frames in range");
   });
 });

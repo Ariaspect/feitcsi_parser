@@ -1,0 +1,568 @@
+# The hybrid detector: calibration-free presence
+
+`backend/hybrid.py`, `/api/hybrid`, the **Hybrid** tab. Presence from two
+kinds of evidence and a hold, with no empty-room reference of any kind.
+
+## Rule
+
+![pipeline](figures/hybrid_pipeline.png)
+
+*Figure: the pipeline from CSI frames to the scored verdict (own-floor
+default, bridge off, 2026-09-23). Regenerate with `python docs/figures/hybrid_pipeline_fig.py`.*
+
+A human in a room cannot be quiet in both senses at once: over any half
+minute they either move — irregularly — or sit still, and a still human
+breathes. A pushed chair does neither once it is down.
+
+- **Motion burst**: per-second median |Δr|/|r| of the CSI ratio above a
+  threshold for ≥ 2 s. Opens presence, refreshes it.
+- **Breathing**: the FarSense normalised autocorrelation peak (*first
+  positive* local maximum) ≥ 0.2 through 10 s of consecutive windows, 80 %
+  of which agree on the rate within ±3 rpm of the run's median. Opens
+  presence too; keeps it open while the person sits. FarSense settings
+  (set 2026-09-22): 10 s window, 10–30 rpm, keep ≥ 0.65 × best BNR, 200 θ
+  steps, 1.0 s Savitzky-Golay, no high-pass, stationary gate off. (The
+  window and the run were 15 s for part of that day; rows below say
+  which.) Every
+  one of them is a knob on the tab. The numbers in §1 were measured with
+  the earlier set (30 s window, 10–37 rpm, 0.7, 100 θ, 0.5 s S-G, 0.1 Hz
+  high-pass, peak ≥ 0.15) unless a row says otherwise.
+- **Hold**: presence persists 20 s after the last evidence, then drops.
+- **Leading hold** (`lead_hold`, on): breathing evidence also holds
+  presence 20 s *before* it. A gap between two pieces of evidence whose
+  holds meet — a burst's trailing hold reaching a breathing run's leading
+  hold, or two trailing holds — is present throughout (state `bridged`).
+
+The motion threshold is `max(2 × floor, 0.10)`, where *floor* is the
+range's own quiet level — the 20th percentile of its per-second motion
+level. Nothing outside the range is consulted. (A floor pooled from the
+captures within ±2 h was the default from 2026-09-21 to 2026-09-22 and was
+removed: it is a reference taken from other captures, not calibration-free,
+and on `20260915_211721` it set the threshold to 0.10 under a range whose
+own level was 0.12 — the whole empty tail read as present. Its numbers stay
+below as data.)
+
+Scored on a 1 s grid against the camera through `backend.truth` (empty
+frames within 5 s of a transition not scored).
+
+## 1. Corpus, 75 labelled captures (September 20 Hz + 2026-09-21 42 Hz)
+
+| variant | recall | specificity | balanced |
+|---|---|---|---|
+| first cut (all-or-nothing breathing run, paper's first peak, own floor) | 39.6 % | 88.9 % | 64.2 % |
+| **+ tolerant run (80 %), first *positive* peak, own floor (default)** | **56.3 %** | **82.0 %** | **69.1 %** |
+| + floor from the whole day | 75.8 % | 74.9 % | 75.3 % |
+| + floor from ±2 h (removed 2026-09-22) | 75.7 % | 80.5 % | 78.1 % |
+| ±2 h floor, hold 30 | 79.1 % | 76.6 % | 77.8 % |
+| ±2 h floor, hold 20, + leading hold | 80.6 % | 76.7 % | 78.7 % |
+
+Leading hold on/off, hold 20, by floor and link (recall / specificity /
+balanced):
+
+| floor | lead | all 75 | 2026-09-21 (32) | September (43) |
+|---|---|---|---|---|
+| ±2 h | off | 75.7 / 80.5 / 78.1 | 97.5 / 85.2 / 91.4 | 63.9 / 76.0 / 69.9 |
+| ±2 h | on | 80.6 / 76.7 / 78.7 | 99.1 / 82.2 / 90.7 | 70.7 / 71.4 / 71.1 |
+| none (fixed 0.10) | off | 95.4 / 59.0 / 77.2 | 97.5 / 85.2 / 91.4 | 94.3 / 34.1 / 64.2 |
+| none (fixed 0.10) | on | 96.7 / 56.2 / 76.4 | 99.1 / 82.2 / 90.7 | 95.4 / 31.4 / 63.4 |
+| own range | off | 56.3 / 82.0 / 69.1 | 49.8 / 85.2 / 67.5 | 59.8 / 78.9 / 69.4 |
+| own range | on | 62.4 / 78.2 / 70.3 | 54.5 / 82.2 / 68.4 | 66.7 / 74.4 / 70.5 |
+
+Fixed thresholds without any floor, lead off (all / 0921 / September,
+balanced): 0.05 → 74.5 / 90.7 / 59.0; 0.10 → 77.2 / 91.4 / 64.2; 0.20 →
+74.0 / 81.4 / 67.6; 0.30 → 68.6 / 68.2 / 68.4. Breathing only, no motion
+channel: 66.8 / 65.4 / 67.2.
+
+By link, ±2 h floor (removed), hold 20:
+
+| link | n | recall | specificity | balanced |
+|---|---|---|---|---|
+| **2026-09-21, 42 Hz, lab_a** | 32 | 97.5 % | 85.2 % | **91.4 %** |
+| September, 20 Hz | 43 | 63.9 % | 76.0 % | 69.9 % |
+
+For comparison, the calibrated amplitude-offset detector with in-capture
+calibration and the same 5 s margin scores 84.8 % balanced on its 20-capture
+September subset — and needs a labelled empty stretch that a moved chair
+invalidates. On the current link the calibration-free detector is above
+that with no reference at all.
+
+### KPI #1 set: the 42 September captures the calibrated number used
+
+The 2026-09-18 KPI #1 report scored the amplitude-offset detector with
+in-capture calibration on 42 captures: the 53 September (09-09 … 09-16)
+captures with any camera occupancy, minus the 11 without a 30 s
+camera-empty stretch long enough to calibrate. The hybrid on the same 42,
+every second scored (it holds nothing out), hold 20, through the `:8002`
+endpoint on lg. The ±2 h rows were measured before that floor was removed:
+
+| detector | margin | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|
+| calibrated, in-capture, 15 s matched window (report) | 0 | 87.4 % | 82.4 % | 93.6 % | 88.0 % |
+| calibrated, in-capture, 1 s tiles (report) | 0 | 86.1 % | 83.5 % | 89.0 % | 86.3 % |
+| hybrid, ±2 h floor, lead hold off | 0 | 71.8 % | 86.3 % | 64.3 % | 75.3 % |
+| hybrid, ±2 h floor, lead hold on | 0 | 70.0 % | 90.6 % | 59.3 % | 75.0 % |
+| hybrid, ±2 h floor, lead hold off | 5 | 73.9 % | 86.3 % | 67.1 % | 76.7 % |
+| hybrid, ±2 h floor, lead hold on | 5 | 72.0 % | 90.6 % | 61.8 % | 76.2 % |
+| **hybrid, own floor (default), lead hold off** | 0 | 72.7 % | 84.9 % | 66.5 % | 75.7 % |
+| hybrid, own floor, lead hold on | 0 | 70.8 % | 89.0 % | 61.4 % | 75.2 % |
+| hybrid, own floor, lead hold off | 5 | 74.8 % | 84.9 % | 69.3 % | 77.1 % |
+| hybrid, own floor, lead hold on | 5 | 72.9 % | 89.0 % | 64.0 % | 76.5 % |
+| hybrid, own floor, lead off, **2026-09-22 FarSense set** | 0 | 75.0 % | 68.0 % | 78.6 % | 73.3 % |
+| hybrid, own floor, lead on, 2026-09-22 FarSense set | 0 | 75.9 % | 73.2 % | 77.2 % | 75.2 % |
+| hybrid, own floor, lead off, 2026-09-22 FarSense set | 5 | 76.9 % | 68.0 % | 81.8 % | 74.9 % |
+| **hybrid, own floor, lead on, 2026-09-22 FarSense set (current default)** | 5 | 78.0 % | 73.2 % | 80.6 % | 76.9 % |
+
+By day, hybrid with the ±2 h floor, lead hold on, margin 5 (balanced; lead off in brackets):
+09-09 (1) 93.0 [93.0]; 09-10 (2) 77.1 [80.9]; 09-11 (19) 75.1 [75.9];
+09-14 (7) 65.1 [68.7]; 09-15 (12) 81.1 [79.4]; 09-16 (1) 96.2 [96.2].
+With the range's own floor the threshold is the 0.10 minimum on 26 of the
+42 and 0.105–0.265 on the rest; `20260915_211721` goes from 166 fp / 3 tn
+(pooled floor 0.019) to 22 fp / 147 tn (own floor 0.118, threshold 0.236),
+at the cost of 75 fn. Pooled totals barely move because the two floors
+coincide on most of the set. The errors are false positives in the empty
+stretches: 2 808 fp against 5 002 tn at margin 5, own floor, lead on.
+
+The 2026-09-22 FarSense set (15 s window, 10–30 rpm, keep 0.6, 200 θ,
+S-G 1.0 s, no high-pass, peak ≥ 0.2) trades recall for specificity: at
+margin 5 with lead on, fp 2 808 → 1 512 and fn 472 → 1 146. By day
+(balanced, lead on, margin 5; previous set in brackets): 09-09 93.0
+[93.0], 09-10 87.4 [76.7], 09-11 78.8 [75.1], 09-14 70.3 [65.1], 09-15
+76.5 [81.0], 09-16 85.1 [96.0]. The captures now missed are still
+sitters: `20260915_152235` recall 29.5, `20260915_211721` 27.2,
+`20260911_141638` 26.2.
+
+### 2026-09-22 evaluation set: KPI #1 minus anomalies, plus 09-17 and 09-21
+
+Three captures the user marked anomalous are excluded: `20260911_135229`,
+`20260911_154719`, `20260917_134843`. Every labelled capture from 09-17 and
+09-21 is added (lg holds none for 09-18 … 09-20). Current defaults
+(2026-09-22 FarSense set, own floor, hold 20), margin 5, lead on / off:
+
+| group | n | occupied | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|---|
+| KPI set minus anomalies | 40 | 35 % | on | 79.5 % | 73.3 % | 82.8 % | **78.1 %** |
+| | | | off | 78.2 % | 67.8 % | 83.8 % | 75.8 % |
+| 09-17 | 6 | 63 % | on | 69.9 % | 55.6 % | 94.6 % | 75.1 % |
+| | | | off | 67.7 % | 51.6 % | 95.3 % | 73.5 % |
+| 09-21 | 32 | 32 % | on | 76.3 % | 42.3 % | 92.3 % | 67.3 % |
+| | | | off | 75.1 % | 37.6 % | 92.7 % | 65.1 % |
+| all | 78 | 36 % | on | 77.4 % | 59.4 % | 87.6 % | 73.5 % |
+| | | | off | 76.1 % | 54.4 % | 88.2 % | 71.3 % |
+
+By day, balanced, lead on [off]: 09-09 93.0 [93.0], 09-10 87.4 [89.3],
+09-11 82.0 [78.8], 09-14 70.3 [69.9], 09-15 76.5 [73.5], 09-16 85.1
+[88.7], 09-17 75.1 [73.5], 09-21 67.3 [65.1].
+
+The same set with the window and the breathing run at 10 s (the current
+default; the table above is 15 s / 15 s), margin 5:
+
+| group | n | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|
+| KPI set minus anomalies | 40 | on | 77.0 % | 72.4 % | 79.5 % | 75.9 % |
+| | | off | 76.5 % | 67.1 % | 81.6 % | 74.4 % |
+| 09-17 | 6 | on | 66.7 % | 50.4 % | 94.8 % | 72.6 % |
+| | | off | 65.2 % | 47.7 % | 95.3 % | 71.5 % |
+| 09-21 | 32 | on | 76.3 % | 42.1 % | 92.4 % | 67.2 % |
+| | | off | 74.8 % | 36.5 % | 92.8 % | 64.7 % |
+| all | 78 | on | 75.9 % | 58.2 % | 85.9 % | 72.0 % |
+| | | off | 74.9 % | 53.2 % | 87.2 % | 70.2 % |
+
+Lowest accuracy, 10 s, lead on: `20260917_143944`, `20260921_201725`,
+`_202301`, `_203359` at 0 % (occupied throughout, own floor 0.14–0.16 so the
+motion threshold is 0.28–0.31, no breathing run found); `20260917_142007`
+15 %, `20260921_202830` 25 %, `_203926` 29 %, `_204455` 31 % (same shape);
+`20260915_152235` 30 % (recall 29.5, specificity 31.1); `20260914_125024`
+47 % (recall 68.1, specificity 32.9).
+
+On 09-21 the three evening captures occupied throughout
+(`20260921_201725`, `_202301`, `_203359`) score recall 0: their own floor
+is 0.15 (the occupant), so the motion threshold is 0.30 and never trips,
+and the breathing channel under the new set finds no run. Under the
+previous set with the pooled floor the same day scored 91.4 % (§1).
+
+### Empty captures and control-scenario captures (2026-09-22, 10 s defaults)
+
+Grouped from the camera labels over every labelled capture on lg
+(104, the three anomalous ones excluded): **empty** = no occupied frame at
+all (23); **control** = empty ≥ 20 s, one occupied block ≥ 30 s (gaps ≤ 5 s
+merged), empty ≥ 20 s (44, spanning 09-04 … 09-22). Margin 5.
+
+| group | n | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|
+| empty | 23 | on / off | 95.1 % | — | 95.1 % | — |
+| control | 44 | on | 80.3 % | 79.5 % | 80.9 % | 80.2 % |
+| | | off | 78.3 % | 72.6 % | 82.3 % | 77.5 % |
+
+Empty: 19 of 23 captures have zero false-positive seconds (every 09-21
+night capture, 09-16, 09-17); the 339 fp are four captures —
+`20260922_152927` 92 s, `20260922_135920` 89 s, `20260914_131846` 85 s,
+`20260915_135620` 73 s — all with a low own floor (0.03–0.07) so the
+threshold is at or near the 0.10 minimum. Lead hold changes nothing in an
+empty capture (no breathing evidence to lead).
+
+Control, by day, balanced, lead on [off]: 09-04 (2) 94.8 [92.3], 09-09 (1)
+93.0 [93.0], 09-11 (17) 81.6 [78.2], 09-14 (6) 63.9 [66.0], 09-15 (4) 79.0
+[73.7], 09-17 (2) 94.7 [93.6], 09-21 (10) 78.5 [74.9], 09-22 (2) 93.4
+[88.6]. Lowest accuracy: `20260914_125024` 47.1 (fp 116), `20260914_135133`
+51.6, `20260911_102312` 52.9 (recall 27.5), `20260914_130413` 52.9 (recall
+28.1), `20260921_135955` 53.9 (recall 22.5).
+
+### Keep-fraction sweep on the two groups (2026-09-22)
+
+Same empty and control groups (22 empty — `20260922_152927` had gone
+missing from lg by then — and 44 control), 10 s defaults, lead on, margin
+5, keep ≥ x × best BNR:
+
+| keep | total accuracy (66) | empty specificity | empty fp s | control accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|---|
+| 0.60 | 85.7 % | 96.2 % | 247 | 80.3 % | 79.5 % | 80.9 % | 80.2 % |
+| 0.65 | 85.7 % | 95.5 % | 299 | 80.6 % | 83.0 % | 78.9 % | 81.0 % |
+| 0.70 | 84.5 % | 94.7 % | 349 | 79.2 % | 86.8 % | 73.8 % | 80.3 % |
+| 0.75 | 82.0 % | 92.6 % | 490 | 76.6 % | 90.9 % | 66.4 % | 78.6 % |
+| 0.80 | 74.5 % | 79.2 % | 1368 | 72.1 % | 92.7 % | 57.4 % | 75.0 % |
+
+Lower keep (fewer, better subcarriers voting) is stricter: recall falls,
+specificity rises. At 0.80 eleven of the 22 empty captures start firing
+(the 09-21 night captures included, 50–156 s each); at 0.60–0.70 the same
+three or four low-floor captures carry all the empty false positives.
+
+### Final KPI #1 (2026-09-22, keep 0.65): empty + control captures
+
+The number the user asked for: the empty (22) and control-scenario (44)
+captures — captures occupied from start to end excluded — current
+defaults (keep 0.65), lead on, margin 5. Keep 0.50–0.70 was swept on this
+set with lead on and off; 0.65 ties 0.60 for the best total accuracy and
+has the best control balanced accuracy, so it stays.
+
+| keep | lead | total accuracy (66) | empty specificity | control accuracy | control recall | control specificity | control balanced |
+|---|---|---|---|---|---|---|---|
+| 0.50 | on | 85.5 % | 96.2 % | 79.9 % | 75.3 % | 83.1 % | 79.2 % |
+| 0.55 | on | 85.0 % | 96.2 % | 79.2 % | 76.1 % | 81.5 % | 78.8 % |
+| 0.60 | on | 85.7 % | 96.2 % | 80.3 % | 79.5 % | 80.9 % | 80.2 % |
+| **0.65** | **on** | **85.7 %** | 95.5 % | **80.6 %** | 83.0 % | 78.9 % | **81.0 %** |
+| 0.70 | on | 84.5 % | 94.7 % | 79.2 % | 86.8 % | 73.8 % | 80.3 % |
+| 0.65 | off | 84.8 % | 95.8 % | 79.2 % | 76.6 % | 81.0 % | 78.8 % |
+
+Pooled over all 66 at keep 0.65, lead on: recall 83.0 %, specificity
+86.7 %, balanced 84.9 %.
+
+#### Band floor check (rpm_lo 10 / 12 / 14, keep 0.65, window 10 s)
+
+A 10 s window holds under two periods at 10 rpm, so the band's bottom was
+suspected of feeding empty-room false positives. Same 66 captures:
+
+| rpm_lo | lead | total accuracy | empty specificity | empty fp s | control accuracy | control recall | control specificity | control balanced | all-66 balanced |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 | on | 85.7 % | 95.5 % | 299 | 80.6 % | 83.0 % | 78.9 % | 81.0 % | 84.9 % |
+| 12 | on | 85.3 % | 94.7 % | 349 | 80.4 % | 85.0 % | 77.0 % | 81.0 % | 85.2 % |
+| 14 | on | 85.7 % | 93.1 % | 452 | 81.8 % | 89.8 % | 76.1 % | 83.0 % | 87.0 % |
+| 10 | off | 84.8 % | 95.8 % | 279 | 79.2 % | 76.6 % | 81.0 % | 78.8 % | 82.3 % |
+| 14 | off | 85.5 % | 94.3 % | 372 | 81.0 % | 83.8 % | 78.9 % | 81.4 % | 85.0 % |
+
+Total accuracy does not move (85.7 at 10 and 14). Raising the floor adds
+recall (83.0 → 89.8 on control) and *adds* empty false positives (299 →
+452): the three empty captures that fire at 10 rpm fire identically at
+12 and 14 (85 / 73 / 89 s), and `20260916_140316` grows 52 → 102 → 156 s.
+On this set the empty-room false positives are not a band-bottom
+artefact; a narrower band makes the ±3 rpm agreement easier to meet.
+Default left at 10 rpm.
+
+#### Bridging between bursts (`bridge_bursts`, 2026-09-22)
+
+The whole stretch between two motion bursts is present when breathing lies
+between them: `run` needs a breathing run (persistence rule), `any` a
+single window with peak ≥ 0.2. Same 66 captures, keep 0.65:
+
+| mode | lead | total accuracy | empty specificity | empty fp s | control accuracy | control recall | control specificity | control balanced | control fp s | control fn s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| off | on | 85.7 % | 95.5 % | 299 | 80.6 % | 83.0 % | 78.9 % | 81.0 % | 1562 | 899 |
+| run | on | 87.8 % | 95.5 % | 299 | 83.8 % | 90.6 % | 78.9 % | 84.8 % | 1562 | 497 |
+| any | on | 88.0 % | 95.0 % | 332 | 84.4 % | 99.9 % | 73.3 % | 86.6 % | 1977 | 4 |
+| off | off | 84.8 % | 95.8 % | 279 | 79.2 % | 76.6 % | 81.0 % | 78.8 % | 1406 | 1239 |
+| run | off | 88.7 % | 95.8 % | 279 | 85.0 % | 90.6 % | 81.0 % | 85.8 % | 1406 | 497 |
+| any | off | 88.9 % | 95.3 % | 312 | 85.6 % | 99.9 % | 75.3 % | 87.6 % | 1826 | 4 |
+
+`run` removes 402 s of misses in eight control captures without adding a
+false-positive second anywhere (the bridged stretches lie inside the
+stay). `any` removes all but 4 s of misses and adds 415 s of false
+positives in the control captures (the person's approach and departure
+bursts bracket empty seconds) plus 33 s in two empty captures. With
+bridging on, the leading hold only adds false positives: lead off + run
+88.7 %, lead off + any 88.9 %. `any` was the default from 2026-09-22 and was rolled back to `off` on
+2026-09-23 (the user judged the fill too risky); the option stays on the tab.
+
+#### Three classification accuracies and the dataset status (2026-09-22)
+
+All 105 labelled captures on lg (three anomalous excluded), current
+defaults, lead on, margin 5. Motion / static seconds come from the camera
+boxes: a second is *motion* when the highest-confidence box moved ≥ 20 px
+or changed area by > 30 % since the previous frame, *static* otherwise.
+
+| classification | seconds | bridge off | bridge run |
+|---|---|---|---|
+| empty room (specificity) — all empty seconds | 18 275 | 84.6 % | 84.6 % |
+| — in empty captures | 6 582 | 95.5 % | 95.5 % |
+| — in control captures | 7 570 | 78.9 % | 78.9 % |
+| — in other captures | 4 123 | 77.9 % | 77.9 % |
+| motion (recall) | 964 | 91.9 % | 91.9 % |
+| static presence (recall) | 10 957 | 60.0 % | 64.0 % |
+
+| dataset | captures | occupied s | empty s | accuracy | F1 | recall | specificity | run: accuracy | run: F1 |
+|---|---|---|---|---|---|---|---|---|---|
+| empty | 22 | 0 | 6 582 | 95.5 % | — | — | 95.5 % | 95.5 % | — |
+| control | 45 | 5 420 | 7 570 | 80.8 % | 78.4 % | 83.4 % | 78.9 % | 83.9 % | 82.5 % |
+| fully occupied | 16 | 4 817 | 0 | 40.8 % | 57.9 % | 40.8 % | — | 41.4 % | 58.6 % |
+| other (near-empty, multi-visit) | 22 | 1 922 | 4 123 | 71.8 % | 56.9 % | 58.6 % | 77.9 % | 71.8 % | 56.9 % |
+| all | 105 | 12 159 | 18 275 | 75.8 % | 67.4 % | 62.6 % | 84.6 % | 77.3 % | 69.9 % |
+
+By day (accuracy / F1, bridge off): 09-03 72.8 / 84.3; 09-04 69.3 / 73.6;
+09-09 94.0 / 95.0; 09-10 78.0 / 26.3; 09-11 82.3 / 79.0; 09-14 73.5 /
+61.5; 09-15 76.1 / 61.8; 09-16 58.8 / 64.5; 09-17 66.6 / 65.6; 09-21 78.0 /
+57.9; 09-22 87.0 / 78.0.
+
+#### Per-situation accuracy with `any` + lead on (default since 2026-09-22)
+
+Sets from the user's capture log (CSV). "Whole" scores the capture's occupied
+seconds against its own empty stretches; "occupied only" scores the occupied
+part alone (accuracy = recall, precision fixed at 100). Bridging `off` in
+brackets.
+
+| situation | captures | whole: accuracy / F1 | occupied only: recall / F1 |
+|---|---|---|---|
+| empty room (empty as the positive label) | 22 | 95.0 / 97.4 [95.5 / 97.7] | — |
+| motion · walking around | 3 | 83.1 / 82.8 [88.6 / 87.7] | 100.0 / 100.0 [100.0 / 100.0] |
+| motion · seated, fidgeting | 13 | 16.7 / 28.7 [16.7 / 28.7] | 16.8 / 28.8 [16.8 / 28.8] |
+| motion · phone | 28 | 84.3 / 84.1 [80.3 / 77.4] | 100.0 / 100.0 [81.6 / 89.9] |
+| static presence (sitting still, no phone; box-still seconds) | 14 | 84.8 / 88.7 [76.8 / 81.5] | 95.3 / 97.6 [81.8 / 90.0] |
+
+By group, `any`: empty specificity 95.0 %, control accuracy 84.5 % / F1
+84.3 % (recall 99.9, specificity 73.4), fully occupied recall 44.5 %,
+other 66.8 % / 56.3 %. Empty + control total accuracy 88.0 %.
+
+The 13 fidgeting captures do not move: they have 0–4 s of bursts, so there
+is no pair of bursts to bridge, and 0–47 s of breathing runs even though
+26–75 of their 300 windows individually clear peak ≥ 0.2 — the rate does
+not hold for 10 s. The three still sitters have 107–289 s of runs.
+
+#### Sparse breathing (`sparse_fraction`, 2026-09-22)
+
+A second is breathing evidence when at least this fraction of the FarSense
+windows within ±30 s clear peak ≥ 0.2, rate not required. All 105
+captures, on top of `any` + lead on:
+
+| fraction | off | 0.2 | 0.3 | 0.4 | 0.5 | 0.6 |
+|---|---|---|---|---|---|---|
+| empty (22) specificity | 95.0 | 88.3 | 95.0 | 95.0 | 95.0 | 95.0 |
+| control accuracy / F1 | 84.5 / 84.3 | 70.8 / 74.1 | 80.3 / 80.9 | 84.0 / 83.9 | 84.5 / 84.3 | 84.5 / 84.3 |
+| control specificity | 73.4 | 50.0 | 66.2 | 72.7 | 73.4 | 73.4 |
+| fully occupied (16) recall | 44.5 | 78.5 | 52.5 | 45.4 | 45.1 | 44.6 |
+| seated fidgeting (13) recall | 16.8 | 69.1 | 32.6 | 19.3 | 17.5 | 16.8 |
+| still sitters (14) recall | 95.5 | 98.9 | 98.0 | 97.7 | 97.3 | 95.7 |
+| empty + control accuracy | 88.0 | 76.7 | 85.2 | 87.7 | 88.0 | 88.0 |
+| all 105 accuracy / F1 | 76.9 / 71.6 | 73.9 / 73.4 | 76.7 / 72.8 | 77.1 / 72.1 | 77.1 / 71.9 | 76.9 / 71.6 |
+
+The fidgeting sitters clear the peak in 9–25 % of their windows, so only
+a fraction ≤ 0.2–0.3 reaches them; at 0.2 the empty room fires too
+(six empty captures gain 44–194 s each) and the control empty stretches
+lose 23 points of specificity. From 0.4 up the rule is nearly inert.
+Default left at 0 (off).
+
+#### Clamping the own floor (2026-09-22)
+
+The rule is already `max(2 × floor, 0.10)`, so a floor under 0.05 gives 0.10.
+Variants on all 105 captures, `any` + lead on: **A** — floor < 0.10 →
+threshold 0.10 (touches only floors in 0.05–0.10); **C** — floor > 0.10 →
+floor capped at 0.10 (threshold 0.20); **A+C**; fixed 0.10.
+
+| metric | own | A | C | A+C | fixed |
+|---|---|---|---|---|---|
+| empty (22) specificity | 95.0 | 92.3 | 86.9 | 84.2 | 79.5 |
+| control accuracy / F1 | 84.5 / 84.3 | 83.3 / 83.3 | 82.0 / 82.3 | 80.9 / 81.4 | 80.9 / 81.4 |
+| fully occupied (16) recall | 44.5 | 44.5 | 85.7 | 85.7 | 99.0 |
+| seated fidgeting (13) recall | 16.8 | 16.8 | 81.2 | 81.2 | 99.5 |
+| other (22) accuracy | 66.8 | 56.1 | 74.8 | 64.1 | 55.6 |
+| empty + control accuracy | 88.0 | 86.3 | 83.7 | 82.0 | 80.4 |
+| all 105 accuracy / F1 | 76.9 / 71.6 | 73.7 / 68.9 | 82.2 / 80.8 | 79.0 / 78.1 | 78.4 / 78.6 |
+
+Own floors by kind (min / median / max): empty 0.015 / 0.017 / 0.170 (3
+of 22 above 0.10); control 0.011 / 0.028 / 0.172 (2 of 45); fully
+occupied 0.038 / 0.145 / 0.165 (15 of 16); other 0.019 / 0.093 / 0.156
+(9 of 22). A floor above 0.10 is therefore an occupant in 24 captures and
+a noisy empty link in 5. Default unchanged.
+
+Excluding the three noisy empty captures the user judged bad data
+(`20260916_140316`, `20260916_140908`, `20260917_201323`), own vs C on the
+remaining 102:
+
+| metric | own | C |
+|---|---|---|
+| empty (19) specificity | 95.1 | 95.1 |
+| control (45) accuracy / F1 | 84.5 / 84.3 | 82.0 / 82.3 |
+| fully occupied (16) recall | 44.5 | 85.7 |
+| seated fidgeting (13) recall | 16.8 | 81.2 |
+| other (22) accuracy / F1 | 66.8 / 56.3 | 74.8 / 70.5 |
+| empty + control accuracy | 87.7 | 86.0 |
+| all 102 accuracy / F1 | 76.4 / 71.7 | 83.7 / 82.5 |
+
+C's remaining cost sits in three captures on the same noisy days:
+`20260917_195828` fp 19 → 189 s, `20260917_161300` 17 → 164 s,
+`20260916_151218` 132 → 177 s (their empty stretches sit at 0.13–0.17).
+
+C combined with the sparse rule (102 captures, `any` + lead on):
+
+| metric | own | C | C + sparse 0.3 | C + sparse 0.4 | C + sparse 0.5 |
+|---|---|---|---|---|---|
+| empty (19) specificity | 95.1 | 95.1 | 95.1 | 95.1 | 95.1 |
+| control accuracy / F1 | 84.5 / 84.3 | 82.0 / 82.3 | 78.4 / 79.5 | 81.7 / 82.0 | 82.0 / 82.3 |
+| seated fidgeting (13) recall | 16.8 | 81.2 | 85.6 | 82.3 | 81.2 |
+| still sitters (14) recall | 95.5 | 97.4 | 98.7 | 98.4 | 98.1 |
+| still sitters accuracy / F1 (whole) | 85.5 / 89.5 | 82.4 / 87.7 | 80.6 / 86.8 | 82.6 / 87.9 | 82.8 / 88.0 |
+| all 102 accuracy / F1 | 76.4 / 71.7 | 83.7 / 82.5 | 82.2 / 81.5 | 83.6 / 82.5 | 83.7 / 82.6 |
+
+The still sitters are already at 95–100 % recall on 11 of 14 under C; the
+sparse rule lifts the three below (`20260916_143259` 92 → 98,
+`20260916_145728` 90 → 97) and lowers the empty-stretch specificity of the
+control-shaped ones (`20260914_134409` 93 → 73, `20260915_152235` 31 → 5 at
+0.3). Nothing changes in the 19 empty captures.
+
+#### The same defaults on the 78-capture set (fully occupied captures included)
+
+Same defaults, margin 5. The fully occupied captures (own floor = the
+occupant, no motion ever trips) pull this set down:
+
+| group | n | lead | accuracy | recall | specificity | balanced |
+|---|---|---|---|---|---|---|
+| KPI set minus anomalies | 40 | on | 76.8 % | 73.2 % | 78.8 % | 76.0 % |
+| | | off | 76.7 % | 68.5 % | 81.2 % | 74.8 % |
+| 09-17 | 6 | on | 66.6 % | 50.4 % | 94.5 % | 72.4 % |
+| | | off | 65.3 % | 47.9 % | 95.3 % | 71.6 % |
+| 09-21 | 32 | on | 78.0 % | 47.4 % | 92.4 % | 69.9 % |
+| | | off | 76.1 % | 40.7 % | 92.8 % | 66.8 % |
+| all | 78 | on | 76.5 % | 60.5 % | 85.5 % | 73.0 % |
+| | | off | 75.6 % | 55.4 % | 86.9 % | 71.2 % |
+
+Against keep 0.60 (same set, lead on): KPI set 76.8 / 76.0 vs 77.0 / 75.9
+(accuracy / balanced), 09-21 78.0 / 69.9 vs 76.3 / 67.2, all 76.5 / 73.0
+vs 75.9 / 72.0. By day, balanced, lead on: 09-09 93.0, 09-10 88.5, 09-11
+82.0, 09-14 69.3, 09-15 69.6, 09-16 76.0, 09-17 72.4, 09-21 69.9.
+
+### Label fix: `20260915_143211` (2026-09-23)
+
+The person lay on the desk and YOLO detected them only while entering
+(frames 106–112) and leaving (220–227). At the user's instruction every
+frame between the first and the last detection was set to occupied in the
+`_cv.json` sidecar (107 frames filled, `manual: true` on each, a
+`manual_override` record at the top level, the original kept as
+`_cv.json.orig`) on lg and in the local captures folder. Occupancy 5 % →
+40.8 %. Under the current defaults the capture now scores accuracy 94.1 %,
+recall 100 %, specificity 89.8 % (fp 17, tn 150) where the old label had
+given specificity 56.8 % with 114 "false positives" — the lying person.
+Every table above that includes this capture was computed with the old
+label.
+
+### Excluded from evaluation: `20260915_135620` (2026-09-23)
+
+The 13:56 "empty room" capture had people walking and talking loudly
+outside the room; the user judged it contaminated. Its sidecar now carries
+a top-level `exclude_from_eval` record (reason, set_by, time) on lg and
+locally. `backend.app._camera_truth` returns no truth for a flagged
+sidecar, so `/api/hybrid` (and every other scorer that goes through it)
+reports no confusion for the capture, the tab says "not scored — excluded
+from evaluation: …", and the corpus scripts drop it without a hand-kept
+list. Frames are left intact for viewing. Earlier tables that list 22 empty
+captures include it.
+
+`20260911_154719` (15:47, one of the three captures the user had called
+anomalous) was flagged the same way on 2026-09-23.
+
+### Evaluation on the user's curated log (2026-09-23)
+
+Only captures whose first column in the experiment log is blank or carries a
+heart (❤️) were scored — 48 captures (41 dropped by tag: 🤨 ☠️ ❌ ⭐ 폐기,
+and the "새벽 15개" row, which is text). Current defaults (own floor, lead
+hold on, bridge off, sparse off, keep 0.65, 10 s window), margin 5.
+
+| set | n | accuracy | F1 | recall | specificity |
+|---|---|---|---|---|---|
+| curated 48 | 48 | 79.9 % | 76.6 % | 69.1 % | 89.8 % |
+| — empty (occupancy 0) | 6 | 97.1 % | — | — | 97.1 % |
+| — visits (0 < occupancy < 98 %) | 32 | 88.4 % | 86.1 % | 89.9 % | 87.4 % |
+| — fully occupied | 10 | 43.6 % | 60.7 % | 43.6 % | — |
+| curated 48 + the 13 night empties on lg | 61 | 84.3 % | 76.6 % | 69.1 % | 93.3 % |
+| curated without fully occupied | 38 | 89.8 % | 85.5 % | 89.9 % | 89.8 % |
+| — plus the 13 night empties | 51 | 92.5 % | 85.5 % | 89.9 % | 93.3 % |
+
+By log type: control (16) 86.4 / 86.3, empty (6) 97.1 / —, misc (3)
+91.0 / 90.9, natural (23) 69.5 / 68.8 (accuracy / F1). The six 09-21
+evening "seated, small movements" captures (blank tag, fully occupied)
+carry 1 516 of the 2 039 missed seconds.
+
+## 2. What the corpus taught, in the order it was found
+
+1. **Two neighbouring windows agreeing is no evidence.** At a 1 s hop, 30 s
+   windows share 29 s; the first cut's "2 consecutive windows" accepted
+   noise in an empty room (specificity 0.60 on a walk-in capture). The run
+   has to span half a window.
+2. **All-or-nothing runs reject real breathing.** 17 straight windows of a
+   real breath (peaks 0.16–0.40, rates 16.7–20.0 rpm) failed on one window
+   at 0.142 and a 3.3 rpm max−min spread against a 3 rpm tolerance. Now 80 %
+   of a run must qualify, and agreement is to the run's median.
+3. **The paper's "first peak" catches wiggles.** On a seated occupant with
+   finger movement the first local maximum of the autocorrelation sat on
+   the rising slope out of the half-period trough: −0.35 to −0.47 at the
+   shortest lag for a minute at a time, while the spectrum held a 15–18 rpm
+   line. The first *positive* maximum reads +0.37/+0.44 there; empties stay
+   at 0.05–0.10. Recall on that capture 0.63 → 0.96.
+4. **A range's own floor fails when the range is occupied throughout.** Its
+   20th percentile *is* the occupant. The six 0921 evening captures sat at
+   0.15–0.18 for half an hour against the link's 0.019 when empty — a body
+   attenuating the link raises the ratio's noise nine-fold, which is
+   evidence, and only a floor from outside the range can see it (0921:
+   67.5 → 91.4 % balanced).
+5. **But the floor must be *recent*, not daily** (both pooled floors since removed, see the rule above). On 2026-09-15 the link's
+   noise was 0.10–0.12 at midday and 0.02 in the evening; a whole-day floor
+   sits under the midday empties and the `negative:furniture` captures fire
+   throughout (specificity 65 %). A ±2 h window keeps every day at or above
+   its own-range score.
+6. **The amplitude frame-diff channel stays off.** Offered for the
+   shadowing the ratio cannot see, it fires in an empty September room
+   (specificity 0.85 → 0.42) and pooled 54.6 % balanced. Raw, not
+   AGC-corrected: the correction fires on a person's own variation and adds
+   jitter (0.10 → 0.63 dB frame-diff on a still occupant).
+
+7. **A burst inside a breathing window reads as breathing at the band's
+   top.** On a synthetic empty room, a 5 s walk makes every 30 s window
+   that contains it return the same peak (0.19) at the same rate
+   (34.9 rpm): the burst's energy makes the autocorrelation a triangle and
+   the first positive local maximum sits at the shortest lag. Fifteen such
+   windows agree, so the run rule accepts them and "breathing" is flagged
+   from 10 s before the walk to 15 s after it. A 3 s walk does not do this
+   (no peak found). `breathing &= ~burst` removes only the burst seconds
+   themselves, not the windows that contain them. Not yet measured on the
+   corpus; the windows around every walk-in count as breathing evidence
+   there, right or wrong.
+
+## 3. What still fails, and why it is the link
+
+On September, `small_gestures`, `seated_low_movement`, `seated_moving`
+score 0–20 % recall. A fidgeting person there sits at 0.16–0.18 while the
+*empty* room sits at 0.19–0.20 — the empty room is noisier than the person —
+so motion cannot separate them and the fidgeting corrupts the breathing
+rhythm. The same activities on the 0921 link (empty 0.019–0.027) are caught
+at 97 %. Nothing in the rule fixes a link whose idle noise exceeds a
+person's movement; that is a radio and geometry question.
+
+Irregular breathing — a chest moving with no stable period (20260916_202702,
+130–200 s, rates bouncing 11–22 rpm) — is the one occupant state no rule
+here sees. Every period-free quantity tried (in-band energy fraction,
+band-to-noise energy ratio, BNR, arc excursion) reads higher in today's
+*empty* room than in a September *occupied* one, because a quieter link
+makes its residual look tonal. The normalised autocorrelation peak is the
+one number that is ~0 in every empty room on every link. The lever left is
+the hold length, which buys recall at the empty room's expense (table §1).
+
+## 4. Not yet recorded
+
+A fan, a curtain in an AC draught, a robot vacuum, a pet: the rule assumes
+a periodic non-human mover is rare and a constant-level one distinguishable
+by its lack of bursts. Neither has been tested for want of a capture.

@@ -349,224 +349,6 @@ export async function fetchDoppler(
   };
 }
 
-/** The per-subcarrier signal the presence detector runs on. `complex` is the
- *  default and the one to trust: amplitude and phase have complementary
- *  Fresnel blind spots, so a chest invisible in one shows in the other, and
- *  keeping the ratio complex avoids having to choose. The real channels are
- *  diagnostic — which one carries the signal says where the subject is
- *  sitting relative to the antennas. */
-export type PresenceChannel = "complex" | "phase" | "magnitude";
-
-/** One verdict per analysis window.
- *
- *  `unknown` exists so that absence is never claimed for free. A window
- *  assembled mostly from samples interpolated across a capture dropout comes
- *  out flat, and flat scores exactly like an empty room — and so does every
- *  window when no empty-room reference was given at all, because `empty`
- *  means "matched a room known to be empty" and there is nothing to match. */
-export type PresenceState = "unknown" | "moving" | "present" | "empty";
-
-export interface PresenceParams {
-  channel: PresenceChannel;
-  window_seconds: number;
-  hop_seconds: number;
-  rate_band_rpm: [number, number];
-  bandpass_hz: [number, number];
-  motion_frac_lo: number;
-  motion_frac_hi: number;
-  tonality_flat_lo: number;
-  tonality_flat_hi: number;
-  max_gap_fraction: number;
-  smooth_windows: number;
-  present_threshold: number;
-  baseline_dev_k: number;
-  motion_ratio_hi: number;
-}
-
-/** What the empty-room reference range measured, or `null` when none was
- *  given. `devScale` is how far that room's own windows typically strayed from
- *  its profile — the unit `baselineDev` is judged in — and `motionFloor` is its
- *  fractional-motion noise floor, which is never zero. `devP95` is the same
- *  quantity at the 95th percentile, which the threshold used until 20260914;
- *  a `devP95` far above `devScale` means the reference range never settled. */
-export interface PresenceReference {
-  devScale: number;
-  devP95: number;
-  motionFloor: number;
-  nWindows: number;
-  /** How many known-empty stretches were pooled. More than one means the
-   *  verdict measures distance to the NEAREST empty state, not to their
-   *  average — which is what keeps a changed room from reading as occupied. */
-  nRanges?: number;
-}
-
-/** Series are aligned with `timeS` and hold `null` where a window has no
- *  answer — a break in the line, never a zero. */
-export interface Presence {
-  timeS: number[];
-  state: PresenceState[];
-  score: (number | null)[];
-  periodicity: (number | null)[];
-  tonality: (number | null)[];
-  motionGate: (number | null)[];
-  motionLevel: (number | null)[];
-  /** Fractional motion as a multiple of the reference room's own floor.
-   *  Dimensionless, so one threshold works across radios; `null` throughout
-   *  when no reference was given. */
-  motionRatio: (number | null)[];
-  /** How far this window's channel sits from the empty-room profile, in dB.
-   *  The only evidence that can see a motionless occupant: every other series
-   *  here is mean-removed, and a body parked in a room is a mean. */
-  baselineDev: (number | null)[];
-  /** Whether the breathing score cleared `present_threshold` here. Evidence
-   *  only — it does not decide occupancy, and `rateRpm` is `null` where it is
-   *  false. */
-  breathing: boolean[];
-  rateRpm: (number | null)[];
-  unknown: boolean[];
-  /** The capture's own median frame rate, not a function of any width. */
-  fsHz: number;
-  win: number;
-  hop: number;
-  /** What the window actually was, which is not what was asked for once a
-   *  zoom is narrower than the requested window and it gets clamped. */
-  windowSeconds: number;
-  /** The slowest rate this window length can actually resolve. Above the
-   *  requested floor means slower breathing is out of reach here. */
-  rpmFloorEff: number;
-  /** `baselineDev` above this is an occupant. `null` without a reference. */
-  baselineDevThreshold: number | null;
-  reference: PresenceReference | null;
-  framesUsed: number;
-  framesWithoutRatio: number;
-  captureTMin: number;
-  captureTMax: number;
-  params: PresenceParams;
-  warnings: string[];
-}
-
-export interface PresenceOptions {
-  channel?: PresenceChannel;
-  windowSeconds?: number;
-  hopSeconds?: number;
-  rpmLo?: number;
-  rpmHi?: number;
-  presentThreshold?: number;
-  motionFracLo?: number;
-  motionFracHi?: number;
-  /** A stretch of capture known to be empty. Both ends or neither. Without
-   *  it the detector reports motion but never absence. */
-  /** Known-empty stretches. Several are meaningful, not redundant: a room
-   *  that changed while the capture ran is empty in more than one way, and a
-   *  reference holding only the first calls every later empty window
-   *  occupied. Sent as repeated query parameters, paired in order. */
-  refT0?: number | number[] | null;
-  refT1?: number | number[] | null;
-  /** Capture holding the reference range; defaults to the analysed one. */
-  refPath?: string | null;
-  baselineDevK?: number;
-  motionRatioHi?: number;
-  mimo?: string | null;
-  sourceMac?: string | null;
-  interpolate?: boolean;
-}
-
-/** Pair up the reference ranges as repeated `ref_t0`/`ref_t1` parameters.
- *  A bare `${array}` would join with commas and the server would reject it. */
-function refParams(
-  t0: number | number[] | null | undefined,
-  t1: number | number[] | null | undefined,
-): string {
-  if (t0 == null || t1 == null) return "";
-  const starts = Array.isArray(t0) ? t0 : [t0];
-  const ends = Array.isArray(t1) ? t1 : [t1];
-  if (starts.length !== ends.length) return "";
-  return starts
-    .map((s, i) => `&ref_t0=${s}&ref_t1=${ends[i]}`)
-    .join("");
-}
-
-export async function fetchPresence(
-  path: string,
-  t0: number,
-  t1: number,
-  options: PresenceOptions = {},
-  signal?: AbortSignal,
-): Promise<Presence> {
-  const {
-    channel = "complex",
-    windowSeconds = 30,
-    hopSeconds = 1,
-    rpmLo = 9,
-    rpmHi = 30,
-    presentThreshold = 0.25,
-    motionFracLo = 0.1,
-    motionFracHi = 0.25,
-    refT0,
-    refT1,
-    refPath,
-    baselineDevK = 3,
-    motionRatioHi = 2,
-    mimo,
-    sourceMac,
-    interpolate,
-  } = options;
-
-  const url =
-    `/api/presence?path=${encodeURIComponent(path)}` +
-    `&t0=${t0}&t1=${t1}&channel=${channel}` +
-    `&window_seconds=${windowSeconds}&hop_seconds=${hopSeconds}` +
-    `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&present_threshold=${presentThreshold}` +
-    `&motion_frac_lo=${motionFracLo}&motion_frac_hi=${motionFracHi}` +
-    `&baseline_dev_k=${baselineDevK}&motion_ratio_hi=${motionRatioHi}` +
-    refParams(refT0, refT1) +
-    (refPath ? `&ref_path=${encodeURIComponent(refPath)}` : "") +
-    filterParams(mimo, sourceMac) +
-    (interpolate === false ? "&interpolate=false" : "");
-
-  const res = await fetch(url, { signal });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`HTTP ${res.status}: ${text}`);
-  }
-  const body = await res.json();
-  return {
-    timeS: body.time_s,
-    state: body.state,
-    score: body.score,
-    periodicity: body.periodicity,
-    tonality: body.tonality,
-    motionGate: body.motion_gate,
-    motionLevel: body.motion_level,
-    motionRatio: body.motion_ratio,
-    baselineDev: body.baseline_dev,
-    breathing: body.breathing,
-    rateRpm: body.rate_rpm,
-    unknown: body.unknown,
-    fsHz: body.fs_hz,
-    win: body.win,
-    hop: body.hop,
-    windowSeconds: body.window_seconds,
-    rpmFloorEff: body.rpm_floor_eff,
-    baselineDevThreshold: body.baseline_dev_threshold ?? null,
-    reference: body.reference
-      ? {
-          devScale: body.reference.dev_scale ?? body.reference.dev_p95,
-          devP95: body.reference.dev_p95,
-          motionFloor: body.reference.motion_floor,
-          nWindows: body.reference.n_windows,
-          nRanges: body.reference.n_ranges,
-        }
-      : null,
-    framesUsed: body.frames_used,
-    framesWithoutRatio: body.frames_without_ratio,
-    captureTMin: body.t_min,
-    captureTMax: body.t_max,
-    params: body.params,
-    warnings: body.warnings ?? [],
-  };
-}
-
 /** Ground truth recorded beside a capture by the labelled-run wrapper. */
 export interface LabelPresence {
   timeS: number[];
@@ -643,53 +425,6 @@ export async function fetchLgParse(
   return res.json();
 }
 
-/** What the LG on-board detector said when replayed over a capture. */
-export interface LgDetect {
-  events: { kind: "+" | "-"; t: number }[];
-  intervals: { t0: number; t1: number }[];
-  records: number;
-  parseFailures: number;
-  duration: number;
-  threshold: number;
-  absenceDuration: number;
-  /** The interpreter it ran under. NumPy 1.x is not incidental: under NumPy 2
-   *  its TLV walk desynchronises at the first CSI field, silently. */
-  numpy: string;
-  python: string;
-  cached: boolean;
-  truth: {
-    timeS: number[];
-    present: boolean[];
-    tp: number; fp: number; fn: number; tn: number;
-    /** Empty frames within `marginSeconds` of a transition, scored in
-     *  neither direction. */
-    excluded: number;
-    marginSeconds: number;
-    accuracy: number;
-    precision: number;
-    recall: number;
-    /** What it would score by always saying "present" — the bar to clear. */
-    baseRate: number;
-  } | null;
-}
-
-export async function fetchLgDetect(
-  path: string,
-  threshold = 26,
-  absence = 10,
-  signal?: AbortSignal,
-): Promise<LgDetect> {
-  const url =
-    `/api/lgdetect?path=${encodeURIComponent(path)}` +
-    `&threshold=${threshold}&absence=${absence}`;
-  const res = await fetch(url, { signal });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail ?? `lgdetect: ${res.status}`);
-  }
-  return res.json();
-}
-
 /** One cell-count set, plus the rates derived from it. Nulls where a rate has
  *  no denominator — a capture with no empty window has no specificity, and
  *  saying 0% would be a different claim from saying "not measured". */
@@ -709,70 +444,935 @@ export interface Confusion {
   precision: number | null;
 }
 
-/** Both detectors resampled onto one grid and scored against the camera.
- *
- *  `ours` is null when the capture could not be calibrated — the reference has
- *  to come from other camera-empty captures, never this one's own stretches,
- *  and there have to be at least two. `calibrationNote` says which condition
- *  failed. `lg` is always present: it compares each frame to the one before and
- *  so needs no reference at all, which is exactly the trade the two make. */
-export interface Phase1 {
-  path: string;
-  gridSeconds: number;
-  /** Seconds of the empty label next to each transition that were not scored. */
-  marginSeconds: number;
-  timeS: number[];
-  groundTruth: { timeS: number[]; present: boolean[] };
-  calibrated: boolean;
-  calibrationNote?: string;
-  /** Present when the reference pool sits further from the capture than the
-   *  default window allows. Nothing else detects a pool from a different room,
-   *  so a widened window is the one thing worth saying out loud. */
-  referenceWarning?: string;
-  ours: {
-    present: boolean[];
-    threshold: number;
-    devScale: number;
-    /** Median pairwise distance between the pooled references. Small means they
-     *  describe one room; large means the pool spans two and its scale would
-     *  measure the gap between them. */
-    poolSpread: number;
-    /** How far the capture's quietest window still sits from the pool. */
-    minDeviation: number;
-    /** That distance in thresholds. Diagnostic only: it does NOT separate a
-     *  usable calibration from a broken one. Measured over 22 working
-     *  calibrations it spans 0.09–5.65, while two known-broken ones read 4.94
-     *  and 5.20 — fully inside that range, because the numerator also carries
-     *  how occupied the capture is and the denominator how tight the pool is. */
-    applicability: number | null;
-    /** Hours between this capture and its nearest reference. This is the real
-     *  guard against a pool from a different room, so it is shown. */
-    referenceAgeH: number;
-    references: string[];
-    confusion: Confusion;
-  } | null;
-  lg: {
-    present: boolean[];
-    threshold: number;
-    absence: number;
-    events: number;
-    confusion: Confusion;
-  };
+/** One window of the FarSense replay in full, for the detail panels. */
+export interface FarSenseDetail {
+  index: number;
+  startS: number;
+  tS: number[];
+  /** Subcarrier with the largest BNR in this window, in capture bin numbers. */
+  bestSc: number;
+  /** Its projection axis, radians from the real axis. */
+  bestTheta: number;
+  /** Its smoothed, mean-removed ratio over the window — the arc of Fig. 11. */
+  iq: [number, number][];
+  /** Its respiration pattern: the projection onto `bestTheta`. */
+  pattern: (number | null)[];
+  /** BNR-weighted sum of the selected subcarriers' autocorrelations, by lag. */
+  acf: (number | null)[];
+  lagLo: number;
+  lagHi: number;
+  /** Where the first in-band peak was read, or null when there was none. */
+  lag: number | null;
+  scIndex: number[];
+  bnr: (number | null)[];
+  theta: (number | null)[];
+  selected: boolean[];
 }
 
-export async function fetchPhase1(
+export interface FarSenseParams {
+  window_seconds: number;
+  hop_seconds: number;
+  band_rpm: [number, number];
+  n_theta: number;
+  fft_size: number;
+  keep_fraction: number;
+  savgol_seconds: number;
+  savgol_order: number;
+  highpass_hz: number;
+  motion_frac_hi: number;
+  max_gap_fraction: number;
+  min_peak: number;
+}
+
+/** FarSense (Zeng et al. 2019) replayed over a range. Series are aligned
+ *  with `timeS`; `null` is a window with no answer. `rpm` is null wherever
+ *  the window was not stationary, had no in-band autocorrelation peak, or
+ *  the peak fell below `min_peak`. */
+export interface FarSense {
+  timeS: number[];
+  stationary: boolean[];
+  motionLevel: (number | null)[];
+  unknown: boolean[];
+  rpm: (number | null)[];
+  lag: (number | null)[];
+  /** Height of the first peak of the combined autocorrelation, in units of
+   *  summed BNR (the paper's Eq. 11, unnormalised). */
+  acfPeak: (number | null)[];
+  /** The same divided by the summed BNR: the weighted mean autocorrelation at
+   *  the peak lag, in -1..1. The number to judge a rate by. */
+  acfPeakNorm: (number | null)[];
+  bnrMax: (number | null)[];
+  nSelected: number[];
+  bestSc: number[];
+  bestTheta: (number | null)[];
+  /** Capture bin number of each row of `bnrMap`. */
+  scIndex: number[];
+  /** BNR per live subcarrier (rows) per window (columns). */
+  bnrMap: (number | null)[][];
+  /** Multiply a BNR by this to put it on 0..1, where 1 is a pure tone. */
+  bnrNormFactor: number;
+  /** The best subcarrier's respiration pattern, stitched across windows and
+   *  scaled to unit deviation, on the sample grid. */
+  patternT: number[];
+  pattern: (number | null)[];
+  detail: FarSenseDetail | null;
+  win: number;
+  hop: number;
+  windowSeconds: number;
+  fsHz: number;
+  lagLo: number;
+  lagHi: number;
+  params: FarSenseParams;
+  framesUsed: number;
+  framesWithoutRatio: number;
+  captureTMin: number;
+  captureTMax: number;
+}
+
+export interface FarSenseOptions {
+  windowSeconds?: number;
+  hopSeconds?: number;
+  rpmLo?: number;
+  rpmHi?: number;
+  nTheta?: number;
+  keepFraction?: number;
+  savgolSeconds?: number;
+  savgolOrder?: number;
+  /** Zero-phase high-pass before smoothing, Hz. 0 is the paper. */
+  highpassHz?: number;
+  motionFracHi?: number;
+  minPeak?: number;
+  /** A time in seconds; the window nearest it comes back under `detail`. */
+  detailT?: number | null;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchFarSense(
   path: string,
-  opts: { grid?: number; k?: number; lgThreshold?: number; lgAbsence?: number } = {},
+  t0: number,
+  t1: number,
+  options: FarSenseOptions = {},
   signal?: AbortSignal,
-): Promise<Phase1> {
-  const { grid = 1, k = 3, lgThreshold = 26, lgAbsence = 10 } = opts;
+): Promise<FarSense> {
+  const {
+    windowSeconds = 10,
+    hopSeconds = 1,
+    rpmLo = 10,
+    rpmHi = 30,
+    nTheta = 200,
+    keepFraction = 0.65,
+    savgolSeconds = 1.0,
+    savgolOrder = 3,
+    highpassHz = 0,
+    motionFracHi = 0.25,
+    minPeak = 0.2,
+    detailT,
+    mimo,
+    sourceMac,
+    interpolate,
+  } = options;
+
   const url =
-    `/api/phase1?path=${encodeURIComponent(path)}` +
-    `&grid=${grid}&k=${k}&lg_threshold=${lgThreshold}&lg_absence=${lgAbsence}`;
+    `/api/farsense?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&window_seconds=${windowSeconds}&hop_seconds=${hopSeconds}` +
+    `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&n_theta=${nTheta}` +
+    `&keep_fraction=${keepFraction}` +
+    `&savgol_seconds=${savgolSeconds}&savgol_order=${savgolOrder}` +
+    `&highpass_hz=${highpassHz}` +
+    `&motion_frac_hi=${motionFracHi}&min_peak=${minPeak}` +
+    (detailT != null ? `&detail_t=${detailT}` : "") +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail ?? `phase1: ${res.status}`);
+    throw new Error(body.detail ?? `farsense: ${res.status}`);
   }
-  return res.json();
+  const body = await res.json();
+  const d = body.detail;
+  return {
+    timeS: body.time_s,
+    stationary: body.stationary,
+    motionLevel: body.motion_level,
+    unknown: body.unknown,
+    rpm: body.rpm,
+    lag: body.lag,
+    acfPeak: body.acf_peak,
+    acfPeakNorm: body.acf_peak_norm,
+    bnrMax: body.bnr_max,
+    nSelected: body.n_selected,
+    bestSc: body.best_sc,
+    bestTheta: body.best_theta,
+    scIndex: body.sc_index,
+    bnrMap: body.bnr_map,
+    bnrNormFactor: body.bnr_norm_factor,
+    patternT: body.pattern_t,
+    pattern: body.pattern,
+    detail: d
+      ? {
+          index: d.index,
+          startS: d.start_s,
+          tS: d.t_s,
+          bestSc: d.best_sc,
+          bestTheta: d.best_theta,
+          iq: d.iq,
+          pattern: d.pattern,
+          acf: d.acf,
+          lagLo: d.lag_lo,
+          lagHi: d.lag_hi,
+          lag: d.lag ?? null,
+          scIndex: d.sc_index,
+          bnr: d.bnr,
+          theta: d.theta,
+          selected: d.selected,
+        }
+      : null,
+    win: body.win,
+    hop: body.hop,
+    windowSeconds: body.window_seconds,
+    fsHz: body.fs_hz,
+    lagLo: body.lag_lo,
+    lagHi: body.lag_hi,
+    params: body.params,
+    framesUsed: body.frames_used,
+    framesWithoutRatio: body.frames_without_ratio,
+    captureTMin: body.t_min,
+    captureTMax: body.t_max,
+  };
+}
+
+/** One second of the calibration-free detector. `moving` and `breathing`
+ *  are the evidence; `held` is presence kept alive by a hold running out
+ *  from evidence (after any, before breathing); `bridged` is a gap whose
+ *  holds met from both sides; `empty` is the room once nothing has
+ *  happened for that long. */
+export type HybridState = "unknown" | "moving" | "breathing" | "held" | "bridged" | "empty";
+
+export interface HybridParams {
+  use_amplitude: boolean;
+  hold_seconds: number;
+  burst_seconds: number;
+  motion_rel: number;
+  motion_abs: number;
+  amp_rel: number;
+  amp_abs: number;
+  floor_percentile: number;
+  breath_min_peak: number;
+  breath_persist_seconds: number;
+  breath_rate_tol: number;
+  sparse_fraction: number;
+  sparse_window_seconds: number;
+  breath_min_fraction: number;
+  breath_window_seconds: number;
+  breath_highpass_hz: number;
+  max_gap_fraction: number;
+  rpm_lo: number;
+  rpm_hi: number;
+  n_theta: number;
+  fft_size: number;
+  keep_fraction: number;
+  savgol_seconds: number;
+  savgol_order: number;
+  /** FarSense stationary gate; null when off. */
+  motion_frac_hi: number | null;
+  positive_only: boolean;
+  motion_floor: number | null;
+  lead_hold: boolean;
+  bridge_bursts: "off" | "run" | "any";
+}
+
+export interface HybridConfusion extends Confusion {
+  /** Fraction of scored seconds the camera called occupied — what always
+   *  saying "present" would score. */
+  baseRate: number | null;
+  marginSeconds: number;
+}
+
+export interface Hybrid {
+  timeS: number[];
+  present: boolean[];
+  state: HybridState[];
+  unknown: boolean[];
+  /** Per-second median |Δr|/|r|; null where the second was a dropout. */
+  motionRatio: (number | null)[];
+  /** Per-second median |ΔA| in dB on the raw amplitude. */
+  motionAmp: (number | null)[];
+  burst: boolean[];
+  breathing: boolean[];
+  breathPeak: (number | null)[];
+  breathRpm: (number | null)[];
+  /** The range's own quiet level and the threshold derived from it. */
+  ratioFloor: number | null;
+  ratioThreshold: number | null;
+  ampFloor: number | null;
+  ampThreshold: number | null;
+  /** Why the breathing channel could not run, when it could not. */
+  breathNote: string | null;
+  fsHz: number;
+  params: HybridParams;
+  framesUsed: number;
+  framesWithoutRatio: number;
+  captureTMin: number;
+  captureTMax: number;
+  /** Where the floor came from: 'own' (this range's 20th percentile) or 'explicit'. */
+  floorScope: string;
+  truth: { timeS: number[]; present: boolean[] } | null;
+  /** Why the capture's labels are not scored, when its sidecar says so. */
+  truthExcluded: string | null;
+  confusion: HybridConfusion | null;
+}
+
+export interface HybridOptions {
+  useAmplitude?: boolean;
+  holdS?: number;
+  burstS?: number;
+  motionRel?: number;
+  motionAbs?: number;
+  ampRel?: number;
+  ampAbs?: number;
+  floorPct?: number;
+  breathMinPeak?: number;
+  breathPersistS?: number;
+  breathRateTol?: number;
+  /** Sparse breathing: fraction of windows within `sparseWindow` seconds that must clear the peak threshold; 0 = off. */
+  sparseFraction?: number;
+  sparseWindow?: number;
+  breathWindow?: number;
+  breathHighpass?: number;
+  /** FarSense search knobs, same meaning as on the FarSense tab. */
+  rpmLo?: number;
+  rpmHi?: number;
+  nTheta?: number;
+  fftSize?: number;
+  keepFraction?: number;
+  savgolSeconds?: number;
+  savgolOrder?: number;
+  /** The paper's stationary gate; null or undefined leaves it off. */
+  motionFracHi?: number | null;
+  positiveOnly?: boolean;
+  maxGapFraction?: number;
+  /** An explicit quiet |Δr|/|r| level in place of the range's own 20th
+   *  percentile. Omit for the range's own. */
+  motionFloor?: number | null;
+  /** Breathing also holds presence `holdS` before it, and a gap whose
+   *  holds meet is present throughout. On by default. */
+  leadHold?: boolean;
+  /** Fill the whole stretch between two bursts when breathing lies between
+   *  them: 'run' needs a breathing run, 'any' a single qualifying window. */
+  bridgeBursts?: "off" | "run" | "any";
+  marginS?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchHybrid(
+  path: string,
+  t0: number,
+  t1: number,
+  options: HybridOptions = {},
+  signal?: AbortSignal,
+): Promise<Hybrid> {
+  const {
+    useAmplitude = false,
+    holdS = 20,
+    burstS = 2,
+    motionRel = 2,
+    motionAbs = 0.1,
+    ampRel = 2,
+    ampAbs = 0.5,
+    floorPct = 20,
+    breathMinPeak = 0.2,
+    breathPersistS = 10,
+    breathRateTol = 3,
+    sparseFraction = 0,
+    sparseWindow = 60,
+    breathWindow = 10,
+    breathHighpass = 0,
+    rpmLo = 10,
+    rpmHi = 30,
+    nTheta = 200,
+    fftSize = 8192,
+    keepFraction = 0.65,
+    savgolSeconds = 1.0,
+    savgolOrder = 3,
+    motionFracHi,
+    positiveOnly = true,
+    maxGapFraction = 0.5,
+    motionFloor,
+    leadHold = true,
+    bridgeBursts = "off",
+    marginS = 5,
+    mimo,
+    sourceMac,
+    interpolate,
+  } = options;
+
+  const url =
+    `/api/hybrid?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&use_amplitude=${useAmplitude}&hold_s=${holdS}&burst_s=${burstS}` +
+    `&motion_rel=${motionRel}&motion_abs=${motionAbs}` +
+    `&amp_rel=${ampRel}&amp_abs=${ampAbs}&floor_pct=${floorPct}` +
+    `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
+    `&breath_rate_tol=${breathRateTol}&breath_window=${breathWindow}` +
+    `&sparse_fraction=${sparseFraction}&sparse_window=${sparseWindow}` +
+    `&breath_highpass=${breathHighpass}&margin_s=${marginS}` +
+    `&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}&n_theta=${nTheta}&fft_size=${fftSize}` +
+    `&keep_fraction=${keepFraction}&savgol_seconds=${savgolSeconds}&savgol_order=${savgolOrder}` +
+    (motionFracHi != null ? `&motion_frac_hi=${motionFracHi}` : "") +
+    `&positive_only=${positiveOnly}&max_gap_fraction=${maxGapFraction}` +
+    (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
+    `&lead_hold=${leadHold}&bridge_bursts=${bridgeBursts}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `hybrid: ${res.status}`);
+  }
+  const body = await res.json();
+  const c = body.confusion;
+  return {
+    timeS: body.time_s,
+    present: body.present,
+    state: body.state,
+    unknown: body.unknown,
+    motionRatio: body.motion_ratio,
+    motionAmp: body.motion_amp,
+    burst: body.burst,
+    breathing: body.breathing,
+    breathPeak: body.breath_peak,
+    breathRpm: body.breath_rpm,
+    ratioFloor: body.ratio_floor ?? null,
+    ratioThreshold: body.ratio_threshold ?? null,
+    ampFloor: body.amp_floor ?? null,
+    ampThreshold: body.amp_threshold ?? null,
+    breathNote: body.breath_note ?? null,
+    fsHz: body.fs_hz,
+    params: body.params,
+    framesUsed: body.frames_used,
+    framesWithoutRatio: body.frames_without_ratio,
+    captureTMin: body.t_min,
+    captureTMax: body.t_max,
+    floorScope: body.floor_scope ?? "own",
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded ?? null,
+    confusion: c
+      ? {
+          tp: c.tp, fp: c.fp, fn: c.fn, tn: c.tn, total: c.total, excluded: c.excluded,
+          accuracy: c.accuracy, recall: c.recall, specificity: c.specificity, precision: c.precision,
+          baseRate: c.base_rate ?? null,
+          marginSeconds: c.margin_s,
+        }
+      : null,
+  };
+}
+
+// --------------------------------------------------------------------------- #
+//  Frame-to-frame amplitude step (/api/frame-diff)
+// --------------------------------------------------------------------------- #
+
+/** One column of the decimated per-step series. Columns are equal in time, and
+ *  each carries a median and the extremes it spans — see `bandPath` for why the
+ *  extremes are what gets drawn. */
+export type FrameDiffSignal = "amplitude" | "ratio_amp" | "ratio_complex";
+
+export interface FrameDiff {
+  /** Which series was differenced. */
+  signal: FrameDiffSignal;
+  /** Column centres, on the capture's clock. */
+  timeS: number[];
+  /** Median of the signed fold: + the array brightening, − fading. */
+  signed: (number | null)[];
+  /** The column's extremes of the signed fold. A single frame survives here. */
+  signedLo: (number | null)[];
+  signedHi: (number | null)[];
+  /** Median of |d|, which cannot cancel when subcarriers disagree in sign.
+   *  This is `hybrid.amplitude_diff` on the bounded axis, exactly. */
+  magnitude: (number | null)[];
+  magnitudeHi: (number | null)[];
+  /** The MEAN fold, and its modulus: what the subcarriers agree about, with
+   *  what they disagree about cancelled. The channel's common mode. */
+  common: (number | null)[];
+  commonHi: (number | null)[];
+  /** Frames behind each column, blanked ones included. */
+  count: number[];
+  binSeconds: number;
+  /** False when the range held fewer steps than columns asked for, so every
+   *  column is one frame pair and the envelope is the value itself. */
+  decimated: boolean;
+  framesUsed: number;
+  /** Frames in range the uniformity rule removed: another transmitter, another
+   *  MIMO mode, or a narrower bandwidth. A step between two frame shapes is
+   *  bookkeeping, not motion. */
+  framesDropped: number;
+  framesDroppedNarrow: number;
+  /** The frame set actually used, so the panel never has to assume. */
+  sourceMac: string | null;
+  mimo: [number, number] | null;
+  selectionNote: string;
+  nSubcarriers: number;
+  captureTMin: number;
+  captureTMax: number;
+  summary: {
+    steps: number;
+    stepsMeasured: number;
+    /** Subcarriers a typical step was folded over — the array width less the
+     *  guard band and the dead bins. */
+    liveMedian: number;
+    commonMedian: number | null;
+    nBridged: number;
+    /** Frame pairs that crossed a reported gain state. Always counted; blanked
+     *  only when `gateGain` was asked for. 84-100% of the loudest 1% of steps
+     *  are these, so the number is owed to the reader either way. */
+    nGainCrossed: number;
+    gainGated: boolean;
+    gapLimit: number;
+    median: number | null;
+    p99: number | null;
+    max: number | null;
+    /** The step in the units it was measured in: dB for the amplitude signals,
+     *  degrees of rotation for the complex one, where a step IS an angle. */
+    nativeUnit: string;
+    medianNative: number | null;
+    maxNative: number | null;
+  };
+}
+
+export interface FrameDiffOptions {
+  signal?: FrameDiffSignal;
+  /** Blank the frame pairs that cross a gain state. Off by default. */
+  gateGain?: boolean;
+  maxPoints?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchFrameDiff(
+  path: string,
+  t0: number,
+  t1: number,
+  options: FrameDiffOptions = {},
+  signal?: AbortSignal,
+): Promise<FrameDiff> {
+  const {
+    signal: series = "amplitude", gateGain = false, maxPoints = 2000,
+    mimo, sourceMac, interpolate,
+  } = options;
+
+  const url =
+    `/api/frame-diff?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}` +
+    `&max_points=${maxPoints}&signal=${series}` +
+    (gateGain ? "&gate_gain=true" : "") +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `frame diff: ${res.status}`);
+  }
+  const body = await res.json();
+  const s = body.summary;
+  return {
+    timeS: body.time_s,
+    signed: body.signed,
+    signedLo: body.signed_lo,
+    signedHi: body.signed_hi,
+    magnitude: body.magnitude,
+    magnitudeHi: body.magnitude_hi,
+    common: body.common,
+    commonHi: body.common_hi,
+    count: body.count,
+    binSeconds: body.bin_seconds,
+    decimated: body.decimated,
+    framesUsed: body.frames_used,
+    framesDropped: body.frames_dropped,
+    framesDroppedNarrow: body.frames_dropped_narrow,
+    sourceMac: body.source_mac,
+    mimo: body.mimo,
+    selectionNote: body.selection_note,
+    signal: body.signal,
+    nSubcarriers: body.n_subcarriers,
+    captureTMin: body.capture_t_min,
+    captureTMax: body.capture_t_max,
+    summary: {
+      steps: s.steps,
+      stepsMeasured: s.steps_measured,
+      liveMedian: s.live_median,
+      commonMedian: s.common_median,
+      nBridged: s.n_bridged,
+      nGainCrossed: s.n_gain_crossed,
+      gainGated: s.gain_gated,
+      gapLimit: s.gap_limit,
+      median: s.median,
+      p99: s.p99,
+      max: s.max,
+      nativeUnit: s.native_unit,
+      medianNative: s.median_native,
+      maxNative: s.max_native,
+    },
+  };
+}
+
+// --------------------------------------------------------------------------- #
+//  Hybrid 2 (/api/hybrid2): the complex frame step for motion, FarSense for breath
+// --------------------------------------------------------------------------- #
+
+export interface Hybrid2 {
+  timeS: number[];
+  present: boolean[];
+  state: HybridState[];
+  unknown: boolean[];
+  /** Per-second median of the ratio-complex frame step. The motion channel. */
+  motion: (number | null)[];
+  /** Hybrid 1's |Δr|/|r| on the same axis, for reference only — it decides
+   *  nothing here. Exactly twice `motion` before the fold and the frame set
+   *  differ, so the two are close but not equal. */
+  motionReference: (number | null)[];
+  burst: boolean[];
+  breathing: boolean[];
+  breathPeak: (number | null)[];
+  breathRpm: (number | null)[];
+  /** The range's own quiet level, and the threshold built from it. A range
+   *  occupied throughout has no quiet stretch — its own floor IS the occupant,
+   *  which is the detector's known blind spot rather than a bug. */
+  floor: number | null;
+  threshold: number | null;
+  floorScope: "own" | "explicit";
+  signal: string;
+  selectionNote: string;
+  lagSeconds: number;
+  lagFrames: number;
+  gainGated: boolean;
+  nGainCrossed: number;
+  breathNote: string | null;
+  fsHz: number;
+  framesUsed: number;
+  framesDropped: number;
+  tMin: number;
+  tMax: number;
+  truth: { timeS: number[]; present: boolean[] } | null;
+  truthExcluded: string | null;
+  confusion: HybridConfusion | null;
+  /** One present/empty call for the whole range from fixed thresholds: P90 of
+   *  the 2 s-lag step, else a run of FarSense peaks. See docs/hybrid2.md. */
+  rangeVerdict: {
+    present: boolean;
+    by: "motion" | "breathing" | null;
+    motionP90: number | null;
+    breathRun: number;
+    seconds: number;
+    thresholds: { lagSeconds: number; motionP90: number; breathPeak: number; breathRun: number };
+  };
+  /** The same rule applied every second to the trailing `windowSeconds`:
+   *  what a live system would show. */
+  rangeSeries: { present: boolean[]; state: Hybrid2RangeState[]; windowSeconds: number };
+  rangeConfusion: HybridConfusion | null;
+}
+
+export type Hybrid2RangeState = "present:motion" | "present:breathing" | "empty" | "unknown";
+
+export interface Hybrid2Options {
+  lagS?: number;
+  gateGain?: boolean;
+  holdS?: number;
+  burstS?: number;
+  motionRel?: number;
+  motionAbs?: number;
+  floorPct?: number;
+  motionFloor?: number | null;
+  breathMinPeak?: number;
+  breathPersistS?: number;
+  breathWindow?: number;
+  rpmLo?: number;
+  rpmHi?: number;
+  leadHold?: boolean;
+  marginS?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+  /** Trailing window, seconds, for the per-second range-rule series. */
+  rangeWindow?: number;
+}
+
+export async function fetchHybrid2(
+  path: string,
+  t0: number,
+  t1: number,
+  options: Hybrid2Options = {},
+  signal?: AbortSignal,
+): Promise<Hybrid2> {
+  const {
+    lagS = 0, gateGain = false, holdS = 20, burstS = 2,
+    motionRel = 2, motionAbs = 0.05, floorPct = 20, motionFloor,
+    breathMinPeak = 0.2, breathPersistS = 10, breathWindow = 10,
+    rpmLo = 10, rpmHi = 30, leadHold = true, marginS = 5, rangeWindow = 60,
+    mimo, sourceMac, interpolate,
+  } = options;
+
+  const url =
+    `/api/hybrid2?path=${encodeURIComponent(path)}` +
+    `&range_window=${rangeWindow}` +
+    `&t0=${t0}&t1=${t1}&lag_s=${lagS}&hold_s=${holdS}&burst_s=${burstS}` +
+    `&motion_rel=${motionRel}&motion_abs=${motionAbs}&floor_pct=${floorPct}` +
+    `&breath_min_peak=${breathMinPeak}&breath_persist_s=${breathPersistS}` +
+    `&breath_window=${breathWindow}&rpm_lo=${rpmLo}&rpm_hi=${rpmHi}` +
+    `&margin_s=${marginS}` +
+    (gateGain ? "&gate_gain=true" : "") +
+    (leadHold ? "" : "&lead_hold=false") +
+    (motionFloor != null ? `&motion_floor=${motionFloor}` : "") +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `hybrid2: ${res.status}`);
+  }
+  const body = await res.json();
+  const rc = body.range_confusion;
+  const c = body.confusion;
+  return {
+    timeS: body.time_s,
+    present: body.present,
+    state: body.state,
+    unknown: body.unknown,
+    motion: body.motion,
+    motionReference: body.motion_reference,
+    burst: body.burst,
+    breathing: body.breathing,
+    breathPeak: body.breath_peak,
+    breathRpm: body.breath_rpm,
+    floor: body.floor,
+    threshold: body.threshold,
+    floorScope: body.floor_scope,
+    signal: body.signal,
+    selectionNote: body.selection_note,
+    rangeVerdict: {
+      present: Boolean(body.range_verdict?.present),
+      by: body.range_verdict?.by ?? null,
+      motionP90: body.range_verdict?.motion_p90 ?? null,
+      breathRun: body.range_verdict?.breath_run ?? 0,
+      seconds: body.range_verdict?.seconds ?? 0,
+      thresholds: {
+        lagSeconds: body.range_verdict?.thresholds?.lag_seconds ?? 2,
+        motionP90: body.range_verdict?.thresholds?.motion_p90 ?? 0.035,
+        breathPeak: body.range_verdict?.thresholds?.breath_peak ?? 0.25,
+        breathRun: body.range_verdict?.thresholds?.breath_run ?? 5,
+      },
+    },
+    lagSeconds: body.lag_seconds,
+    lagFrames: body.lag_frames,
+    gainGated: body.gain_gated,
+    nGainCrossed: body.n_gain_crossed,
+    breathNote: body.breath_note,
+    fsHz: body.fs_hz,
+    framesUsed: body.frames_used,
+    framesDropped: body.frames_dropped,
+    tMin: body.t_min,
+    tMax: body.t_max,
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded,
+    confusion: c
+      ? {
+          tp: c.tp, fp: c.fp, fn: c.fn, tn: c.tn, total: c.total,
+          excluded: c.excluded, accuracy: c.accuracy, recall: c.recall,
+          specificity: c.specificity, precision: c.precision,
+          baseRate: c.base_rate, marginSeconds: c.margin_s,
+        }
+      : null,
+    rangeConfusion: rc
+      ? {
+          tp: rc.tp, fp: rc.fp, fn: rc.fn, tn: rc.tn, total: rc.total,
+          excluded: rc.excluded, accuracy: rc.accuracy, recall: rc.recall,
+          specificity: rc.specificity, precision: rc.precision,
+          baseRate: rc.base_rate, marginSeconds: rc.margin_s,
+        }
+      : null,
+    rangeSeries: {
+      present: body.range_series?.present ?? [],
+      state: body.range_series?.state ?? [],
+      windowSeconds: body.range_series?.window_seconds ?? 60,
+    },
+  };
+}
+
+// --------------------------------------------------------------------------- #
+//  Classifier (/api/classifier): the one-minute verdict's feature bank
+// --------------------------------------------------------------------------- #
+
+/** One entry of the bank, as the backend describes it. The tab renders these,
+ *  so a feature added by a later test needs no new column code here. */
+export interface ClassifierFeature {
+  key: string;
+  label: string;
+  /** Which test of the programme produced it ("range rule", "1", "context", …). */
+  test: string;
+  /** "in rule" for the range rule's inputs, "candidate" for what the tests
+   *  have produced since, "context" for link-state readings beside them. */
+  status: string;
+  /** A measured operating point to draw as a guide, or null. Not a verdict. */
+  reference: number | null;
+  axis: [number, number] | null;
+  decimals: number;
+  description: string;
+  /** What the column decides or feeds: "decides PRESENT", "input of P(occupied)", "context", … */
+  role: string;
+  /** The one-line answers the test gave: what this column separates, and what it does not. */
+  separates: string;
+  notSeparates: string;
+}
+
+/** One step of the verdict, with the evidence behind it. */
+export interface ClassifierDecision {
+  step: string;
+  test: string;
+  key: string;
+  text: string;
+  evidence: string;
+}
+
+/** One row of the compounding table: what each test separated. */
+export interface ClassifierStep {
+  step: string;
+  feature: string;
+  separates: string;
+  notSeparates: string;
+}
+
+export interface ClassifierUnit {
+  t0: number;
+  t1: number;
+  nWindows: number;
+  nSeconds: number;
+  nFrames: number;
+  /** Fraction of the unit's camera frames with a person; null without a camera. */
+  cameraOccupancy: number | null;
+  cameraFrames: number;
+  /** One value per `ClassifierFeature.key`. */
+  values: Record<string, number | null>;
+}
+
+export interface Classifier {
+  /** ψ̂ per autocorrelation window, on the ratio amplitude and phase. */
+  acf: {
+    timeS: number[];
+    amp: (number | null)[];
+    phase: (number | null)[];
+    windowFrames: number;
+    windowSeconds: number | null;
+    /** −1/T, where white noise sits. */
+    nullMean: number;
+  };
+  /** The lag step the range rule reads, per second. */
+  step: { timeS: number[]; level: (number | null)[]; lagSeconds: number; lagFrames: number };
+  units: ClassifierUnit[];
+  unitSeconds: number;
+  fsHz: number | null;
+  nSubcarriers: number;
+  framesUsed: number;
+  framesDropped: number;
+  selectionNote: string;
+  features: ClassifierFeature[];
+  decision: ClassifierDecision[];
+  steps: ClassifierStep[];
+  truth: { timeS: number[]; present: boolean[] } | null;
+  truthExcluded: string | null;
+}
+
+export interface ClassifierOptions {
+  unitS?: number;
+  acfFrames?: number;
+  lagS?: number;
+  mimo?: string | null;
+  sourceMac?: string | null;
+  interpolate?: boolean;
+}
+
+export async function fetchClassifier(
+  path: string,
+  t0: number,
+  t1: number,
+  options: ClassifierOptions = {},
+  signal?: AbortSignal,
+): Promise<Classifier> {
+  const { unitS = 60, acfFrames = 84, lagS = 2, mimo, sourceMac, interpolate } = options;
+  const url =
+    `/api/classifier?path=${encodeURIComponent(path)}` +
+    `&t0=${t0}&t1=${t1}&unit_s=${unitS}&acf_frames=${acfFrames}&lag_s=${lagS}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `classifier: ${res.status}`);
+  }
+  const body = await res.json();
+  const features: ClassifierFeature[] = (body.features ?? []).map((f: Record<string, unknown>) => ({
+    key: f.key as string,
+    label: f.label as string,
+    test: String(f.test),
+    status: f.status as string,
+    reference: (f.reference as number | null) ?? null,
+    axis: (f.axis as [number, number] | null) ?? null,
+    decimals: (f.decimals as number) ?? 3,
+    description: (f.description as string) ?? "",
+    role: (f.role as string) ?? "",
+    separates: (f.separates as string) ?? "",
+    notSeparates: (f.not_separates as string) ?? "",
+  }));
+  const decision: ClassifierDecision[] = (body.decision ?? []).map((d: Record<string, unknown>) => ({
+    step: String(d.step), test: String(d.test), key: String(d.key), text: String(d.text ?? ""), evidence: String(d.evidence ?? ""),
+  }));
+  const steps: ClassifierStep[] = (body.steps ?? []).map((d: Record<string, unknown>) => ({
+    step: String(d.step), feature: String(d.feature ?? ""), separates: String(d.separates ?? ""), notSeparates: String(d.not_separates ?? ""),
+  }));
+  const units: ClassifierUnit[] = (body.units ?? []).map((u: Record<string, unknown>) => ({
+    t0: u.t0 as number,
+    t1: u.t1 as number,
+    nWindows: (u.n_windows as number) ?? 0,
+    nSeconds: (u.n_seconds as number) ?? 0,
+    nFrames: (u.n_frames as number) ?? 0,
+    cameraOccupancy: (u.camera_occupancy as number | null) ?? null,
+    cameraFrames: (u.camera_frames as number) ?? 0,
+    values: Object.fromEntries(features.map((f) => [f.key, (u[f.key] as number | null) ?? null])),
+  }));
+  return {
+    acf: {
+      timeS: body.acf.time_s,
+      amp: body.acf.amp,
+      phase: body.acf.phase,
+      windowFrames: body.acf.window_frames,
+      windowSeconds: body.acf.window_seconds ?? null,
+      nullMean: body.acf.null_mean,
+    },
+    step: {
+      timeS: body.step.time_s,
+      level: body.step.level,
+      lagSeconds: body.step.lag_seconds,
+      lagFrames: body.step.lag_frames,
+    },
+    units,
+    unitSeconds: body.unit_seconds,
+    fsHz: body.fs_hz ?? null,
+    nSubcarriers: body.n_subcarriers,
+    framesUsed: body.frames_used,
+    framesDropped: body.frames_dropped,
+    selectionNote: body.selection_note,
+    features,
+    decision,
+    steps,
+    truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
+    truthExcluded: body.truth_excluded ?? null,
+  };
 }

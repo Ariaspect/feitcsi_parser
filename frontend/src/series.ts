@@ -60,6 +60,108 @@ export function linePath(
   return path;
 }
 
+/** Fit a window inside `limit`, never narrower than `minSpan` and never wider
+ *  than `limit` itself, by clamping the span and then sliding it in.
+ *
+ *  Slid rather than cropped: a pan that runs into the end of the capture should
+ *  stop moving, not shrink the view the reader is holding.
+ */
+export function clampWindow(
+  window: [number, number],
+  limit: [number, number],
+  minSpan: number,
+): [number, number] {
+  const outer = Math.max(0, limit[1] - limit[0]);
+  const span = Math.min(Math.max(window[1] - window[0], minSpan), outer || minSpan);
+  let t0 = window[0];
+  if (t0 + span > limit[1]) t0 = limit[1] - span;
+  if (t0 < limit[0]) t0 = limit[0];
+  return [t0, t0 + span];
+}
+
+/** Zoom a window about a fraction of its own width, keeping that point fixed.
+ *
+ *  `anchor` is where the cursor sits, 0 at the left edge and 1 at the right, so
+ *  the time under the pointer does not move while the wheel turns — the only
+ *  zoom that feels like the view is being scaled rather than jumped.
+ *  `factor` above 1 widens (zooms out), below 1 narrows.
+ */
+export function zoomWindow(
+  window: [number, number],
+  anchor: number,
+  factor: number,
+  limit: [number, number],
+  minSpan: number,
+): [number, number] {
+  const span = window[1] - window[0];
+  const a = Math.min(1, Math.max(0, anchor));
+  const at = window[0] + a * span;
+  // The span is clamped BEFORE the window is positioned. The other order lets
+  // clampWindow widen the window by moving its right edge, which walks the
+  // anchored time out to the left edge exactly when the wheel hits the floor.
+  const outer = Math.max(0, limit[1] - limit[0]);
+  const next = Math.min(Math.max(span * factor, minSpan), outer || minSpan);
+  return clampWindow([at - a * next, at - a * next + next], limit, minSpan);
+}
+
+/** SVG path for a filled band between a low and a high series.
+ *
+ * Drawn for a decimated per-frame signal, where one column spans many frames
+ * and a line through the column medians would hide the single frame that
+ * moved — which on a frame-to-frame detector is the whole signal. The band is
+ * the column's extremes, so a one-frame spike stays visible at any zoom.
+ *
+ * A column missing either edge closes the current band and starts a new one
+ * after it, for the same reason `linePath` breaks: a band drawn across a
+ * dropout would fill area the data never measured.
+ */
+export function bandPath(
+  xs: number[],
+  los: (number | null)[],
+  his: (number | null)[],
+  x: Scale,
+  y: Scale,
+): string {
+  let path = "";
+  let run: { px: number; lo: number; hi: number }[] = [];
+
+  const flush = () => {
+    // A band needs two columns to have any width; a lone column is left to
+    // the median line rather than drawn as a zero-width sliver.
+    if (run.length >= 2) {
+      const top = run.map((p) => `${p.px.toFixed(2)} ${p.hi.toFixed(2)}`);
+      const bottom = run
+        .slice()
+        .reverse()
+        .map((p) => `${p.px.toFixed(2)} ${p.lo.toFixed(2)}`);
+      path += `M${top.join("L")}L${bottom.join("L")}Z`;
+    }
+    run = [];
+  };
+
+  for (let i = 0; i < xs.length; i++) {
+    const lo = los[i];
+    const hi = his[i];
+    if (
+      lo === null || hi === null || lo === undefined || hi === undefined ||
+      !Number.isFinite(lo) || !Number.isFinite(hi)
+    ) {
+      flush();
+      continue;
+    }
+    const px = x(xs[i]);
+    const pLo = y(lo);
+    const pHi = y(hi);
+    if (!Number.isFinite(px) || !Number.isFinite(pLo) || !Number.isFinite(pHi)) {
+      flush();
+      continue;
+    }
+    run.push({ px, lo: pLo, hi: pHi });
+  }
+  flush();
+  return path;
+}
+
 export interface Run<T> {
   value: T;
   t0: number;

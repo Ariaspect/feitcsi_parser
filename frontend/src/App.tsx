@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
+import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
-import { LgDetector } from "./LgDetector";
-import { Phase1 } from "./Phase1";
+import { Hybrid } from "./Hybrid";
+import { Hybrid2 } from "./Hybrid2";
+import { Classifier } from "./Classifier";
 import { PresenceBar } from "./PresenceBar";
-import { Presence } from "./Presence";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
 import { Button } from "@/components/ui/button";
@@ -112,6 +113,29 @@ interface DopplerGeom {
   scaleMax: number;
 }
 
+/** The 14-digit yyyymmddHHMMSS stamp a capture name carries, else a stamp
+ *  built from its mtime in the browser's zone. Used to group and order. */
+function captureStamp(c: CaptureFile): string {
+  const m = /(\d{8})_(\d{6})/.exec(c.filename);
+  if (m) return m[1] + m[2];
+  const d = new Date(c.mtime * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+}
+
+function captureDay(c: CaptureFile): string {
+  return captureStamp(c).slice(0, 8);
+}
+
+/** "13:08:27" for a stamped capture; for anything else, the bare file name
+ *  so an oddly named file is still recognisable inside its day group. */
+function captureTimeLabel(c: CaptureFile): string {
+  const m = /\d{8}_(\d{2})(\d{2})(\d{2})/.exec(c.filename);
+  if (m) return `${m[1]}:${m[2]}:${m[3]}`;
+  const base = c.filename.slice(c.filename.lastIndexOf("/") + 1);
+  return truncateCaptureName(base, CAPTURE_LIST_CHARS);
+}
+
 export function App() {
   const [path, setPath] = useState(DEFAULT_PATH);
   const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS);
@@ -122,16 +146,10 @@ export function App() {
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
   const [mimo, setMimo] = useState<string>("all");
-  // Which condition the capture picker groups by. A view over the listing's
-  // metadata, not a directory layout -- see captureGroups below.
-  //
-  // Empty until the listing arrives, then set to whichever axis actually
-  // varies. Defaulting to room/config/scenario looked right and is the worst
-  // view of the data we have: room is recorded on one value ("lab_a") because
-  // there is one room, and configuration only on the handful of captures taken
-  // since the flag existed, so every group came out named
-  // "unspecified / unspecified / occupied" -- two thirds of the label constant,
-  // and the same partition scenario alone gives, spelled less readably.
+  // The day the capture picker is narrowed to: a yyyymmdd stamp, or "all".
+  // The "Group by" select lists every day the listing holds and the picker
+  // shows only that day's captures. Empty until the listing arrives, then
+  // the newest day. See captureGroups below.
   const [groupBy, setGroupBy] = useState<string>("");
   // A default applies until the user overrides it. Without this, picking 'all'
   // deliberately and then loading another capture would snap the selection
@@ -336,73 +354,40 @@ export function App() {
   // the same captures along any axes, a capture belongs to several groupings
   // at once, and a second on-disk copy inside captures/ would be listed twice
   // and picked twice as a calibration reference.
-  const captureGroups = (() => {
-    const key = (c: CaptureFile) =>
-      groupBy === "none"
-        ? ""
-        : groupBy === "room/config/scenario"
-          ? [c.room, c.configuration, c.scenario].map((v) => v ?? "unspecified").join(" / ")
-          : ((c as unknown as Record<string, unknown>)[groupBy] as
-              | string
-              | undefined) ?? "unspecified";
-
-    const byKey = new Map<string, CaptureFile[]>();
-    for (const c of captures ?? []) {
-      const k = key(c);
-      if (!byKey.has(k)) byKey.set(k, []);
-      byKey.get(k)!.push(c);
-    }
-    // Everything unknown sinks to the bottom; the rest sorts by name, so the
-    // ordering does not move around as captures arrive.
-    const unknown = (k: string) => k === "" || k.includes("unspecified");
-    return [...byKey.entries()]
-      .sort((a, b) =>
-        unknown(a[0]) !== unknown(b[0])
-          ? Number(unknown(a[0])) - Number(unknown(b[0]))
-          : a[0].localeCompare(b[0]),
-      )
-      .map(([label, items]) => ({
-        label,
-        items: items.map((c) => ({
-          // The list gets far more room than the trigger (the popup sizes to
-          // its content below), so it shows the size too and only elides a
-          // name long enough to beat even that.
-          label: `${truncateCaptureName(c.filename, CAPTURE_LIST_CHARS)}  (${formatBytes(c.size_bytes)})`,
-          value: c.path,
-        })),
-      }));
+  // Every day in the listing, newest first, as "mm-dd" -- no year, no folder.
+  const days = (() => {
+    const seen = new Map<string, number>();
+    for (const c of captures ?? []) seen.set(captureDay(c), (seen.get(captureDay(c)) ?? 0) + 1);
+    return [...seen.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([day, n]) => ({ day, label: `${day.slice(4, 6)}-${day.slice(6, 8)}`, count: n }));
   })();
 
-  // Pick the finest grouping the data can actually support: the triple only if
-  // every part of it varies, else the single axis with the most distinct
-  // values. Runs once, and only until the user chooses for themselves.
+  // The picker holds the chosen day's captures, newest first, labelled by
+  // time of day; with "all" it holds everything under a day heading each.
+  const captureGroups = (() => {
+    const chosen = groupBy && groupBy !== "all" ? days.filter((d) => d.day === groupBy) : days;
+    return chosen.map((d) => ({
+      label: groupBy === "all" ? d.label : "",
+      items: (captures ?? [])
+        .filter((c) => captureDay(c) === d.day)
+        .sort((a, b) => captureStamp(b).localeCompare(captureStamp(a)))
+        .map((c) => ({ label: `${captureTimeLabel(c)}  (${formatBytes(c.size_bytes)})`, value: c.path })),
+    }));
+  })();
+
+  // Start on the newest day once the listing is in; the user's own choice
+  // sticks after that. A day that disappears from the listing falls back.
   useEffect(() => {
-    if (groupBy || !captures || captures.length === 0) return;
-    const distinct = (k: keyof CaptureFile) =>
-      new Set(
-        captures
-          .map((c) => c[k])
-          .filter((v) => v !== undefined && v !== null && v !== ""),
-      ).size;
-    const triple = ["room", "configuration", "scenario"] as const;
-    if (triple.every((k) => distinct(k) > 1)) {
-      setGroupBy("room/config/scenario");
-      return;
+    if (!captures || captures.length === 0) return;
+    if (!groupBy || (groupBy !== "all" && !days.some((d) => d.day === groupBy))) {
+      setGroupBy(days[0]?.day ?? "all");
     }
-    const best = (["scenario", "configuration", "activity", "subject", "room"] as const)
-      .map((k) => [k, distinct(k)] as const)
-      .sort((a, b) => b[1] - a[1])[0];
-    setGroupBy(best && best[1] > 1 ? best[0] : "none");
-  }, [captures, groupBy]);
+  }, [captures, groupBy, days]);
 
   const groupByItems = [
-    { label: "room / config / scenario", value: "room/config/scenario" },
-    { label: "room", value: "room" },
-    { label: "configuration", value: "configuration" },
-    { label: "scenario", value: "scenario" },
-    { label: "subject", value: "subject" },
-    { label: "activity", value: "activity" },
-    { label: "no grouping", value: "none" },
+    ...days.map((d) => ({ label: `${d.label}  (${d.count})`, value: d.day })),
+    { label: "all dates", value: "all" },
   ];
 
   const mimoItems = [
@@ -483,7 +468,7 @@ export function App() {
               onValueChange={(v) => v && setGroupBy(v)}
               items={groupByItems}
             >
-              <SelectTrigger className="w-44">
+              <SelectTrigger className="w-36">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -659,8 +644,10 @@ export function App() {
             <TabsList>
               <TabsTrigger value="channel">Channel</TabsTrigger>
               <TabsTrigger value="doppler">Doppler</TabsTrigger>
-              <TabsTrigger value="presence">Motion &amp; presence</TabsTrigger>
-              <TabsTrigger value="lgdetect">Phase 1</TabsTrigger>
+              <TabsTrigger value="farsense">FarSense</TabsTrigger>
+              <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+              <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
+              <TabsTrigger value="classifier">Classifier</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -933,56 +920,44 @@ export function App() {
               </div>
             </TabsContent>
 
-
-            <TabsContent value="lgdetect">
-              <div className="space-y-4">
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  Both detectors against the camera, on one grid. Ours compares
-                  a window to an empty-room reference; LG&apos;s compares each
-                  frame to the one before, so it answers &ldquo;is something
-                  changing&rdquo; and cannot see a motionless occupant at all.
-                  The reference for our side is drawn only from OTHER captures
-                  the camera labelled empty — never this one&apos;s own empty
-                  stretches, which would be knowing the answer in advance.
-                </p>
-
-                <FoldedPanel
-                  title="Verdicts and confusion matrices"
-                  hint="ground truth, ours, theirs — same grid, same windows"
-                  defaultOpen
-                >
-                  <Phase1 path={path} dark={dark} />
-                </FoldedPanel>
-
-                <FoldedPanel
-                  title="LG detector in detail"
-                  hint="its raw +/- events and per-threshold behaviour"
-                >
-                  <div className="space-y-3">
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">
-                      Its own <code>mtk_read_bf_csi</code> and{" "}
-                      <code>process_csi_data</code> decide — nothing here
-                      reimplements them. It runs under a NumPy 1.x interpreter
-                      matching the board, because its TLV length arithmetic
-                      shifts a <code>uint8</code> left by 8: NumPy 2 keeps that
-                      as <code>uint8</code>, evaluates it to 0, and the walk
-                      desynchronises at the first CSI field — silently, yielding
-                      frames with zeroed imaginary parts rather than an error.
-                    </p>
-                    <LgDetector
-                      path={path}
-                      captureTMin={meta.t_min}
-                      captureTMax={meta.t_max}
-                      timeLink={timeLink}
-                      dark={dark}
-                    />
-                  </div>
-                </FoldedPanel>
-              </div>
+            <TabsContent value="farsense">
+              <FarSense
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
             </TabsContent>
 
-            <TabsContent value="presence">
-              <Presence
+            <TabsContent value="hybrid">
+              <Hybrid
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </TabsContent>
+
+            <TabsContent value="hybrid2">
+              <Hybrid2
+                path={path}
+                meta={meta}
+                timeLink={timeLink}
+                mimo={mimo}
+                sourceMac={sourceMac}
+                interpolate={interpolate}
+                dark={dark}
+              />
+            </TabsContent>
+
+            <TabsContent value="classifier">
+              <Classifier
                 path={path}
                 meta={meta}
                 timeLink={timeLink}

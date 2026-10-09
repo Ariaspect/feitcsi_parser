@@ -1,0 +1,515 @@
+"""Motion from amplitude alone: the two-feature signal the stage-1/2 experiment settled on.
+
+A separate question from the hybrid detector next door. That one asks *is
+someone there*, and answers it from motion **or** breathing. This one asks a
+narrower thing -- **how much is the channel moving right now** -- and answers
+it as one scalar per window, meant to be handed to a back-end classifier
+later. Nothing here holds a verdict open, and nothing here looks for a
+rhythm.
+
+What the experiment fixed (see ``report_motion_signal.md``):
+
+* **Signal source: RATIO**, ``|H_tx1 / H_tx0|`` -- the amplitude of the
+  complex ratio along the AP's transmit chains, the same grid the presence
+  detector rides on (``tiles._presence_grid``), so a change of decode cannot
+  masquerade as motion. AUC 0.993 against 0.983 for raw amplitude on the
+  walking scenario, and the plan's expected "RAW-PC1 is the AGC component"
+  never appeared: no candidate source correlated with common gain above 0.29.
+  A single PC of the ratio scored within 0.02 of the full 245 streams on
+  walking, which by the plan's own tie-break would have won on being
+  lighter -- but it loses by 0.084 on *small* motion, which is the case that
+  matters, so the full stream set is kept.
+* **Features: variance and lag-1 autocorrelation.** Variance on the
+  high-passed window; lag-1 on the window before the high-pass, mean removed
+  only, because the filter manufactures correlation in noise. Both reduced
+  over subcarriers by the median. Six other candidates (MAD, kurtosis,
+  skewness, low-band ratio, spectral entropy, and mean as a control) earned
+  nothing on top.
+* **Normalisation is per capture, against that capture's own quiet level.**
+  This is the part that was a methodology error first and a result second:
+  pooling the empty windows of every capture into one negative class measured
+  the *link*, not the room. Empty-room variance spans 36x between sample
+  rates, and the seated-with-phone and still-posture groups swap order
+  (0.575/0.868 pooled, 0.860/0.527 self-referenced) when the pooling is
+  removed. So nothing here is comparable across captures until it has been
+  divided by its own capture's scale.
+
+Two normalisations are offered, and the difference between them is the whole
+deployment question:
+
+* ``label`` centres and scales each feature on the windows the *camera* calls
+  empty. It is what every number in the report was measured with, and it
+  cannot be deployed -- there is no camera in a product.
+* ``free`` uses the capture's own 10th and 40th percentiles instead, no
+  labels. The pair has to sit low: at the 20th/80th the occupant of a capture
+  40% occupied is inside the upper percentile and scales the signal away --
+  walking recall collapsed from 100% to 25.8% that way, the same self-defeat
+  the hybrid's motion floor has when a range is mostly motion.
+
+The logistic weights are **fixed**, fitted once over the 29 marked captures
+(``CORPUS``) under each normalisation, with the threshold at 90% specificity
+on that corpus's empty windows. They are constants here, not something
+re-fitted per request: a tab that re-fits on the capture it is displaying is
+reporting its own training error. For the 29 captures the weights were fitted
+on, the panel says so.
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from pathlib import Path
+from threading import Lock
+from typing import Any
+
+import numpy as np
+from scipy.signal import butter, filtfilt
+
+from backend import phase as phasemod, truth as truthmod
+
+# Each feature gets the window that suits it, both emitted on one 0.5 s grid.
+#
+# The plan fixed 2 s for everything, and a sweep over 2/4/8/10/15 s said that
+# was wrong in two different ways. **lag-1 rises monotonically with window
+# length in every condition** -- most on the one that matters, still posture,
+# where it goes 0.624 -> 0.756 -- because a short window cannot resolve slow
+# motion at all: 2 s is 0.5 Hz of frequency resolution, and a person sitting
+# still moves well below that. **Variance does not**: it peaks at 4 s and
+# falls away, being a spread rather than a rhythm. So they are computed on
+# separate windows; the cumulative-sum machinery means the second window is
+# nearly free.
+VARIANCE_WINDOW_SECONDS = 4.0
+LAG1_WINDOW_SECONDS = 15.0
+HOP_SECONDS = 0.5
+# DC removal before the variance. Was 0.3 Hz, from the plan, and at a 2 s
+# window that put the corner BELOW the window's first non-DC bin (0.5 Hz) --
+# the filter was discarding a band the window could not resolve either way,
+# and with it every slow occupant. Measured at 4 s: still posture 0.766 ->
+# 0.796, perched breathing 0.888 -> 0.942. lag-1 is taken before the filter
+# and is unaffected by this number, which the sweep confirms digit for digit.
+HIGHPASS_HZ = 0.05
+HIGHPASS_ORDER = 4
+# Longest window in play; what a labelled cell has to span.
+WINDOW_SECONDS = max(VARIANCE_WINDOW_SECONDS, LAG1_WINDOW_SECONDS)
+# Which window each feature rides on.
+FEATURE_WINDOWS = {"variance": VARIANCE_WINDOW_SECONDS, "lag1": LAG1_WINDOW_SECONDS}
+# Hampel outlier replacement, half-width in samples and the MAD multiple.
+HAMPEL_HALF = 5
+HAMPEL_NSIG = 3.0
+# A window more than this fraction interpolated across dropouts reports
+# nothing rather than reporting the interpolator's own smoothness as calm.
+MAX_GAP_FRACTION = 0.5
+# Percentile pair for the label-free scale. Both must sit below the occupant.
+# 20/80 first, which a capture 40% occupied defeats outright (the occupant is
+# inside its own 80th percentile and scales their own signal away: walking
+# recall 100% -> 25.8%). Then 10/40 at a 2 s window. At 15 s the pair has to
+# come down again for a second reason: neighbouring windows share 97% of
+# their samples, every transition smears 7.5 s either side, and the middle of
+# the distribution now holds transition windows that used to be a thin tail.
+# Measured over the corpus at the current geometry, median balanced accuracy:
+# 10/40 69.7%, 5/30 87.7%, 5/25 88.8%, 5/20 87.7%, 10/30 78.3%.
+FREE_PERCENTILES = (5.0, 25.0)
+# Empty windows a capture needs before its own empty statistics are trusted.
+MIN_REFERENCE_WINDOWS = 10
+
+# Which half of the complex ratio each feature is taken from.
+#
+# The ratio is a complex number and this pipeline used only its magnitude for
+# most of the work. Phase is the sensitive half -- 2.87 cm of path change is a
+# full 2*pi at 5.24 GHz, so a chest moving millimetres turns it while leaving
+# the magnitude flat -- and a held-out comparison says lag-1 belongs there.
+# Over 200 capture-level stratified splits, swapping lag-1 from magnitude to
+# phase won 75% of them on balanced accuracy (+1.90) and 84.5% on accuracy
+# (+3.52), label-free. The in-corpus comparison said the opposite, which is
+# what a 9.4-point overfit on magnitude looks like beside 6.6 on phase: the
+# ranking of two feature sets can invert when both are scored on the captures
+# they were fitted to.
+#
+# It is a SWAP, not an addition. Magnitude lag-1 and phase lag-1 are two
+# views of one thing -- fitted together the weight splits between them
+# (+0.156/+0.255) and the held-out result is worse than the swap alone.
+# Variance stays on the magnitude: phase variance is dominated by noise when
+# nobody moves (still-posture AUC 0.595 against 0.766) and its fitted weight
+# came out at zero.
+FEATURE_SOURCES = {"variance": "amp", "lag1": "phase"}
+FEATURES = ("variance", "lag1")
+
+# Fitted on CORPUS, class-weight balanced, C = 1, threshold at the 90th
+# percentile of the empty windows' score. Reproduce with
+# ``scripts/fit_motionsig.py``.
+COEFFICIENTS: dict[str, dict[str, float]] = {
+    "label": {
+        "variance": 0.142381,
+        "lag1": 0.746296,
+        "intercept": -0.882194,
+        "threshold": 0.224398,
+    },
+    "free": {
+        "variance": 0.008124,
+        "lag1": 0.372754,
+        "intercept": -1.181105,
+        "threshold": 0.206971,
+    },
+}
+
+MODES = tuple(COEFFICIENTS)
+
+# The captures the weights were fitted on. A panel showing one of these is
+# showing training error, which is worth saying out loud.
+CORPUS = frozenset("""
+20260904_193228 20260909_195450 20260910_203337 20260911_095127 20260911_100145
+20260911_140353 20260911_142929 20260911_144658 20260911_150435 20260911_153305
+20260914_193002 20260915_120831 20260915_132712 20260915_133849 20260915_143211
+20260915_150502 20260915_195845 20260915_202020 20260916_140908 20260916_143259
+20260916_202702 20260917_195828 20260917_202029 20260921_121406 20260921_125836
+20260921_133234 20260922_151145 20260922_155219 20260922_161219
+""".split())
+
+
+# --------------------------------------------------------------------------- #
+#  Preprocessing                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def hampel(x: np.ndarray, half: int = HAMPEL_HALF, nsig: float = HAMPEL_NSIG,
+           chunk: int = 32) -> np.ndarray:
+    """Replace only the samples that stray from their local median. Along axis 0.
+
+    Chunked over streams because the sliding window is ``(T, S, 2*half+1)``
+    and a 600 s range at 43 Hz over 245 subcarriers would be half a gigabyte
+    of it at once.
+    """
+    if x.shape[0] < 2 * half + 1:
+        return x.copy()
+    out = x.copy()
+    for lo in range(0, x.shape[1], chunk):
+        block = x[:, lo:lo + chunk]
+        pad = np.pad(block, ((half, half), (0, 0)), mode="edge")
+        win = np.lib.stride_tricks.sliding_window_view(pad, 2 * half + 1, axis=0)
+        med = np.median(win, axis=-1)
+        mad = np.median(np.abs(win - med[..., None]), axis=-1) * 1.4826
+        stray = np.abs(block - med) > nsig * np.maximum(mad, 1e-12)
+        blk = out[:, lo:lo + chunk]
+        blk[stray] = med[stray]
+    return out
+
+
+def _window_moments(x: np.ndarray, starts: np.ndarray, n: int) -> tuple[np.ndarray, ...]:
+    """Per-window sums of ``x``, ``x^2`` and ``x_t x_{t+1}``, from cumulative sums.
+
+    The features wanted here are moments, so no window is ever materialised:
+    a 600 s range would otherwise hold ``(n_windows, n_samples, n_streams)``
+    at once. Cost is one pass over the range per quantity.
+    """
+    c1 = np.concatenate([np.zeros((1, x.shape[1])), np.cumsum(x, axis=0)])
+    c2 = np.concatenate([np.zeros((1, x.shape[1])), np.cumsum(x * x, axis=0)])
+    prod = x[:-1] * x[1:]
+    cp = np.concatenate([np.zeros((1, x.shape[1])), np.cumsum(prod, axis=0)])
+    w1 = c1[starts + n] - c1[starts]
+    w2 = c2[starts + n] - c2[starts]
+    # Pairs inside the window: t from start to start + n - 2.
+    wp = cp[starts + n - 1] - cp[starts]
+    return w1, w2, wp
+
+
+def features(pre: np.ndarray, post: np.ndarray, starts: np.ndarray, n: int,
+             keys: tuple[str, ...] = FEATURES) -> dict[str, np.ndarray]:
+    """Variance and lag-1 per window per stream, each ``(n_windows, n_streams)``.
+
+    Variance comes off the high-passed signal, lag-1 off the signal before
+    it -- a high-pass leaves neighbouring noise samples anticorrelated, so
+    lag-1 on a filtered empty room reads as structure that is the filter's.
+
+    ``keys`` restricts the work: the two features now sit on different
+    sources as well as different windows, so a caller wants one at a time.
+    """
+    out: dict[str, np.ndarray] = {}
+    if "variance" in keys:
+        w1p, w2p, _ = _window_moments(post, starts, n)
+        mu_post = w1p / n
+        out["variance"] = np.maximum(w2p / n - mu_post * mu_post, 0.0)
+    if "lag1" in keys:
+        w1, w2, wp = _window_moments(pre, starts, n)
+        mu = w1 / n
+        # sum (x_t - mu)^2 over the window, and sum (x_t - mu)(x_{t+1} - mu)
+        # over its n-1 adjacent pairs, both expanded so only those sums are
+        # needed and no window is ever materialised.
+        den = w2 - n * mu * mu
+        edge = pre[starts] + pre[starts + n - 1]
+        num = wp - mu * (2.0 * w1 - edge) + (n - 1) * mu * mu
+        out["lag1"] = num / np.maximum(den, 1e-30)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+#  Normalisation and scoring                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def reference(values: dict[str, np.ndarray], mode: str,
+              empty: np.ndarray | None = None) -> dict[str, tuple[float, float]]:
+    """Per-feature ``(centre, scale)`` for one capture under one normalisation.
+
+    ``label``: the median and standard deviation of the windows the camera
+    calls empty -- what the report measured, and not deployable. ``free``: the
+    capture's own low percentiles, which need no labels; see the module note
+    on why the pair has to be low.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for f in FEATURES:
+        v = np.asarray(values[f], dtype=float)
+        finite = np.isfinite(v)
+        if not finite.any():
+            out[f] = (0.0, 1.0)
+            continue
+        if mode == "label":
+            pool = v[finite & empty] if empty is not None else v[:0]
+            if pool.size >= MIN_REFERENCE_WINDOWS:
+                centre, scale = float(np.median(pool)), float(np.std(pool))
+            else:
+                centre, scale = float(np.median(v[finite])), float(np.std(v[finite]))
+        else:
+            lo, hi = np.percentile(v[finite], FREE_PERCENTILES)
+            centre, scale = float(lo), float(max(hi - lo, 1e-30))
+        out[f] = (centre, max(scale, 1e-30))
+    return out
+
+
+def score(values: dict[str, np.ndarray], ref: dict[str, tuple[float, float]],
+          coef: dict[str, float]) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Normalised features and the linear score built from them."""
+    z = {f: (np.asarray(values[f], dtype=float) - ref[f][0]) / ref[f][1] for f in FEATURES}
+    s = np.full(next(iter(z.values())).shape, np.nan)
+    ok = np.ones(s.shape, dtype=bool)
+    for f in FEATURES:
+        ok &= np.isfinite(z[f])
+    s[ok] = coef["intercept"] + sum(coef[f] * z[f][ok] for f in FEATURES)
+    return z, s
+
+
+# --------------------------------------------------------------------------- #
+#  Over a capture                                                             #
+# --------------------------------------------------------------------------- #
+
+# Decoding and filtering dominate; the normalisations and the linear score
+# are free, so one decode serves both modes and repeat requests on the same
+# range (a changed margin, a re-render) cost nothing.
+_CACHE_SIZE = 4
+_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+_cache_lock = Lock()
+
+
+def reset_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def capture_features(
+    path,
+    t0: float,
+    t1: float,
+    *,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+    variance_window_seconds: float = VARIANCE_WINDOW_SECONDS,
+    lag1_window_seconds: float = LAG1_WINDOW_SECONDS,
+    hop_seconds: float = HOP_SECONDS,
+    highpass_hz: float = HIGHPASS_HZ,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+) -> dict[str, Any]:
+    """Decode a range and reduce it to the two raw features, cached.
+
+    The two features ride different window lengths (see the constants) and
+    are returned on one grid: the longer window's centres, with the shorter
+    feature taken from the window centred at the same instant. Centres are on
+    the capture's clock, so they line up with the camera sidecar and with
+    every other tab.
+    """
+    from backend.tiles import _presence_grid
+
+    path = Path(path)
+    st = path.stat()
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns, float(t0), float(t1),
+           mimo, source_mac, bool(interpolate),
+           float(variance_window_seconds), float(lag1_window_seconds),
+           float(hop_seconds), float(highpass_hz), float(max_gap_fraction))
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit
+
+    grid, fabricated, fs, grid_times, times, _times_all, n_no_ratio = _presence_grid(
+        path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+    )
+    windows = {"variance": float(variance_window_seconds), "lag1": float(lag1_window_seconds)}
+    lengths = {k: int(round(v * fs)) for k, v in windows.items()}
+    hop = max(1, int(round(hop_seconds * fs)))
+    for k, n in lengths.items():
+        if n < 8:
+            raise ValueError(f"{k}: {windows[k]} s is {n} samples at {fs:.1f} Hz; too few for a window")
+    longest = max(lengths.values())
+    if grid.shape[0] < longest + 1:
+        raise ValueError(f"range holds {grid.shape[0]} samples, the longest window needs {longest}")
+
+    # Both halves of the complex ratio. Dead subcarriers out first, so no
+    # median ever runs over an all-NaN column.
+    mag = np.abs(grid).astype(np.float64)
+    alive = np.isfinite(mag).all(axis=0)
+    if alive.any():
+        alive[alive] &= np.median(mag[:, alive], axis=0) > 0
+    if alive.sum() < 4:
+        raise ValueError(f"only {int(alive.sum())} subcarriers carry a usable ratio")
+
+    # Magnitude: each stream divided by its own median, so the 245 of them are
+    # one population before the median over streams reduces them.
+    mag = mag[:, alive]
+    mag /= np.median(mag, axis=0)
+    # Phase: unwrapped along TIME, not subcarrier. The ratio has already
+    # cancelled the per-packet offset its two chains share, so what is left to
+    # undo is the 2*pi sawtooth as the path length changes.
+    # ``phase.unwrap_time`` restarts at every dropout rather than guessing how
+    # many turns went unobserved, and anchors each segment at its own start.
+    # lag-1 removes the window mean, so that offset is harmless, and a window
+    # straddling a segment boundary sits in a fabricated run long enough for
+    # the gap rule below to blank it.
+    ang = phasemod.unwrap_time(
+        np.angle(grid[:, alive]).astype(np.float64), np.asarray(grid_times, dtype=float),
+    ).astype(np.float64)
+    ang -= np.median(ang, axis=0)
+
+    b, a = butter(HIGHPASS_ORDER, highpass_hz / (fs / 2.0), btype="high")
+    pre = {"amp": hampel(mag), "phase": hampel(ang)}
+    post = {k: filtfilt(b, a, v, axis=0) for k, v in pre.items()}
+
+    fab = np.asarray(fabricated, dtype=float)
+    cfab = np.concatenate([[0.0], np.cumsum(fab)])
+    origin = float(grid_times[0])
+
+    # The master grid is the longest window's centres; a shorter feature is
+    # read from its own window centred on the same instant, so the two never
+    # describe different moments.
+    master_key = max(lengths, key=lambda k: lengths[k])
+    n_master = lengths[master_key]
+    master_starts = np.arange(0, mag.shape[0] - n_master + 1, hop)
+    centres_i = master_starts + (n_master - 1) / 2.0
+    out_raw: dict[str, np.ndarray] = {}
+    gap_out = np.zeros(master_starts.size)
+    for f in FEATURES:
+        n = lengths[f]
+        src = FEATURE_SOURCES[f]
+        starts = np.rint(centres_i - (n - 1) / 2.0).astype(int)
+        starts = np.clip(starts, 0, mag.shape[0] - n)
+        v = np.median(features(pre[src], post[src], starts, n, keys=(f,))[f], axis=1)
+        gap = (cfab[starts + n] - cfab[starts]) / n
+        v[gap > max_gap_fraction] = np.nan
+        out_raw[f] = v
+        gap_out = np.maximum(gap_out, gap)
+
+    out: dict[str, Any] = {
+        "time_s": origin + centres_i / fs,
+        "fs": float(fs),
+        "n_samples": int(n_master),
+        "streams": int(alive.sum()),
+        "gap_fraction": gap_out,
+        "frames_used": int(times.size),
+        "frames_without_ratio": int(n_no_ratio),
+        "windows": {f: windows[f] for f in FEATURES},
+        "sources": dict(FEATURE_SOURCES),
+        "window_seconds": float(max(windows.values())),
+        "hop_seconds": float(hop_seconds),
+        "highpass_hz": float(highpass_hz),
+        "raw": out_raw,
+    }
+
+    with _cache_lock:
+        _cache[key] = out
+        while len(_cache) > _CACHE_SIZE:
+            _cache.popitem(last=False)
+    return out
+
+
+def compute_motion_signal(
+    path,
+    t0: float,
+    t1: float,
+    *,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+    variance_window_seconds: float = VARIANCE_WINDOW_SECONDS,
+    lag1_window_seconds: float = LAG1_WINDOW_SECONDS,
+    hop_seconds: float = HOP_SECONDS,
+    highpass_hz: float = HIGHPASS_HZ,
+    max_gap_fraction: float = MAX_GAP_FRACTION,
+    margin_s: float = truthmod.DEFAULT_MARGIN_S,
+    camera: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """The adopted signal for one range, under both normalisations, scored.
+
+    ``camera`` is the sidecar as ``(time, present)`` rows on the capture's
+    clock; without it the label normalisation has nothing to centre on and
+    reports why. Scoring goes through ``backend.truth``, so the empty seconds
+    next to a transition are dropped here exactly as they are everywhere else
+    -- note that this is the asymmetric rule, which is *not* what the
+    experiment's own ``+/-5 s on every frame`` mask did.
+    """
+    feat = capture_features(
+        path, t0, t1, mimo=mimo, source_mac=source_mac, interpolate=interpolate,
+        variance_window_seconds=variance_window_seconds,
+        lag1_window_seconds=lag1_window_seconds, hop_seconds=hop_seconds,
+        highpass_hz=highpass_hz, max_gap_fraction=max_gap_fraction,
+    )
+    centres = np.asarray(feat["time_s"], dtype=float)
+    # The cell spans the LONGEST window: that is what the features actually
+    # saw, so a cell straddling a transition has to be excluded on that span
+    # rather than on the shorter one's.
+    half = float(feat["window_seconds"]) / 2.0
+
+    cells = excluded = None
+    empty = None
+    if camera is not None and camera.size:
+        cells, excluded = truthmod.cell_truth(
+            centres, camera[:, 0], camera[:, 1] > 0.5, half, margin_s,
+        )
+        empty = np.isfinite(cells) & (cells <= 0.5)
+
+    modes: dict[str, Any] = {}
+    for mode in MODES:
+        coef = COEFFICIENTS[mode]
+        note = None
+        if mode == "label":
+            if empty is None:
+                note = "no camera sidecar: nothing to centre the empty reference on"
+            elif int(empty.sum()) < MIN_REFERENCE_WINDOWS:
+                note = (f"only {int(empty.sum())} camera-empty window(s) in range "
+                        f"(needs {MIN_REFERENCE_WINDOWS}); centred on the whole range instead")
+        ref = reference(feat["raw"], mode, empty)
+        z, s = score(feat["raw"], ref, coef)
+        present = np.isfinite(s) & (s > coef["threshold"])
+        entry: dict[str, Any] = {
+            "z": z,
+            "score": s,
+            "present": present,
+            "threshold": float(coef["threshold"]),
+            "reference": {f: {"centre": ref[f][0], "scale": ref[f][1]} for f in FEATURES},
+            "coefficients": {f: float(coef[f]) for f in FEATURES} | {"intercept": float(coef["intercept"])},
+            "note": note,
+        }
+        if cells is not None:
+            conf = truthmod.confusion(cells, present, excluded)
+            scored = np.isfinite(cells)
+            conf["base_rate"] = float(np.mean(cells[scored] > 0.5)) if scored.any() else None
+            conf["margin_s"] = float(margin_s)
+            entry["confusion"] = conf
+        modes[mode] = entry
+
+    return feat | {
+        "modes": modes,
+        "truth": None if camera is None or not camera.size else {
+            "time_s": camera[:, 0].astype(float),
+            "present": camera[:, 1] > 0.5,
+        },
+        "in_corpus": Path(path).stem in CORPUS,
+        "margin_s": float(margin_s),
+    }
