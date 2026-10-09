@@ -100,6 +100,10 @@ BREATH_PEAK = hybrid2.RANGE_BREATH_PEAK
 BREATH_RUN_REFERENCE = hybrid2.RANGE_BREATH_RUN
 BREATH_WINDOW_LONG_SECONDS = 20.0
 BREATH_RATE_FLOOR_RPM = 11.0
+# Test 6, the fan: the structure function's dip (see revisit_statistic).
+REVISIT_TAUS = np.arange(0.5, 30.01, 0.5)   # lags of the structure function, s
+REVISIT_MIN_TAU = 4.0                        # dips at shorter lags are gait and fidget, not a cycle
+REVISIT_REFERENCE = 0.45                     # fan min 0.46, people max 0.40 on 80 vs 391 units
 
 # Test 4: a six-feature logistic regression on dimensionless inputs only, fit
 # on the 929 non-robot units of 09-04 .. 10-05 (class-balanced, C = 1). The
@@ -329,6 +333,22 @@ FEATURES: list[dict[str, Any]] = [
                        "with the breathing peak. Below the reference counts towards machine-like.",
     },
     {
+        "key": "revisit", "label": "revisit", "test": "6", "status": "candidate",
+        "reference": REVISIT_REFERENCE, "axis": [0.0, 1.0], "decimals": 2,
+        "description": "Deepest fall of the frame step's structure function D(τ) below its running "
+                       "maximum, over lags 4-30 s: how far the channel comes back to an earlier state. "
+                       "A fan sweeping back to the same angle every cycle: 0.46-0.80 with the dip at "
+                       "19.5-20.5 s (80 units, 10-08/09); people at most 0.40, empties at most 0.51, the "
+                       "robot at most 0.11. AUC 1.000 fan against people; 0.45 flags 80/80 fan units and "
+                       "0/391 people. The peer session's C3, reproduced on this pipeline.",
+    },
+    {
+        "key": "revisit_tau", "label": "revisit lag (s)", "test": "6", "status": "context",
+        "reference": None, "axis": [0.0, 30.0], "decimals": 1,
+        "description": "Lag of that dip: the mover's cycle. The rotating fan: 19.5-20.5 s every time; "
+                       "a person's deepest dip lands anywhere from 5 to 30 s.",
+    },
+    {
         "key": "machine_like", "label": "machine-like", "test": "6", "status": "candidate",
         "reference": 0.5, "axis": [0.0, 1.0], "decimals": 0,
         "description": "1 when λ₁ share < 0.5 AND delay spread < 18: a low-rank, repeated change. "
@@ -505,6 +525,42 @@ def change_delay_spread(r: np.ndarray, times: np.ndarray, lag_seconds: float) ->
     pk = np.abs(np.fft.fft(d, n=NP, axis=1)).argmax(axis=1).astype(float)
     pk[pk > NP / 2] -= NP
     return float(np.std(pk))
+
+
+def revisit_statistic(r: np.ndarray, times: np.ndarray) -> tuple[float, float]:
+    """Does the channel come back to where it was? The structure function of
+    the frame step, D(τ) = median over the unit of the per-frame step at lag τ
+    for τ = 0.5 … 30 s, rises as the channel wanders and *falls* again at the
+    lag where it revisits an earlier state -- a fan that sweeps back to the
+    same angle every cycle. ``revisit`` is the deepest such fall relative to
+    the running maximum, over lags of REVISIT_MIN_TAU or more; the second
+    value is its lag. Measured 2026-10-09 against lg_csi_experiments' C3: the
+    rotating fan 0.46-0.80 with the dip at 19.5-20.5 s (80 units), people at
+    most 0.40, empties at most 0.51, the robot at most 0.11 -- AUC 1.000 fan
+    against people. Returns (NaN, NaN) when the unit is too short."""
+    r = np.asarray(r); times = np.asarray(times, dtype=float)
+    dt = np.diff(times)
+    if dt.size < 10:
+        return float("nan"), float("nan")
+    step = float(np.median(dt))
+    n = r.shape[0]
+    D = np.full(REVISIT_TAUS.size, np.nan)
+    for i, tau in enumerate(REVISIT_TAUS):
+        L = int(round(tau / step))
+        if L < 1 or L >= n - 10:
+            continue
+        a, b = r[L:], r[:-L]
+        D[i] = float(np.nanmedian(np.nanmedian(np.abs(a - b) / (np.abs(a) + np.abs(b) + 1e-12), axis=1)))
+    ok = np.isfinite(D)
+    if ok.sum() < 10:
+        return float("nan"), float("nan")
+    runmax = np.maximum.accumulate(np.where(ok, D, -np.inf))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dip = np.where(ok & (runmax > 0), (runmax - D) / runmax, -1.0)
+    m = REVISIT_TAUS >= REVISIT_MIN_TAU
+    dip = np.where(m, dip, -1.0)
+    i = int(np.argmax(dip))
+    return (float(dip[i]), float(REVISIT_TAUS[i])) if dip[i] >= 0 else (float("nan"), float("nan"))
 
 
 def unit_edges(t0: float, t1: float, unit_seconds: float) -> np.ndarray:
@@ -693,6 +749,7 @@ def compute_features(
         l_med, _, _ = _quantiles(lam_share[wsel])
         _, d_p90, _ = _quantiles(ev_drift[wsel])
         spread = change_delay_spread(ratio[fsel], times[fsel], lag_seconds)
+        revisit, revisit_tau = revisit_statistic(ratio[fsel], times[fsel])
         s_med, s_p90, n_sec = _quantiles(level[ssel])
         j = jitter[ssel]
         j = j[np.isfinite(j)]
@@ -711,6 +768,7 @@ def compute_features(
             "acf_amp_median": a_med, "acf_amp_p90": a_p90,
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
             "lam_share_median": l_med, "ev_drift_p90": d_p90, "delay_spread": spread,
+            "revisit": revisit, "revisit_tau": revisit_tau,
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })
@@ -826,6 +884,10 @@ FEATURE_NOTES: dict[str, dict[str, str]] = {
     "delay_spread": {"role": "input of P(human | moving)",
                      "separates": "a machine's repeated change (12.7 bins) from a body's (21-56)",
                      "not_separates": "walkers (10) from machines -- a gait repeats too"},
+    "revisit": {"role": "candidate (test 6) -- the periodic-machine tell",
+                "separates": "the rotating fan from people, empties and the robot (AUC 1.000; fan >= 0.46, people <= 0.40)",
+                "not_separates": "the robot from a person (0.11 -- a robot does not cycle); the static fan from an empty room (0.06)"},
+    "revisit_tau": {"role": "context", "separates": "the fan's 20 s cycle from a person's drifting dips", "not_separates": "--"},
     "machine_like": {"role": "candidate (test 6)",
                      "separates": "the robot, 0.80-0.93 flagged on a session it was not set on",
                      "not_separates": "phone users and walkers from machines (0.25-0.42 flagged)"},

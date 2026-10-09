@@ -33,7 +33,7 @@ sections below carry the numbers.
 | 3 | FarSense breathing run (10 s as in the rule; 20 s + 11 rpm floor) | a still person from an empty room on every link, including the noisy one (85 % → 96 % at 20 s) and the far room (75 %), at 0–1 % false alarms on true empties; a person from the robot (robot breathes 5–10 %) | a fidgeting person (23–34 %; motion does that); "motion without breathing" from non-human, since walkers show no peak 55 % of the time |
 | 4 | the bank as a whole: hand rule B (step > max(2 × jitter, 0.035) OR 20 s run) and a six-feature logistic P(occupied) | occupied from empty at 0.92 balanced on a link state never seen — the noisy link at 0.85 specificity where the range rule has 0 — with breathing the strongest input and no absolute feature allowed; the learned score also rejects most robot units unseen | more than the rules on the days the rules already work (current link 0.97–0.98 either way); seated fidgeting under a jitter-tied threshold (0.71–0.91); camera-empty windows with a person a metre from the link — label-limited |
 | 5 | cross-subcarrier structure: correlation, λ₁ share, eigenvector drift, delay concentration of the change | **nothing new for presence** — where structure separates (clean link, movers), step/ψ̂/breathing already do; eigenvector drift separates *movers* from the noisy link (0.80) and becomes P(occupied)'s 7th input; the robot's change is low-rank and repeatable (λ₁ 0.41, delay spread 12.7) where no person's is | **a still sitter from the noisy empty room** (AUC ≤ 0.63 on every structure feature; breathing 0.99) — the noisy state has a sitter's structure |
-| 6 (partial) | breathing peak + λ₁ share + delay spread → P(human \| moving), gating rule B's "present" | **the robot from a human** — the only thing required of it: 3 % of robot units called human held out by session (0 % with P(occupied) as a second condition), 91 % (86 %) of people kept; what a robot lacks is breathing, rank and variety | **the oscillating fan from a human — 5 of 5 called human** (high-rank, wandering, the robot's opposite); its tell is periodicity: a 6.1 rpm fundamental with a harmonic comb to 0.40 Hz, which the bank does not yet measure; seated movers and walkers it loses; P(occupied) alone is not a robot gate |
+| 6 | P(human \| moving) = breathing peak + λ₁ share + delay spread, gating rule B's "present"; **revisit** = the structure function's dip at 4–30 s | **the robot from a human** (3 % of robot units called human held out by session, 91 % of people kept — a robot lacks breathing, rank and variety) and, by revisit, **the rotating fan from everything** (80/80 fan units ≥ 0.46, people ≤ 0.40, robot ≤ 0.11, AUC 1.000 — a fan cycles back to the same angle every 20 s) | the static fan from an empty room (invisible to every channel — correctly); seated movers and walkers the robot gate loses; a curtain or a second robot, not yet recorded |
 | 7 | the link floor kept online: smallest one-frame jitter of the last 6 h (≥ 3 units), else the fixed 0.035 | **today's link from yesterday's** — matches an oracle that knows each day's true jitter (0.898 vs 0.896; fixed rule 0.877), learns a new noisy link within 5–10 empty units, needs no camera and no shift trigger | the camera-empty windows with a person near the link (0.45–0.68 even for the oracle); the first five empties after a clean → noisy change (0.40) |
 
 **The tab.** `backend/classifier.py`, `/api/classifier`, the **Classifier**
@@ -833,6 +833,53 @@ windows — before it can be trusted on anything but the robot, and the
 breathing floor at 11 rpm needs a harmonic check beside it. Five units from
 one fan; the fixed-fan and oscillating-fan-with-person captures of the plan
 are still the measurement.
+
+### Periodicity as the fan's detector — cross-checked with lg_csi_experiments (2026-10-09)
+
+The peer session's ground truth (all env2, no person in any): robot 10-05
+20:55–21:04 (10), 10-06 13:27–15:31 (35), 10-07 14:26–16:04 (33); **static
+fan** 10-08 20:08–20:28 (20); **rotating fan** 10-08 20:33–20:37 (5) and
+all 75 of 10-09 10:48–12:20. Its C1–C5 are candidate features, not
+conditions; its C3, *revisit*, is the one that separated the fan completely
+(fan min 0.57, people max 0.37).
+
+Two periodicity readings were tried here, on every unit 09-04 → 10-09
+(1,211). **The autocorrelation route fails**: FarSense, even with the band
+opened to 2 rpm and a 60 s window, reports the 6.1–6.5 rpm half-cycle
+harmonic, never the 20 s fundamental, because it reads the first peak from
+the short-lag side; a rule on that (fundamental < 8 rpm held ≥ 10 s) caught
+the 10-08 fan 5/5 and the weaker 10-09 fan only 53 %, and the step-series
+line that was 17–40 strong on 10-08 is 5.7 on 10-09. **The structure
+function succeeds**: D(τ) = median over the unit of the frame step at lag τ,
+τ = 0.5…30 s; *revisit* = the deepest fall of D below its running maximum at
+lags ≥ 4 s — how far the channel comes back to an earlier state:
+
+| class | n | revisit median [p10, p90] | min | max | dip lag (s) |
+|---|---|---|---|---|---|
+| **rotating fan 10-09** | 75 | **0.67** [0.59, 0.76] | **0.46** | 0.80 | 20.5 [19.5, 20.5] |
+| rotating fan 10-08 | 5 | 0.58 [0.47, 0.66] | 0.46 | 0.66 | 19.5 |
+| static fan 10-08 | 20 | 0.06 | 0.04 | 0.07 | — |
+| robot (3 sessions) | 78 | 0.03–0.06 | 0.01 | **0.11** | — |
+| still sitters | 34 | 0.07 [0.04, 0.17] | 0.01 | 0.37 | 6.8–29 |
+| seated movement / phone / walking | 35 / 28 / 12 | 0.04 / 0.05 / 0.07 | | 0.17 / 0.13 / 0.26 | |
+| env2 sitters | 66 | 0.04 [0.01, 0.10] | 0.01 | 0.17 | |
+| other occupied | 216 | 0.05 [0.01, 0.15] | 0.00 | **0.40** | |
+| empties | 514 | 0.02 [0.01, 0.07] | 0.00 | 0.51 (one unit) | |
+
+AUC, revisit: rotating fan vs people **1.000**, vs empties 1.000, vs robot
+1.000; people's 99th percentile 0.28. **A threshold of 0.45 flags 80 of 80
+fan units and 0 of 391 people**; added to the human gate it changes no
+person's label (still 0.97, seated 0.77, phone 0.93, env2 0.97 — identical
+columns). The peer's numbers on 31 subcarriers (fan min 0.57, people max
+0.37) and ours on 245 (0.46, 0.40) agree in kind; the reproduction is the
+point. What revisit does *not* do is see the robot (max 0.11): a robot does
+not cycle, it repeats its pattern — the two machines need the two tests,
+rank-and-repeatability for the robot, revisit for the fan. The static fan is
+invisible to both and to rule B, which is the right answer.
+
+`revisit` and `revisit lag` are in the bank (reference 0.45). Whether the
+human gate becomes *P(human | moving) > 0.5 AND revisit ≤ 0.45* is the
+user's call; on the evidence it costs nothing and removes the fan.
 
 ### Verdict
 

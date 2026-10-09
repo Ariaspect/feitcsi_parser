@@ -217,6 +217,23 @@ def test_delay_spread_is_small_for_a_repeated_change_and_large_for_a_wandering_o
     assert np.isnan(classifier.change_delay_spread(r_fixed[:3], times[:3], 2.0))
 
 
+def test_revisit_reads_a_cycle_and_ignores_a_wander() -> None:
+    """A channel that returns to the same state every 20 s has a deep dip of
+    its structure function at 20 s; a random walk never comes back."""
+    rng = np.random.default_rng(6)
+    n, F = 2500, 48
+    times = np.arange(n) / 42.0
+    k = np.arange(F)
+    angle = np.sin(2 * np.pi * times / 20.0)                              # the fan sweeps back and forth
+    cycle = 1.0 + 0.3 * np.exp(1j * (2 * np.pi * 5 * k / F)[None, :] * angle[:, None]) + 0.01 * rng.standard_normal((n, F))
+    rev, tau = classifier.revisit_statistic(cycle, times)
+    assert rev > 0.5 and 18.0 <= tau <= 22.0
+    walk = 1.0 + 0.3 * np.cumsum(rng.standard_normal((n, F)) + 1j * rng.standard_normal((n, F)), axis=0) / np.sqrt(n)
+    rev_w, _ = classifier.revisit_statistic(walk, times)
+    assert rev_w < 0.3
+    assert np.isnan(classifier.revisit_statistic(cycle[:5], times[:5])[0])
+
+
 def test_the_test6_columns_are_well_formed(tmp_path: Path) -> None:
     units = classifier.compute_features(_slow_capture(tmp_path), 0.0, 200.0)["units"]
     for u in units:
@@ -224,6 +241,7 @@ def test_the_test6_columns_are_well_formed(tmp_path: Path) -> None:
         assert u["verdict3"] in (0, 1, 2)
         assert u["p_human"] != u["p_human"] or 0.0 <= u["p_human"] <= 1.0
         assert u["delay_spread"] != u["delay_spread"] or u["delay_spread"] >= 0.0
+        assert u["revisit"] != u["revisit"] or 0.0 <= u["revisit"] <= 1.0
         if not u["rule_b"]:
             assert u["verdict3"] == 0
             assert u["p_human"] != u["p_human"]          # conditional on moving: blank when not present
