@@ -1376,3 +1376,116 @@ export async function fetchClassifier(
     truthExcluded: body.truth_excluded ?? null,
   };
 }
+
+// --------------------------------------------------------------------------- //
+//  AF8 classifier (/api/af8) -- the ML tab                                    //
+// --------------------------------------------------------------------------- //
+
+/** The eight features, in the order the model's weights expect. */
+export type Af8Feature =
+  | "A_slope3" | "A_r025_2" | "A_r5_2" | "A_p90"
+  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd";
+
+/** The model's arithmetic for one window, one entry per feature. */
+export interface Af8Model {
+  features: Af8Feature[];
+  value: number[];            // after imputation
+  imputed: boolean[];         // true where the feature was missing
+  mean: number[];
+  scale: number[];
+  coef: number[];
+  z: number[];
+  contribution: number[];     // coef * z
+  intercept: number;
+  logit: number;
+}
+
+export interface Af8 {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  windowS: [number, number];
+  fsHz: number;
+  subcarriers: number;
+  seconds: number;
+  pPerson: number;
+  label: 0 | 1;
+  threshold: number;
+  features: Record<Af8Feature, number | null>;
+  model: Af8Model;
+  motion: {
+    lags: number[];           // every gap D was measured at (s)
+    D: number[];              // median step at each gap
+    shapeLags: number[];      // the three the model reads
+    fitIntercept: number;     // log D = slope * log tau + fitIntercept
+    cells: number[];          // 1 s cell centres for the step lines
+    step: Record<string, (number | null)[]>;   // per-second median step, by gap
+    p90Time: number[];
+    p90Values: (number | null)[];
+  };
+  breath: {
+    time: number[];           // FarSense window centres
+    peak: (number | null)[];
+    rpm: (number | null)[];
+    good: boolean[];          // peak >= threshold
+    threshold: number;
+    run: { windows: number; t0: number; t1: number } | null;
+    rpmMean: number | null;
+  };
+  camera: { time: number[]; present: boolean[]; fraction: number | null } | null;
+}
+
+export async function fetchAf8(path: string, window: number, signal?: AbortSignal): Promise<Af8> {
+  const res = await fetch(`/api/af8?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `af8: ${res.status}`);
+  }
+  const b = await res.json();
+  const nums = (xs: (number | null)[]) => xs.map((v) => (v == null ? NaN : v));
+  return {
+    file: b.file,
+    window: b.window,
+    windows: b.windows,
+    windowS: b.window_s,
+    fsHz: b.fs_hz,
+    subcarriers: b.subcarriers,
+    seconds: b.seconds,
+    pPerson: b.p_person,
+    label: b.label,
+    threshold: b.threshold,
+    features: b.features,
+    model: {
+      features: b.model.features,
+      value: nums(b.model.value),
+      imputed: b.model.imputed,
+      mean: nums(b.model.mean),
+      scale: nums(b.model.scale),
+      coef: nums(b.model.coef),
+      z: nums(b.model.z),
+      contribution: nums(b.model.contribution),
+      intercept: b.model.intercept,
+      logit: b.model.logit,
+    },
+    motion: {
+      lags: b.motion.lags,
+      D: b.motion.D,
+      shapeLags: b.motion.shape_lags,
+      fitIntercept: b.motion.fit_intercept,
+      cells: b.motion.cells,
+      step: b.motion.step,
+      p90Time: nums(b.motion.p90_time),
+      p90Values: b.motion.p90_values,
+    },
+    breath: {
+      time: nums(b.breath.time),
+      peak: b.breath.peak,
+      rpm: b.breath.rpm,
+      good: b.breath.good,
+      threshold: b.breath.threshold,
+      run: b.breath.run,
+      rpmMean: b.breath.rpm_mean,
+    },
+    camera: b.camera,
+  };
+}

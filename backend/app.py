@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 import subprocess
 
-from . import classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
+from . import af8_explain, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1658,6 +1658,36 @@ def classifier_features(
         "truth": truth_out,
         "truth_excluded": _truth_exclusion(p),
     }
+
+
+@app.get("/api/af8")
+def af8_classifier(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window: a capture under 90 s has one, [0, 61) s; a longer one is cut into [60w, 60(w+1)) s"),
+) -> dict:
+    """The AF8 classifier on one window, with every feature and the series behind it.
+
+    See ``backend.af8_explain``. The features and p(person) are ``backend.af8``'s
+    own -- what the board computes -- and the camera, where a capture has one,
+    is reported beside them, never used.
+    """
+    p = resolve_capture_path(path)
+    try:
+        out = af8_explain.explain(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    camera = None
+    cam = _camera_truth(p)
+    if cam is not None and cam.size:
+        t0, t1 = out["window_s"]
+        inside = (cam[:, 0] >= t0) & (cam[:, 0] < t1)
+        camera = {
+            "time": [float(v) for v in cam[inside, 0]],
+            "present": [bool(v > 0.5) for v in cam[inside, 1]],
+            "fraction": float(np.mean(cam[inside, 1] > 0.5)) if inside.any() else None,
+        }
+    out["camera"] = camera
+    return out
 
 
 @app.get("/api/motion-signal")

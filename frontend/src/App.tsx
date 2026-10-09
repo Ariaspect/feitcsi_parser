@@ -6,6 +6,7 @@ import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
+import { ML } from "./ML";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -648,6 +649,7 @@ export function App() {
               <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
               <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
               <TabsTrigger value="classifier">Classifier</TabsTrigger>
+              <TabsTrigger value="ml">ML</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -966,6 +968,10 @@ export function App() {
                 interpolate={interpolate}
                 dark={dark}
               />
+            </TabsContent>
+
+            <TabsContent value="ml">
+              <ML path={path} dark={dark} />
             </TabsContent>
           </Tabs>
         ) : (
