@@ -47,7 +47,7 @@ OPENBLAS_NUM_THREADS=\${OPENBLAS_NUM_THREADS:-1} PYTHONPATH="\$HERE" exec python
 EOF
     chmod +x "$OUT/$1"
 }
-entry af8 af8 "AF8 presence verdict (A+F 8 features, logistic)"
+entry af8 af8 "AF8 presence verdict (A+F 8 features + revisit C3, logistic)"
 entry h2 hybrid2_calc "Hybrid 2 one-minute range rule"
 
 {

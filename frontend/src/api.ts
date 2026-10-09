@@ -1384,7 +1384,7 @@ export async function fetchClassifier(
 /** The eight features, in the order the model's weights expect. */
 export type Af8Feature =
   | "A_slope3" | "A_r025_2" | "A_r5_2" | "A_p90"
-  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd";
+  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd" | "C3_revisit";
 
 /** The model's arithmetic for one window, one entry per feature. */
 export interface Af8Model {
@@ -1422,6 +1422,13 @@ export interface Af8 {
     step: Record<string, (number | null)[]>;   // per-second median step, by gap
     p90Time: number[];
     p90Values: (number | null)[];
+  };
+  revisit: {
+    lags: number[];           // 10..30 s, 1 s apart
+    D: number[];              // median step at each lag, grid thinned to ~10 Hz
+    runningMax: number[];     // max of D up to each lag
+    drop: number[];           // (runningMax - D) / runningMax; C3 is the largest
+    at: number | null;        // the lag of the largest drop
   };
   breath: {
     time: number[];           // FarSense window centres
@@ -1476,6 +1483,13 @@ export async function fetchAf8(path: string, window: number, signal?: AbortSigna
       step: b.motion.step,
       p90Time: nums(b.motion.p90_time),
       p90Values: b.motion.p90_values,
+    },
+    revisit: {
+      lags: b.revisit.lags,
+      D: nums(b.revisit.D),
+      runningMax: nums(b.revisit.running_max),
+      drop: nums(b.revisit.drop),
+      at: b.revisit.at,
     },
     breath: {
       time: nums(b.breath.time),

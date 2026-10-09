@@ -39,6 +39,11 @@ const DESCRIPTION: Record<Af8Feature, string> = {
     "Breathing rate of each window; blue where its peak ≥ 0.25. The feature is the spread (SD) of " +
     "the blue rates (dashed: mean ± SD). Missing when fewer than two -- the model then uses its " +
     "training median.",
+  C3_revisit:
+    "Revisit: D(τ) at τ = 10–30 s, 1 s apart (line), and its running maximum (dashed). C3 is the " +
+    "largest fall of D below that maximum, as a fraction of it (red). A rotating fan's head comes " +
+    "back to the same angle every swing, so the channel returns to an earlier state and D dips at " +
+    "the swing period (~0.7). A person never retraces a path exactly: D only grows, C3 near 0.",
 };
 
 function fmt(v: number | null | undefined, digits = 4): string {
@@ -102,7 +107,7 @@ export function ML({ path, dark }: MLProps) {
       {error ? (
         <div className="text-muted-foreground p-8 text-sm">No AF8 verdict for this capture — {error}</div>
       ) : !data ? (
-        <ChartBusy busy empty height={150} label="computing the eight features" />
+        <ChartBusy busy empty height={150} label="computing the nine features" />
       ) : (
         <>
           <Header data={data} win={win} setWin={setWin} busy={busy} />
@@ -256,6 +261,7 @@ function FeatureChart({ name, data, width, dark }: {
   const muted = dark ? "#4b5563" : "#c3cad3";
 
   if (name === "A_slope3") return <LogLogChart data={data} width={w} dark={dark} />;
+  if (name === "C3_revisit") return <RevisitChart data={data} width={w} dark={dark} />;
 
   if (name === "A_r025_2" || name === "A_r5_2") {
     const pair = name === "A_r025_2" ? ["0.25", "2"] : ["5", "2"];
@@ -395,6 +401,55 @@ function LogLogChart({ data, width, dark }: { data: Af8; width: number; dark: bo
       <text x={M.left - 44} y={M.top - 2} fontSize={9} fill={text}>D(τ), log</text>
       <text x={M.left + iw} y={M.top + 10} textAnchor="end" fontSize={10} fill={RED}>
         slope {Number.isFinite(slope) ? slope.toFixed(3) : "—"}
+      </text>
+    </svg>
+  );
+}
+
+/** D(τ) over 10–30 s with its running maximum; the largest drop below it is C3. */
+function RevisitChart({ data, width, dark }: { data: Af8; width: number; dark: boolean }) {
+  const rv = data.revisit;
+  const c3 = data.features.C3_revisit;
+  const height = 150;
+  const M = { top: 14, right: 12, bottom: 22, left: 48 };
+  const iw = width - M.left - M.right;
+  const ih = height - M.top - M.bottom;
+  const pts = rv.lags.map((t, i) => [t, rv.D[i], rv.runningMax[i]] as const).filter(([, d]) => Number.isFinite(d));
+  if (pts.length < 2) return <div className="text-[11px] text-muted-foreground">No D(τ) over 10–30 s to draw.</div>;
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const hi = Math.max(...pts.map(([, , m]) => m)) * 1.12 || 1;
+  const X = (t: number) => M.left + ((t - t0) / (t1 - t0 || 1)) * iw;
+  const Y = (v: number) => M.top + (1 - v / hi) * ih;
+  const grid = dark ? "#2a2f37" : "#e6e9ee";
+  const text = dark ? "#8b95a3" : "#6b7480";
+  const at = rv.at;
+  const atIdx = at == null ? -1 : pts.findIndex(([t]) => t === at);
+  return (
+    <svg width={width} height={height} role="img" aria-label="D(tau) from 10 to 30 s with its running maximum">
+      {ticks(0, hi, 4).map((v) => (
+        <g key={v}>
+          <line x1={M.left} x2={M.left + iw} y1={Y(v)} y2={Y(v)} stroke={grid} />
+          <text x={M.left - 6} y={Y(v)} dy="0.32em" textAnchor="end" fontSize={9} fill={text}>{+v.toPrecision(3)}</text>
+        </g>
+      ))}
+      {pts.filter(([t]) => t % 5 === 0).map(([t]) => (
+        <text key={t} x={X(t)} y={height - 6} textAnchor="middle" fontSize={9} fill={text}>{t}s</text>
+      ))}
+      <polyline fill="none" stroke={GUIDE} strokeWidth={1.2} strokeDasharray="4 3"
+                points={pts.map(([t, , m]) => `${X(t)},${Y(m)}`).join(" ")} />
+      <polyline fill="none" stroke={LAG_COLOR["2"]} strokeWidth={1.6}
+                points={pts.map(([t, d]) => `${X(t)},${Y(d)}`).join(" ")} />
+      {pts.map(([t, d]) => <circle key={t} cx={X(t)} cy={Y(d)} r={2} fill={LAG_COLOR["2"]} />)}
+      {atIdx >= 0 && (
+        <g>
+          <line x1={X(pts[atIdx][0])} x2={X(pts[atIdx][0])} y1={Y(pts[atIdx][2])} y2={Y(pts[atIdx][1])}
+                stroke={RED} strokeWidth={2} />
+          <circle cx={X(pts[atIdx][0])} cy={Y(pts[atIdx][1])} r={3.5} fill={RED} />
+        </g>
+      )}
+      <text x={M.left - 44} y={M.top - 4} fontSize={9} fill={text}>D(τ)</text>
+      <text x={M.left + iw} y={M.top + 2} textAnchor="end" fontSize={10} fill={RED}>
+        C3 {c3 == null ? "—" : c3.toFixed(3)}{at == null ? "" : ` at ${at} s`}
       </text>
     </svg>
   );

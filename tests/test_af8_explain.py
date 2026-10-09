@@ -55,6 +55,12 @@ def test_the_series_drawn_give_back_the_features(tmp_path: Path) -> None:
     assert np.nanmedian(peaks) == pytest.approx(f["F_pkmed"], rel=1e-12)
     assert (br["run"]["windows"] if br["run"] else 0) == f["F_run"]
 
+    # C3: the largest drop of the drawn D below its drawn running maximum.
+    rv = out["revisit"]
+    drop = np.array([np.nan if v is None else v for v in rv["drop"]])
+    assert np.nanmax(drop) == pytest.approx(f["C3_revisit"], rel=1e-12)
+    assert rv["running_max"] == list(np.maximum.accumulate(rv["D"]))
+
 
 def test_the_model_breakdown_adds_up(tmp_path: Path) -> None:
     out = af8_explain.explain(_capture(tmp_path, n=1200))

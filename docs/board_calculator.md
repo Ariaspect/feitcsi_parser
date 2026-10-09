@@ -11,7 +11,7 @@ h2  CAPTURE.bin [--json]     # hybrid 2's one-minute range rule, kept for compar
 
 Both exit 0 with a verdict; 2 when the capture cannot be judged (missing, not
 MTK, under 30 s of usable data, a feature undefined); 3 on a NumPy older than
-1.26. `--json` adds the evidence -- for `af8` the eight features, `p_person`,
+1.26. `--json` adds the evidence -- for `af8` the nine features, `p_person`,
 per-stage milliseconds and peak memory; for `h2` the motion P90 and breathing
 run.
 

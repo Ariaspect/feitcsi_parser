@@ -1,4 +1,4 @@
-"""What the ML tab draws: AF8's eight features and the series each is read from.
+"""What the ML tab draws: AF8's nine features and the series each is read from.
 
 Server-side only -- the board runs ``backend.af8`` and nothing here. The
 features are ``af8``'s own (``af8.motion_features`` / ``af8.breath_features``
@@ -93,6 +93,7 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
             raise ValueError(f"only {len(g) / fs:.1f} s of usable grid, under {af8.MIN_SECONDS:g} s")
         feats = af8.motion_features(g, fs)
         feats.update(af8.breath_features(g, fab, fs))
+        feats.update(af8.revisit_feature(g, fs))
 
         grid_t = (tt[0] - origin) + np.arange(len(g)) / fs     # s from the first frame
 
@@ -143,6 +144,12 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
             a, b = run_end - best + 1, run_end
             run = {"windows": int(best), "t0": float(win_t[a]), "t1": float(win_t[b])}
 
+        # --- revisit: D(tau) over 10..30 s, its running maximum and the drop --
+        rv_t, rv_D = af8.revisit_curve(g, fs)
+        rv_peak = np.maximum.accumulate(rv_D) if rv_D.size else rv_D
+        rv_drop = (rv_peak - rv_D) / rv_peak if rv_D.size else rv_D
+        rv_at = float(rv_t[int(np.nanargmax(rv_drop))]) if rv_D.size and np.isfinite(rv_drop).any() else None
+
     # --- the model, step by step (af8.probability, spelled out) ----------------
     x = np.array([feats[f] for f in af8.FEATURES], dtype=float)
     imputed = ~np.isfinite(x)
@@ -189,6 +196,13 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
             },
             "p90_time": _nums(p90_t),
             "p90_values": _nums(p90_vals),
+        },
+        "revisit": {
+            "lags": [float(t) for t in rv_t],
+            "D": _nums(rv_D),
+            "running_max": _nums(rv_peak),
+            "drop": _nums(rv_drop),
+            "at": rv_at,
         },
         "breath": {
             "time": _nums(win_t),
