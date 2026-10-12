@@ -6,7 +6,7 @@ import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
-import { Capture } from "./Capture";
+import { CaptureBar, CaptureDetails, CaptureProvider } from "./Capture";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -401,6 +401,7 @@ export function App() {
   ];
 
   return (
+    <CaptureProvider>
     <div className={`${dark ? "dark " : ""}font-sans bg-background text-foreground min-h-screen`}>
       <div className="sticky top-0 z-50 bg-background/80 backdrop-blur-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap gap-3 items-center">
@@ -539,6 +540,10 @@ export function App() {
             </Select>
           </div>
 
+          {/* Capture controls, always visible next to MIMO (not a tab): the
+              details they unfold render under the header, see CaptureDetails. */}
+          <CaptureBar />
+
           <div className="flex flex-col gap-0.5">
             <Label htmlFor="source-mac" className="text-[10px] text-muted-foreground uppercase tracking-wide">MAC</Label>
             <Select
@@ -607,6 +612,8 @@ export function App() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 py-4 space-y-4">
+        <CaptureDetails />
+
         {error && (
           <Alert variant="destructive">
             <AlertTitle>Error</AlertTitle>
@@ -640,34 +647,17 @@ export function App() {
           </div>
         )}
 
-        {/* The Capture tab needs no capture loaded: it is how one gets made. The
-            data tabs appear once a capture is selected; keying the Tabs on that
-            transition remounts them on Channel, which is where the page opened
-            before this tab existed. */}
-        <Tabs
-          key={meta && meta.total_frames > 0 ? "with-data" : "no-data"}
-          defaultValue={meta && meta.total_frames > 0 ? "channel" : "capture"}
-        >
+        {meta && meta.total_frames > 0 ? (
+          <Tabs defaultValue="channel">
             <TabsList>
-              <TabsTrigger value="capture">Capture</TabsTrigger>
-              {meta && meta.total_frames > 0 && (
-                <>
-                  <TabsTrigger value="channel">Channel</TabsTrigger>
-                  <TabsTrigger value="doppler">Doppler</TabsTrigger>
-                  <TabsTrigger value="farsense">FarSense</TabsTrigger>
-                  <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
-                  <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
-                  <TabsTrigger value="classifier">Classifier</TabsTrigger>
-                </>
-              )}
+              <TabsTrigger value="channel">Channel</TabsTrigger>
+              <TabsTrigger value="doppler">Doppler</TabsTrigger>
+              <TabsTrigger value="farsense">FarSense</TabsTrigger>
+              <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+              <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
+              <TabsTrigger value="classifier">Classifier</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="capture">
-              <Capture />
-            </TabsContent>
-
-            {meta && meta.total_frames > 0 && (
-            <>
             <TabsContent value="channel">
               <div className="space-y-4">
             <Heatmap
@@ -985,16 +975,17 @@ export function App() {
                 dark={dark}
               />
             </TabsContent>
-            </>
-            )}
-        </Tabs>
-        {!(meta && meta.total_frames > 0) && !error && (
-          <div className="text-muted-foreground p-8">
-            Enter a .dat path to explore, or toggle <b>Live</b> for realtime capture. Default:{" "}
-            <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{DEFAULT_PATH}</code>.
-          </div>
+          </Tabs>
+        ) : (
+          !error && (
+            <div className="text-muted-foreground p-8">
+              Enter a .dat path to explore, or toggle <b>Live</b> for realtime capture. Default:{" "}
+              <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{DEFAULT_PATH}</code>.
+            </div>
+          )
         )}
       </div>
     </div>
+    </CaptureProvider>
   );
 }
