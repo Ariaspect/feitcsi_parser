@@ -80,7 +80,7 @@ export function CaptureProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setFormState] = useState<Form>({
-    duration: 60, delay: 10, count: 10, gap: 0, room: "", scenario: "", note: "", upload: true, label: true,
+    duration: 60, delay: 10, count: 1, gap: 0, room: "", scenario: "", note: "", upload: true, label: true,
   });
   const setForm = useCallback((patch: Partial<Form>) => setFormState((f) => ({ ...f, ...patch })), []);
 
@@ -170,7 +170,12 @@ export function CaptureBar() {
   else if (status.state === "countdown" || status.state === "between")
     chip = <Badge variant="default" className="tabular-nums">{status.state === "between" ? "next in" : "starts in"} {Math.ceil(remaining ?? 0)} s</Badge>;
   else if (status.state === "running" && cur)
-    chip = <Badge variant="default" className="tabular-nums font-mono">{cur.stamp ?? "…"} {Math.floor(cur.elapsed_s)}/{cur.duration_s ?? "?"} s</Badge>;
+    chip = (
+      <Badge variant="default" className="tabular-nums font-mono">
+        {status.job && status.job.count > 1 ? `${cur.index + 1}/${status.job.count} ` : ""}
+        {cur.stamp ?? "…"} {Math.floor(cur.elapsed_s)}/{cur.duration_s ?? "?"} s
+      </Badge>
+    );
   else if (status.busy) chip = <Badge variant="default">{STATE_LABEL[status.state] ?? status.state}</Badge>;
   else if (status.error) chip = <Badge variant="destructive" title={status.error}>error</Badge>;
   else if (status.runs.length) chip = <Badge variant="secondary">{status.runs.filter((r) => r.outcome === "done").length}/{status.runs.length} done</Badge>;
@@ -195,19 +200,19 @@ export function CaptureBar() {
         <Input id="cap-delay" type="number" min={0} max={3600} className="w-16 h-8" value={form.delay}
           onChange={(e) => setForm({ delay: Number(e.target.value) })} disabled={busy} />
       </SmallField>
-      <SmallField id="cap-count" label="N">
+      <SmallField id="cap-count" label="Count">
         <Input id="cap-count" type="number" min={1} max={200} className="w-14 h-8" value={form.count}
           onChange={(e) => setForm({ count: Number(e.target.value) })} disabled={busy} />
       </SmallField>
       <SmallField id="cap-start" label="Collect">
         <div className="flex items-center gap-1">
-          <Button id="cap-start" size="sm" className="h-8" onClick={() => void begin(1)} disabled={busy || pending}
-            title={`one capture of ${form.duration} s after a ${form.delay} s countdown`}>
-            Start
-          </Button>
-          <Button size="sm" variant="secondary" className="h-8" onClick={() => void begin(form.count)} disabled={busy || pending || form.count < 1}
-            title={`${form.count} captures of ${form.duration} s, back to back`}>
-            ×{form.count}
+          {/* One Start: it collects Count captures. A separate "xN" button next to a
+              Start that always did one was pressed wrong on the first day. */}
+          <Button id="cap-start" size="sm" className="h-8" onClick={() => void begin(form.count)} disabled={busy || pending || form.count < 1}
+            title={form.count > 1
+              ? `${form.count} captures of ${form.duration} s back to back, after a ${form.delay} s countdown`
+              : `one capture of ${form.duration} s after a ${form.delay} s countdown`}>
+            Start{form.count > 1 ? ` ×${form.count}` : ""}
           </Button>
           <Button size="sm" variant="destructive" className="h-8" onClick={() => void stop()} disabled={!busy || pending}
             title="stop the current capture and the rest of the batch; the board is disarmed and the partial file removed">
