@@ -1434,6 +1434,8 @@ export interface CaptureStatus {
   board: string | null;
   remote: string | null;
   limits: Record<string, [number, number]>;
+  /** the board's stimulus ping interval, fixed server-side (0.02 s, about 43 Hz of CSI) */
+  ping_interval: number;
 }
 
 export interface CaptureStartRequest {

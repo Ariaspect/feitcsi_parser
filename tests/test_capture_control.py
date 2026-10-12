@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do case $1 in --duration) DUR=$2; shift 2;; *) shift;; esac;
 LOG=$CAPTURE_DIR/mtk_capture.log
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
 mkdir -p "$CAPTURE_DIR"
-echo "retain=$RETAIN_DAYS upload=$UPLOAD cv=$CV" >"$CAPTURE_DIR/env.seen"
+echo "retain=$RETAIN_DAYS upload=$UPLOAD cv=$CV ping=$PING_INTERVAL" >"$CAPTURE_DIR/env.seen"
 if [ "${FAKE_MODE:-ok}" = skip ]; then log "SKIP  previous capture still running"; exit 0; fi
 if [ "${FAKE_MODE:-ok}" = abort ]; then log "ABORT board 192.0.2.1 unreachable and serial wake failed"; exit 1; fi
 STAMP=$(date '+%Y%m%d_%H%M%S')
@@ -86,8 +86,8 @@ def test_single_capture_runs_to_done_and_reads_the_stamp(fake, tmp_path):
     assert run["outcome"] == "done" and run["rc"] == 0
     assert run["stamp"] and (capdir / f"{run['stamp']}.bin").read_text() == "data\n"
     assert run["summary"].startswith("DONE")
-    assert (capdir / "env.seen").read_text().strip() == "retain=0 upload=1 cv=1"
-    assert any("START" in line for line in s["log"]) and any(line.endswith("job: 1 x 10 s, delay 0 s, gap 0 s") for line in s["log"])
+    assert (capdir / "env.seen").read_text().strip() == "retain=0 upload=1 cv=1 ping=0.02"
+    assert any("START" in line for line in s["log"]) and any("job: 1 x 10 s, delay 0 s, gap 0 s, stimulus every 0.02 s" in line for line in s["log"])
 
 
 def test_countdown_then_capture_and_stop_kills_the_whole_group(fake, tmp_path):
@@ -157,7 +157,8 @@ def test_sidecar_is_written_when_the_operator_gave_a_scenario(fake, tmp_path):
     meta = json.loads(side.read_text())
     assert meta["room"] == "env2" and meta["scenario"] == "fan rotating" and meta["note"] == "AP height"
     assert meta["scenario_source"] == "operator_reported_at_capture" and meta["requested_duration_s"] == 10
-    assert (capdir / "env.seen").read_text().strip() == "retain=0 upload=0 cv=0"
+    assert meta["stimulus_interval_s"] == 0.02
+    assert (capdir / "env.seen").read_text().strip() == "retain=0 upload=0 cv=0 ping=0.02"
 
 
 def test_validation_and_busy_rules(fake, tmp_path):
@@ -191,13 +192,13 @@ def test_api_round_trip(fake, tmp_path, monkeypatch):
     monkeypatch.setenv("CAPTURE_DIR", str(capdir))
     monkeypatch.setenv("CAPTURE_BOARD", "")
     monkeypatch.setenv("CAPTURE_REMOTE", "")
+    monkeypatch.setenv("CAPTURE_LOCK", str(tmp_path / "lock"))   # not the real one: a capture may be running outside the tests
     capture_control.reset_manager()
-    monkeypatch.setattr(capture_control, "LOCAL_LOCK", str(tmp_path / "lock"))
     from backend.app import app
     client = TestClient(app)
     try:
         s = client.get("/api/capture/status").json()
-        assert s["state"] == "idle" and s["busy"] is False and "limits" in s
+        assert s["state"] == "idle" and s["busy"] is False and "limits" in s and s["ping_interval"] == 0.02
         bad = client.post("/api/capture/start", json={"duration_s": 1})
         assert bad.status_code == 400
         ok = client.post("/api/capture/start", json={"duration_s": 60, "delay_s": 30, "count": 2})

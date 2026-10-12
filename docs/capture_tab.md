@@ -13,6 +13,7 @@ a shell nor an online connection.
 | **Collect N** | the same, N times back to back, *Gap between captures* seconds apart; stops at the first failure |
 | **Stop** | ends the current capture and the rest of the batch (see below) |
 | Delay before start | the countdown while the operator leaves the room; shown large on the tab |
+| (stimulus) | not a control: fixed at one ping every **0.02 s (≈43 Hz of CSI)**, the dataset's rate; the script's own default would be 0.05 s (≈19 Hz) |
 | Room / Scenario / Note | written to `<stamp>_meta.json` beside the capture, uploaded with it; blank fields are not written |
 | upload to lg | off keeps everything local (`UPLOAD=0 LIVE=0`); on, an unreachable lg only produces `WARN` lines and the files wait locally |
 | label frames on lg | on runs the YOLO labelling on lg after each capture (`CV=1`); it adds up to a minute between captures |
@@ -20,6 +21,7 @@ a shell nor an online connection.
 The capture itself is unchanged: `capture_mtk_hourly.sh` does what it does for
 cron and for the shell. The web only runs it, with three differences:
 
+* `PING_INTERVAL=0.02`, fixed (the script's own default is 0.05);
 * `RETAIN_DAYS=0`: no pruning of local captures. The script's default removes
   local files older than seven days, which is safe only when every capture has
   been uploaded, and offline sessions are exactly when it has not.
@@ -89,4 +91,4 @@ POST /api/capture/stop
 0–3600 s, count 1–200) and 409 when a job is already running or the capture
 lock is held elsewhere. Environment knobs for the server: `CAPTURE_SCRIPT`,
 `CAPTURE_DIR`, `CAPTURE_BOARD` (empty skips the board cleanup), `CAPTURE_REMOTE`
-(empty disables lg), `CAPTURE_REMOTE_DIR`.
+(empty disables lg), `CAPTURE_REMOTE_DIR`, `CAPTURE_LOCK`.

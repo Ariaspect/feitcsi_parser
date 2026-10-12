@@ -187,6 +187,10 @@ export function Capture() {
                   value={gap} onChange={(e) => setGap(Number(e.target.value))} disabled={busy} />
               </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              Stimulus fixed at one ping every {status?.ping_interval ?? 0.02} s, about 43 Hz of CSI: the dataset's
+              rate and what the AF8 + C3 pipeline expects.
+            </p>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="space-y-1">
