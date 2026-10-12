@@ -2026,7 +2026,20 @@ def capture_status() -> dict:
     the lines this server added (prefixed ``web:``). ``preflight`` says whether the board answers a ping, whether
     the webcam is held by another process, whether the collection host is reachable, and how much disk is free.
     """
+    if capture_control.PROXY_URL:
+        return _capture_forward("GET", "/api/capture/status")
     return capture_control.manager().status()
+
+
+def _capture_forward(method: str, path: str, body: dict | None = None, timeout: float = 8.0) -> dict:
+    """Proxy mode: this server is not the capture laptop; hand the request to the one that is."""
+    try:
+        code, data = capture_control.proxy(method, path, body, timeout=timeout)
+    except capture_control.ProxyUnavailable as exc:
+        raise HTTPException(503, str(exc))
+    if code >= 400:
+        raise HTTPException(code, data.get("detail", data) if isinstance(data, dict) else data)
+    return data
 
 
 @app.post("/api/capture/start")
@@ -2037,6 +2050,8 @@ def capture_start(body: CaptureStart) -> dict:
     between. 400 when a value is out of range, 409 when a job is already running here or a capture is running
     elsewhere (cron, a shell) -- the script's lock file says so.
     """
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/capture/start", body.model_dump())
     m = capture_control.manager()
     try:
         m.start(**body.model_dump())
@@ -2054,6 +2069,8 @@ def capture_stop() -> dict:
     Kills the whole local process group of the run, disarms the board (the stream there outlives its ssh), and
     removes the partial ``.bin`` locally and from the collection host's ``live/``. Returns the status afterwards.
     """
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/capture/stop", timeout=70.0)
     m = capture_control.manager()
     m.stop()
     return m.status()

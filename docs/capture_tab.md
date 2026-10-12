@@ -77,6 +77,16 @@ After pulling a newer main: `npm --prefix frontend run build && systemctl --user
 A restart while a capture is running kills that capture's controller, not the
 capture script, so wait for the job to finish first.
 
+## Using the tab from lg's web (online)
+
+lg cannot reach the laptop, so the laptop keeps a reverse tunnel open
+(`scripts/csi-web-tunnel.service`: lg's `127.0.0.1:18002` → the laptop's
+`:8002`). A server on lg started with `CAPTURE_PROXY_URL=http://127.0.0.1:18002`
+forwards `/api/capture/*` to the laptop, and its Capture tab controls the same
+captures; the status says which host runs them. When the tunnel is down the
+tab shows 503 "capture laptop not reachable". Offline, use the laptop's own
+`http://localhost:8002`.
+
 ## API
 
 ```

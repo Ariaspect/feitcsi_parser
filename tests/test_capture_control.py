@@ -210,3 +210,56 @@ def test_api_round_trip(fake, tmp_path, monkeypatch):
     finally:
         capture_control.manager().stop()
         capture_control.reset_manager()
+
+
+def test_proxy_mode_forwards_to_the_capture_laptop(monkeypatch):
+    """A server that is not the laptop (lg) hands /api/capture/* to the laptop's server and passes its answers through."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Laptop(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # quiet
+            pass
+
+        def _send(self, code, body):
+            data = _json.dumps(body).encode()
+            self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data)
+
+        def do_GET(self):
+            seen.append(("GET", self.path, None))
+            self._send(200, {"state": "idle", "busy": False, "runs": [], "log": [], "host": "cyphylab"})
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = _json.loads(self.rfile.read(n) or b"{}") if n else None
+            seen.append(("POST", self.path, body))
+            if self.path.endswith("/start") and body and body.get("count") == 99:
+                self._send(409, {"detail": "a capture job is already running; stop it first"})
+            else:
+                self._send(200, {"state": "countdown" if self.path.endswith("/start") else "idle", "busy": self.path.endswith("/start"), "runs": [], "log": [], "host": "cyphylab"})
+
+    srv = HTTPServer(("127.0.0.1", 0), Laptop)
+    t = threading.Thread(target=srv.serve_forever, daemon=True); t.start()
+    try:
+        monkeypatch.setattr(capture_control, "PROXY_URL", f"http://127.0.0.1:{srv.server_port}")
+        from backend.app import app
+        client = TestClient(app)
+        s = client.get("/api/capture/status").json()
+        assert s["host"] == "cyphylab" and s["proxied_via"].endswith(str(srv.server_port)) and s["proxy_host"]
+        ok = client.post("/api/capture/start", json={"duration_s": 60, "delay_s": 5, "count": 2})
+        assert ok.status_code == 200 and ok.json()["state"] == "countdown"
+        assert seen[-1][0] == "POST" and seen[-1][1] == "/api/capture/start" and seen[-1][2]["count"] == 2 and seen[-1][2]["duration_s"] == 60
+        busy = client.post("/api/capture/start", json={"count": 99})
+        assert busy.status_code == 409 and "already running" in busy.json()["detail"]
+        assert client.post("/api/capture/stop").json()["state"] == "idle"
+    finally:
+        srv.shutdown()
+    # tunnel down -> 503, not a hang
+    monkeypatch.setattr(capture_control, "PROXY_URL", f"http://127.0.0.1:{srv.server_port}")
+    from backend.app import app as app2
+    r = TestClient(app2).get("/api/capture/status")
+    assert r.status_code == 503 and "not reachable" in r.json()["detail"]
