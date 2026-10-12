@@ -7,7 +7,7 @@
 #   systemctl --user enable --now csi-web
 #   loginctl enable-linger $USER        # keep it up without a login session
 #
-# Then open http://localhost:8000. Logs: journalctl --user -u csi-web -f.
+# Then open http://localhost:8002. Logs: journalctl --user -u csi-web -f.
 # Redeploy after a pull: npm --prefix frontend run build && systemctl --user restart csi-web
 #
 # Serves the checkout named in WorkingDirectory, with the shared venv's uvicorn.
@@ -20,7 +20,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/cyphy/feitcsi_parser-serve
-ExecStart=/home/cyphy/feitcsi_parser/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8000
+ExecStart=/home/cyphy/feitcsi_parser/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8002
 Restart=on-failure
 RestartSec=3
 # The capture script finds node/ssh/tmux on this PATH; a user service gets a bare one.

@@ -66,10 +66,10 @@ cp scripts/csi-web.service ~/.config/systemd/user/ && systemctl --user daemon-re
 systemctl --user enable --now csi-web && loginctl enable-linger $USER
 
 # then
-xdg-open http://localhost:8000
+xdg-open http://localhost:8002
 ```
 
-Without systemd: `HOST=127.0.0.1 PORT=8000 pnpm serve` (or the uvicorn line in
+Without systemd: `HOST=127.0.0.1 PORT=8002 pnpm serve` (or the uvicorn line in
 the unit file) from the checkout. The server binds to localhost only; nothing
 else should be able to start a capture.
 
