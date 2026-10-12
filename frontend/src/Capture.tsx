@@ -294,6 +294,12 @@ export function Capture() {
               )}
             </div>
             <p className="text-xs text-muted-foreground">
+              {status?.host && (
+                <>
+                  Captures run on <b>{status.host}</b>
+                  {status.proxied_via ? <> (this page is served by {status.proxy_host ?? "another host"} and forwards to it)</> : null}.{" "}
+                </>
+              )}
               A silent board is woken over the serial console (about three minutes). A busy webcam means the
               capture records CSI without frames. An offline lg means the files wait in <code>{status?.capture_dir}</code>.
             </p>

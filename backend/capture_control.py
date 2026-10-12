@@ -26,9 +26,12 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +63,39 @@ STOP_GRACE_S = 5.0
 # the collection host. Past this it is declared hung and killed.
 RUN_OVERHEAD_S = 900.0
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR"]
+# Proxy mode: a server that is NOT the capture laptop (the collection host, say) forwards /api/capture/* to the
+# laptop's own server, reached over a reverse ssh tunnel the laptop keeps open (scripts/csi-web-tunnel.service puts
+# the laptop's :8002 on lg's 127.0.0.1:18002). Set CAPTURE_PROXY_URL=http://127.0.0.1:18002 on that server.
+PROXY_URL = os.environ.get("CAPTURE_PROXY_URL", "").rstrip("/") or None
+HOST = socket.gethostname()
+
+
+class ProxyUnavailable(RuntimeError):
+    """The capture laptop's server did not answer through the tunnel."""
+
+
+def proxy(method: str, path: str, body: dict | None = None, timeout: float = 8.0) -> tuple[int, dict]:
+    """Forward one request to the capture laptop; returns (status code, JSON body)."""
+    assert PROXY_URL
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(PROXY_URL + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json"} if data is not None else {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = json.loads(resp.read() or b"{}")
+            code = resp.status
+    except urllib.error.HTTPError as exc:
+        try:
+            out = json.loads(exc.read() or b"{}")
+        except ValueError:
+            out = {"detail": str(exc)}
+        code = exc.code
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ProxyUnavailable(f"capture laptop not reachable at {PROXY_URL} ({exc}); is the tunnel up?") from exc
+    if isinstance(out, dict):
+        out["proxied_via"] = PROXY_URL
+        out["proxy_host"] = HOST
+    return code, out
 
 
 @dataclass
@@ -219,6 +255,7 @@ class CaptureManager:
                 "remote": self.remote,
                 "limits": LIMITS,
                 "ping_interval": PING_INTERVAL,
+                "host": HOST,
             }
 
     # ------------------------------------------------------------------ worker

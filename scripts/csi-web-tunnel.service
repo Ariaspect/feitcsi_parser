@@ -1,0 +1,24 @@
+# Reverse tunnel from the capture laptop to the collection host: lg's 127.0.0.1:18002
+# becomes this laptop's capture web (:8002), so a server on lg can forward
+# /api/capture/* here (CAPTURE_PROXY_URL=http://127.0.0.1:18002) and the Capture
+# tab works from any browser that reaches lg. Without lg, the laptop's own
+# http://localhost:8002 keeps working; this tunnel is only for the online case.
+#
+#   cp scripts/csi-web-tunnel.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now csi-web-tunnel
+#
+# lg cannot reach the laptop directly (campus NAT), which is why the laptop dials
+# out, as the board tunnel (lg:2222 -> board) already does.
+[Unit]
+Description=Reverse ssh tunnel: lg:18002 -> this laptop's capture web :8002
+After=network-online.target csi-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -R 127.0.0.1:18002:127.0.0.1:8002 lg
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

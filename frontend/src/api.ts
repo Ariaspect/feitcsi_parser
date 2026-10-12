@@ -1436,6 +1436,11 @@ export interface CaptureStatus {
   limits: Record<string, [number, number]>;
   /** the board's stimulus ping interval, fixed server-side (0.02 s, about 43 Hz of CSI) */
   ping_interval: number;
+  /** machine that runs the capture script */
+  host: string;
+  /** present when this server forwarded the request to the capture laptop */
+  proxied_via?: string;
+  proxy_host?: string;
 }
 
 export interface CaptureStartRequest {
