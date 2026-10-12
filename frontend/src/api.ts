@@ -1503,3 +1503,114 @@ export async function fetchAf8(path: string, window: number, signal?: AbortSigna
     camera: b.camera,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Capture control: start / stop / batch the one-minute captures from the web.
+
+export interface CapturePreflight {
+  checked_at: number | null;
+  board_reachable: boolean | null;
+  webcam_busy: boolean | null;
+  webcam_holder: string | null;
+  remote_reachable: boolean | null;
+  disk_free_mb: number | null;
+  capture_lock_busy: boolean | null;
+  checking: boolean;
+}
+
+export interface CaptureRun {
+  index: number;
+  started_at: number;
+  pid: number | null;
+  stamp: string | null;
+  capture_started_at: number | null;
+  ended_at: number | null;
+  rc: number | null;
+  /** running | done | failed | skipped | aborted | cancelled | hung */
+  outcome: string;
+  summary: string;
+  sidecar: string | null;
+}
+
+export interface CaptureJob {
+  duration_s: number;
+  delay_s: number;
+  count: number;
+  gap_s: number;
+  room: string | null;
+  scenario: string | null;
+  note: string | null;
+  upload: boolean;
+  label: boolean;
+  created_at: number;
+}
+
+export interface CaptureStatus {
+  /** idle | countdown | starting | waking | running | finishing | between | stopping */
+  state: string;
+  busy: boolean;
+  job: CaptureJob | null;
+  runs: CaptureRun[];
+  current: (CaptureRun & { elapsed_s: number; duration_s: number | null }) | null;
+  countdown_remaining_s: number | null;
+  error: string | null;
+  preflight: CapturePreflight;
+  log: string[];
+  script: string;
+  capture_dir: string;
+  board: string | null;
+  remote: string | null;
+  limits: Record<string, [number, number]>;
+  /** the board's stimulus ping interval, fixed server-side (0.02 s, about 43 Hz of CSI) */
+  ping_interval: number;
+  /** machine that runs the capture script */
+  host: string;
+  /** present when this server forwarded the request to the capture laptop */
+  proxied_via?: string;
+  proxy_host?: string;
+}
+
+export interface CaptureStartRequest {
+  duration_s: number;
+  delay_s: number;
+  count: number;
+  gap_s: number;
+  room?: string;
+  scenario?: string;
+  note?: string;
+  upload: boolean;
+  label: boolean;
+}
+
+async function captureError(res: Response, what: string): Promise<Error> {
+  let detail = "";
+  try {
+    const body = await res.json();
+    detail = typeof body?.detail === "string" ? body.detail : JSON.stringify(body);
+  } catch {
+    detail = await res.text().catch(() => "");
+  }
+  return new Error(`${what} failed (${res.status}): ${detail}`);
+}
+
+export async function fetchCaptureStatus(signal?: AbortSignal): Promise<CaptureStatus> {
+  const res = await fetch("/api/capture/status", { signal });
+  if (!res.ok) throw await captureError(res, "capture status");
+  return (await res.json()) as CaptureStatus;
+}
+
+export async function startCapture(req: CaptureStartRequest): Promise<CaptureStatus> {
+  const res = await fetch("/api/capture/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw await captureError(res, "capture start");
+  return (await res.json()) as CaptureStatus;
+}
+
+export async function stopCapture(): Promise<CaptureStatus> {
+  const res = await fetch("/api/capture/stop", { method: "POST" });
+  if (!res.ok) throw await captureError(res, "capture stop");
+  return (await res.json()) as CaptureStatus;
+}

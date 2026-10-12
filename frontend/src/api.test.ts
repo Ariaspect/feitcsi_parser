@@ -521,3 +521,43 @@ describe("fetchClassifier", () => {
     await expect(fetchClassifier("c.dat", 0, 0.01)).rejects.toThrow("fewer than 2 frames in range");
   });
 });
+
+describe("capture control", () => {
+  it("fetchCaptureStatus returns the status as sent", async () => {
+    const { fetchCaptureStatus } = await import("./api");
+    const status = { state: "idle", busy: false, job: null, runs: [], current: null, countdown_remaining_s: null, error: null,
+      preflight: { checked_at: 1, board_reachable: true, webcam_busy: false, webcam_holder: null, remote_reachable: false, disk_free_mb: 1000, capture_lock_busy: false, checking: false },
+      log: ["web: ready"], script: "/x/capture_mtk_hourly.sh", capture_dir: "/x/captures", board: "192.168.50.80", remote: "lg", limits: { duration_s: [10, 3300] } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse({ json: status })));
+    const s = await fetchCaptureStatus();
+    expect(s.state).toBe("idle");
+    expect(s.preflight.remote_reachable).toBe(false);
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe("/api/capture/status");
+  });
+
+  it("startCapture POSTs the request as JSON and surfaces the server's detail on 409", async () => {
+    const { startCapture } = await import("./api");
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ json: { state: "countdown", busy: true, runs: [], log: [] } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const s = await startCapture({ duration_s: 60, delay_s: 10, count: 3, gap_s: 0, scenario: "fan", upload: true, label: false });
+    expect(s.state).toBe("countdown");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/capture/start");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ duration_s: 60, delay_s: 10, count: 3, gap_s: 0, scenario: "fan", upload: true, label: false });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 409, json: { detail: "a capture job is already running; stop it first" } })));
+    await expect(startCapture({ duration_s: 60, delay_s: 0, count: 1, gap_s: 0, upload: true, label: true }))
+      .rejects.toThrow(/409.*already running/);
+  });
+
+  it("stopCapture POSTs and returns the status", async () => {
+    const { stopCapture } = await import("./api");
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ json: { state: "idle", busy: false, runs: [], log: [] } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const s = await stopCapture();
+    expect(s.busy).toBe(false);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/capture/stop");
+    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+  });
+});

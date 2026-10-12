@@ -7,6 +7,7 @@ import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
 import { ML } from "./ML";
+import { Capture } from "./Capture";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -640,18 +641,35 @@ export function App() {
           </div>
         )}
 
-        {meta && meta.total_frames > 0 ? (
-          <Tabs defaultValue="channel">
+        {/* The Capture tab needs no capture loaded: it is how one gets made. The
+            data tabs appear once a capture is selected; keying the Tabs on that
+            transition remounts them on Channel, which is where the page opened
+            before this tab existed. */}
+        <Tabs
+          key={meta && meta.total_frames > 0 ? "with-data" : "no-data"}
+          defaultValue={meta && meta.total_frames > 0 ? "channel" : "capture"}
+        >
             <TabsList>
-              <TabsTrigger value="channel">Channel</TabsTrigger>
-              <TabsTrigger value="doppler">Doppler</TabsTrigger>
-              <TabsTrigger value="farsense">FarSense</TabsTrigger>
-              <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
-              <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
-              <TabsTrigger value="classifier">Classifier</TabsTrigger>
-              <TabsTrigger value="ml">ML</TabsTrigger>
+              <TabsTrigger value="capture">Capture</TabsTrigger>
+              {meta && meta.total_frames > 0 && (
+                <>
+                  <TabsTrigger value="channel">Channel</TabsTrigger>
+                  <TabsTrigger value="doppler">Doppler</TabsTrigger>
+                  <TabsTrigger value="farsense">FarSense</TabsTrigger>
+                  <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+                  <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
+                  <TabsTrigger value="classifier">Classifier</TabsTrigger>
+                  <TabsTrigger value="ml">ML</TabsTrigger>
+                </>
+              )}
             </TabsList>
 
+            <TabsContent value="capture">
+              <Capture />
+            </TabsContent>
+
+            {meta && meta.total_frames > 0 && (
+            <>
             <TabsContent value="channel">
               <div className="space-y-4">
             <Heatmap
@@ -973,14 +991,14 @@ export function App() {
             <TabsContent value="ml">
               <ML path={path} dark={dark} />
             </TabsContent>
-          </Tabs>
-        ) : (
-          !error && (
-            <div className="text-muted-foreground p-8">
-              Enter a .dat path to explore, or toggle <b>Live</b> for realtime capture. Default:{" "}
-              <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{DEFAULT_PATH}</code>.
-            </div>
-          )
+            </>
+            )}
+        </Tabs>
+        {!(meta && meta.total_frames > 0) && !error && (
+          <div className="text-muted-foreground p-8">
+            Enter a .dat path to explore, or toggle <b>Live</b> for realtime capture. Default:{" "}
+            <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{DEFAULT_PATH}</code>.
+          </div>
         )}
       </div>
     </div>
