@@ -13,10 +13,11 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 import subprocess
 
-from . import classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
+from . import capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -2000,6 +2001,62 @@ def list_captures() -> list[dict]:
 
     files.sort(key=lambda f: f["mtime"], reverse=True)
     return files
+
+
+class CaptureStart(BaseModel):
+    """What the Capture tab sends: how long, how many, how long to wait first."""
+
+    duration_s: int = 60
+    delay_s: int = 10
+    count: int = 1
+    gap_s: int = 0
+    room: str | None = None
+    scenario: str | None = None
+    note: str | None = None
+    upload: bool = True
+    label: bool = True
+
+
+@app.get("/api/capture/status")
+def capture_status() -> dict:
+    """State of the capture job the web started, the script's log tail, and the preflight checks.
+
+    ``state`` is idle / countdown / starting / waking / running / finishing / between / stopping. ``runs`` lists
+    every capture of the current job with its stamp and outcome; ``log`` is the tail of ``mtk_capture.log`` plus
+    the lines this server added (prefixed ``web:``). ``preflight`` says whether the board answers a ping, whether
+    the webcam is held by another process, whether the collection host is reachable, and how much disk is free.
+    """
+    return capture_control.manager().status()
+
+
+@app.post("/api/capture/start")
+def capture_start(body: CaptureStart) -> dict:
+    """Start one capture (``count`` 1) or a batch, after a ``delay_s`` countdown.
+
+    Runs ``scripts/capture_mtk_hourly.sh --duration <duration_s>`` once per capture, back to back with ``gap_s``
+    between. 400 when a value is out of range, 409 when a job is already running here or a capture is running
+    elsewhere (cron, a shell) -- the script's lock file says so.
+    """
+    m = capture_control.manager()
+    try:
+        m.start(**body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    return m.status()
+
+
+@app.post("/api/capture/stop")
+def capture_stop() -> dict:
+    """Stop the current capture and the rest of the job.
+
+    Kills the whole local process group of the run, disarms the board (the stream there outlives its ssh), and
+    removes the partial ``.bin`` locally and from the collection host's ``live/``. Returns the status afterwards.
+    """
+    m = capture_control.manager()
+    m.stop()
+    return m.status()
 
 
 class _HashedStatic(StaticFiles):
