@@ -1,22 +1,26 @@
-# Capture tab: collecting from the laptop at the board
+# Capture controls: collecting from the laptop at the board
 
 The experiment runs from the laptop wired to the LG board (cable on `enp1s0`,
-serial console in the tmux session `tio`). The **Capture** tab of the web app,
-served on that laptop, starts and stops captures so the operator needs neither
-a shell nor an online connection.
+serial console in the tmux session `tio`). The capture controls sit in the web
+app's toolbar, next to the MIMO picker, always visible: three numbers (length,
+delay, N), three buttons (Start, ×N, Stop), a status chip, four preflight
+dots, and a ▾ that unfolds the details panel (scenario fields, per-capture
+results, the script's log) under the header. Served on that laptop they work
+with neither a shell nor an online connection; served on lg they forward to
+the laptop (see "Using the controls from lg's web").
 
 ## What a button does
 
 | control | what happens |
 |---|---|
-| **Start 1 capture** | after *Delay before start* seconds, one run of `scripts/capture_mtk_hourly.sh --duration <Duration>` |
-| **Collect N** | the same, N times back to back, *Gap between captures* seconds apart; stops at the first failure |
+| **Start** | after *Delay* seconds, one run of `scripts/capture_mtk_hourly.sh --duration <Len>` |
+| **×N** | the same, N times back to back, *Gap between captures* (details panel) seconds apart; stops at the first failure |
 | **Stop** | ends the current capture and the rest of the batch (see below) |
-| Delay before start | the countdown while the operator leaves the room; shown large on the tab |
+| Delay s | the countdown while the operator leaves the room; the chip counts it down |
 | (stimulus) | not a control: fixed at one ping every **0.02 s (≈43 Hz of CSI)**, the dataset's rate; the script's own default would be 0.05 s (≈19 Hz) |
-| Room / Scenario / Note | written to `<stamp>_meta.json` beside the capture, uploaded with it; blank fields are not written |
-| upload to lg | off keeps everything local (`UPLOAD=0 LIVE=0`); on, an unreachable lg only produces `WARN` lines and the files wait locally |
-| label frames on lg | on runs the YOLO labelling on lg after each capture (`CV=1`); it adds up to a minute between captures |
+| Room / Scenario / Note (details panel) | written to `<stamp>_meta.json` beside the capture, uploaded with it; blank fields are not written |
+| upload to lg (details panel) | off keeps everything local (`UPLOAD=0 LIVE=0`); on, an unreachable lg only produces `WARN` lines and the files wait locally |
+| label frames on lg (details panel) | on runs the YOLO labelling on lg after each capture (`CV=1`); it adds up to a minute between captures |
 
 The capture itself is unchanged: `capture_mtk_hourly.sh` does what it does for
 cron and for the shell. The web only runs it, with three differences:
@@ -41,9 +45,10 @@ when lg is reachable. The server reports the directory it uses in the status.
 
 ## Status and preflight
 
-The tab polls `/api/capture/status` once a second and shows the script's own
-log (`mtk_capture.log`) from the moment the job started. Four checks run in the
-background and are shown as badges:
+The page polls `/api/capture/status` once a second; the details panel shows the
+script's own log (`mtk_capture.log`) from the moment the job started. Four
+checks run in the background and are shown as dots in the toolbar (green good,
+red not, grey unknown) and as words in the details panel:
 
 * **board** answers a ping on the cable. A silent board is woken over the
   serial console by the script itself (about three minutes); the state shows
@@ -52,7 +57,7 @@ background and are shown as badges:
   capture records CSI without frames, which the log says.
 * **lg** reachable over ssh. Offline is allowed; uploads then fail softly.
 * **capture lock** `/tmp/mtk-capture.lock` free. Held means a capture is
-  running from cron or a shell; the tab refuses to start a second one.
+  running from cron or a shell; the server refuses to start a second one.
 
 ## Running the web app on the laptop
 
@@ -77,14 +82,14 @@ After pulling a newer main: `npm --prefix frontend run build && systemctl --user
 A restart while a capture is running kills that capture's controller, not the
 capture script, so wait for the job to finish first.
 
-## Using the tab from lg's web (online)
+## Using the controls from lg's web (online)
 
 lg cannot reach the laptop, so the laptop keeps a reverse tunnel open
 (`scripts/csi-web-tunnel.service`: lg's `127.0.0.1:18002` → the laptop's
 `:8002`). A server on lg started with `CAPTURE_PROXY_URL=http://127.0.0.1:18002`
-forwards `/api/capture/*` to the laptop, and its Capture tab controls the same
+forwards `/api/capture/*` to the laptop, and its toolbar controls the same
 captures; the status says which host runs them. When the tunnel is down the
-tab shows 503 "capture laptop not reachable". Offline, use the laptop's own
+chip reads "controller unreachable" (503 "capture laptop not reachable"). Offline, use the laptop's own
 `http://localhost:8002`.
 
 ## API
