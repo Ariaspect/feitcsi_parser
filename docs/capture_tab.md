@@ -3,7 +3,7 @@
 The experiment runs from the laptop wired to the LG board (cable on `enp1s0`,
 serial console in the tmux session `tio`). The capture controls sit in the web
 app's toolbar, next to the MIMO picker, always visible: three numbers (length,
-delay, N), three buttons (Start, ×N, Stop), a status chip, four preflight
+delay, count), two buttons (Start, Stop), a status chip, four preflight
 dots, and a ▾ that unfolds the details panel (scenario fields, per-capture
 results, the script's log) under the header. Served on that laptop they work
 with neither a shell nor an online connection; served on lg they forward to
@@ -13,8 +13,7 @@ the laptop (see "Using the controls from lg's web").
 
 | control | what happens |
 |---|---|
-| **Start** | after *Delay* seconds, one run of `scripts/capture_mtk_hourly.sh --duration <Len>` |
-| **×N** | the same, N times back to back, *Gap between captures* (details panel) seconds apart; stops at the first failure |
+| **Start** | after *Delay* seconds, *Count* runs of `scripts/capture_mtk_hourly.sh --duration <Len>` back to back, *Gap between captures* (details panel) seconds apart; the batch stops at the first failure. Count 1 is one capture |
 | **Stop** | ends the current capture and the rest of the batch (see below) |
 | Delay s | the countdown while the operator leaves the room; the chip counts it down |
 | (stimulus) | not a control: fixed at one ping every **0.02 s (≈43 Hz of CSI)**, the dataset's rate; the script's own default would be 0.05 s (≈19 Hz) |
