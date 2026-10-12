@@ -48,6 +48,10 @@ BOARD_LOCK = "/var/csi/capture.lock"
 BOARD_IW = "/var/iwtools/iw-priv"
 
 LIMITS = {"duration_s": (10, 3300), "delay_s": (0, 3600), "count": (1, 200), "gap_s": (0, 3600)}
+# Stimulus ping interval on the board, FIXED (user, 2026-10-12: "약 43 Hz로 고정"). The script's own default is 0.05 s
+# (~19 Hz of CSI); every capture in the dataset of record was taken at 0.02 s (~42-44 Hz), set through the environment
+# by whoever ran it, and the AF8 + C3 pipeline's dimensions assume that rate. Not exposed on the tab on purpose.
+PING_INTERVAL = 0.02
 TEXT_MAX = 200
 LOG_TAIL = 80
 POLL_S = 0.5
@@ -150,7 +154,8 @@ class CaptureManager:
             if not lo <= values[key] <= hi:
                 raise ValueError(f"{key} must be between {lo} and {hi}, got {values[key]}")
         job = Job(**values, room=_clean_text(room, "room"), scenario=_clean_text(scenario, "scenario"),
-                  note=_clean_text(note, "note"), upload=bool(upload), label=bool(label), created_at=time.time())
+                  note=_clean_text(note, "note"), upload=bool(upload), label=bool(label),
+                  created_at=time.time())
         if not self.script.is_file():
             raise RuntimeError(f"capture script not found: {self.script}")
         with self._lock:
@@ -168,7 +173,8 @@ class CaptureManager:
             # Published here, not only by the worker: a status read in the few
             # milliseconds before the thread runs must already show the countdown.
             self.countdown_until = time.time() + job.delay_s if job.delay_s > 0 else None
-            self._note(f"job: {job.count} x {job.duration_s} s, delay {job.delay_s} s, gap {job.gap_s} s"
+            self._note(f"job: {job.count} x {job.duration_s} s, delay {job.delay_s} s, gap {job.gap_s} s, "
+                       f"stimulus every {PING_INTERVAL:g} s"
                        + (f", scenario '{job.scenario}'" if job.scenario else "")
                        + ("" if job.upload else ", upload off") + ("" if job.label else ", labelling off"))
             self._thread = threading.Thread(target=self._worker, args=(job,), name="capture-job", daemon=True)
@@ -212,6 +218,7 @@ class CaptureManager:
                 "board": self.board,
                 "remote": self.remote,
                 "limits": LIMITS,
+                "ping_interval": PING_INTERVAL,
             }
 
     # ------------------------------------------------------------------ worker
@@ -270,6 +277,7 @@ class CaptureManager:
             "LIVE": "1" if job.upload else "0",
             "CV": "1" if job.label else "0",
             "RETAIN_DAYS": "0",
+            "PING_INTERVAL": f"{PING_INTERVAL:g}",
         })
         if self.board:
             env["BOARD"] = self.board
@@ -465,6 +473,7 @@ class CaptureManager:
         except ValueError:
             epoch = None
         meta: dict[str, Any] = {"stamp": stamp, "capture_start_utc_epoch": epoch, "requested_duration_s": job.duration_s,
+                                "stimulus_interval_s": PING_INTERVAL,
                                 "scenario_source": "operator_reported_at_capture", "recorded_by": "web capture tab"}
         for key in ("room", "scenario", "note"):
             if getattr(job, key):
@@ -550,7 +559,7 @@ def manager() -> CaptureManager:
     """The process-wide manager, configured from the environment on first use.
 
     ``CAPTURE_SCRIPT``, ``CAPTURE_DIR``, ``CAPTURE_BOARD`` (empty disables the board step), ``CAPTURE_REMOTE`` (empty
-    disables the collection host), ``CAPTURE_REMOTE_DIR``.
+    disables the collection host), ``CAPTURE_REMOTE_DIR``, ``CAPTURE_LOCK`` (the script's flock file).
     """
     global _manager
     with _manager_lock:
@@ -562,6 +571,7 @@ def manager() -> CaptureManager:
                 board=env.get("CAPTURE_BOARD", DEFAULT_BOARD) or None,
                 remote=env.get("CAPTURE_REMOTE", DEFAULT_REMOTE) or None,
                 remote_dir=env.get("CAPTURE_REMOTE_DIR", DEFAULT_REMOTE_DIR),
+                local_lock=env.get("CAPTURE_LOCK", LOCAL_LOCK),
             )
         return _manager
 
