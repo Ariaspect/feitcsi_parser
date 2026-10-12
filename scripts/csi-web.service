@@ -1,0 +1,30 @@
+# The web app on the capture laptop, for the operator at the board: the Capture
+# tab starts and stops captures without a shell, offline or not.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/csi-web.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now csi-web
+#   loginctl enable-linger $USER        # keep it up without a login session
+#
+# Then open http://localhost:8000. Logs: journalctl --user -u csi-web -f.
+# Redeploy after a pull: npm --prefix frontend run build && systemctl --user restart csi-web
+#
+# Serves the checkout named in WorkingDirectory, with the shared venv's uvicorn.
+# Bound to localhost only: the operator is at this laptop, and nothing else
+# should be able to start a capture.
+[Unit]
+Description=FeitCSI parser web (capture control, offline)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cyphy/feitcsi_parser-serve
+ExecStart=/home/cyphy/feitcsi_parser/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+# The capture script finds node/ssh/tmux on this PATH; a user service gets a bare one.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=default.target
