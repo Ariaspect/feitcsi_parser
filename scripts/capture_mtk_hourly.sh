@@ -328,12 +328,18 @@ ensure_wifi() {
     log "WIFI  wlan0 not on $WIFI_SSID, connecting to profileId $WIFI_PROFILE_ID"
     # Fire and forget. The reply cannot be read reliably (see above), so the
     # outcome is judged by polling the link rather than by parsing a response.
-    ssh "${SSH_OPTS[@]}" "root@$BOARD" \
-        "luna-send -n 1 luna://com.webos.service.wifi/connect '{\"profileId\":$WIFI_PROFILE_ID}' >/dev/null 2>&1" \
-        >/dev/null 2>>"$LOG"
-
+    # A fresh scan first, and the request repeated every 20 s: after a reboot
+    # the board sat on ASUS_00_2.4G and one connect did nothing (2026-10-15),
+    # as on 2026-10-01 ("Network not found" until findnetworks).
     waited=0
     while [ "$waited" -lt "$WIFI_WAIT" ]; do
+        if [ $(( waited % 20 )) -eq 0 ]; then
+            ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+                "luna-send -n 1 luna://com.webos.service.wifi/findnetworks '{}' >/dev/null 2>&1 & sleep 3;
+                 luna-send -n 1 luna://com.webos.service.wifi/connect '{\"profileId\":$WIFI_PROFILE_ID}' >/dev/null 2>&1 &
+                 sleep 1" \
+                >/dev/null 2>>"$LOG"
+        fi
         sleep 5
         waited=$(( waited + 5 ))
         if wifi_up; then log "WIFI  associated after ${waited}s"; return 0; fi
