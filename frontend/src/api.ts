@@ -1415,6 +1415,7 @@ export interface CaptureJob {
   note: string | null;
   upload: boolean;
   label: boolean;
+  presence: string | null;
   created_at: number;
 }
 
@@ -1453,6 +1454,8 @@ export interface CaptureStartRequest {
   note?: string;
   upload: boolean;
   label: boolean;
+  /** operator's ground truth when there is no webcam: "occupied" | "empty"; omitted = not stated */
+  presence?: "occupied" | "empty";
 }
 
 async function captureError(res: Response, what: string): Promise<Error> {
