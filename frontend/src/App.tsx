@@ -339,7 +339,18 @@ export function App() {
     let cancelled = false;
     fetchCaptures()
       .then((c) => {
-        if (!cancelled) setCaptures(c);
+        if (cancelled) return;
+        setCaptures(c);
+        // Open on the newest capture when nothing was asked for. The old
+        // default, captures/capture.dat, is a file only the first laptop ever
+        // had; on the collection host it was a 404 on every page load.
+        // The listing is newest first, and a path the user already picked
+        // (or a real default file) is left alone.
+        setPath((current) =>
+          current === DEFAULT_PATH && c.length > 0 && !c.some((f) => f.path === DEFAULT_PATH || f.filename === DEFAULT_PATH)
+            ? c[0].path
+            : current,
+        );
       })
       .catch(() => {});
     return () => {
@@ -1010,8 +1021,8 @@ export function App() {
         ) : (
           !error && (
             <div className="text-muted-foreground p-8">
-              Enter a .dat path to explore, or toggle <b>Live</b> for realtime capture. Default:{" "}
-              <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{DEFAULT_PATH}</code>.
+              Pick a capture above, or toggle <b>Live</b> for realtime capture. The newest capture opens by
+              itself once the list has loaded.
             </div>
           )
         )}
