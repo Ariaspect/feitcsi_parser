@@ -34,6 +34,12 @@ export interface CaptureFile {
   /** Camera-measured occupied fraction, present only with the scenario
    *  fallback above. */
   occupancy?: number;
+  /** The operator's ground truth from the capture bar: "occupied" | "empty";
+   *  absent when not stated. `presence_source` says who said so. */
+  presence?: "occupied" | "empty";
+  presence_source?: string;
+  /** Fraction of camera frames with a person, whenever a camera sidecar exists. */
+  camera_occupancy?: number;
 }
 
 export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {
