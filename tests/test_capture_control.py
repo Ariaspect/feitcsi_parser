@@ -30,6 +30,10 @@ if [ "${FAKE_MODE:-ok}" = skip ]; then log "SKIP  previous capture still running
 if [ "${FAKE_MODE:-ok}" = abort ]; then log "ABORT board 192.0.2.1 unreachable and serial wake failed"; exit 1; fi
 STAMP=$(date '+%Y%m%d_%H%M%S')
 sleep 5000 &          # the lingering child a real run has (webcam grabber)
+if [ "${FAKE_MODE:-ok}" = wifi ]; then
+    log "LINK  wifi board 192.0.2.23 via wlo1 (recorded on the board, fetched after)"
+    log "SPOOL /tmp/csi_spool_$STAMP.bin on the board"
+fi
 log "START $STAMP.bin  ${DUR}s via enp1s0  (99999MB free)"
 : >"$CAPTURE_DIR/$STAMP.bin"
 sleep "$DUR"
@@ -107,6 +111,46 @@ def test_countdown_then_capture_and_stop_kills_the_whole_group(fake, tmp_path):
     assert not pgid_alive(pid), "the lingering child of the run must be gone with the process group"
     assert not (capdir / f"{stamp}.bin").exists(), "the partial capture is removed"
     assert any("stop requested" in line for line in s["log"]) and any("partial capture removed" in line for line in s["log"])
+
+
+def test_a_wifi_run_is_cleaned_up_at_the_address_and_spool_it_used(fake, tmp_path, monkeypatch):
+    """Over WiFi the board is not at the wired address, and the partial capture sits on the board as a spool file."""
+    script, capdir = fake
+    monkeypatch.setenv("FAKE_MODE", "wifi")
+    m = make_manager(script, capdir, tmp_path)
+    calls = []
+    monkeypatch.setattr(m, "_ssh", lambda host, command, timeout: calls.append((host, command)) or "clean")
+    m.start(duration_s=60, delay_s=0, count=1)
+    assert wait_until(lambda: m.status()["state"] == "running", timeout=10)
+    assert wait_until(lambda: m.status()["current"]["spool"] is not None, timeout=5)
+    cur = m.status()["current"]
+    assert (cur["link"], cur["board"]) == ("wifi", "192.0.2.23")
+    m.stop()
+    host, command = calls[0]
+    assert host == "root@192.0.2.23"
+    assert f"rm -f '/tmp/csi_spool_{cur['stamp']}.bin'" in command and "set_csi 0" in command
+
+
+def test_the_link_follows_the_route_and_the_ssid(tmp_path, monkeypatch):
+    m = CaptureManager(script=tmp_path / "x.sh", capture_dir=tmp_path, board="192.168.50.80", remote=None)
+    answers = {}
+
+    def run(cmd, **kw):
+        class R:
+            stdout = answers[cmd[0]]
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(capture_control.subprocess, "run", run)
+    answers.update(ip="192.168.50.80 dev enp1s0 src 192.168.50.1 uid 1000", iw="")
+    assert m._link() == ("wired", "cable (enp1s0)", "192.168.50.80")
+    answers.update(ip="192.168.50.80 via 10.249.38.1 dev wlo1 src 10.249.38.30", iw="Connected to x\n\tSSID: Welcome_KAIST\n")
+    link, why, addr = m._link()
+    assert link == "none" and "Welcome_KAIST" in why and addr is None
+    answers.update(ip="192.168.50.80 dev wlo1 src 192.168.50.31", iw="Connected to x\n\tSSID: ASUS_00_5G\n")
+    assert m._link()[0] == "wifi" and m._link()[2] is None            # address not recorded yet
+    (tmp_path / ".board_wlan0").write_text("192.168.50.23 aa:bb:cc:dd:ee:ff\n")
+    assert m._link()[2] == "192.168.50.23"
 
 
 def test_stop_during_countdown_runs_nothing(fake, tmp_path):

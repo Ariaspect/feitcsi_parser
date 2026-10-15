@@ -164,9 +164,25 @@ WEBCAM_GRAB_TIMEOUT=${WEBCAM_GRAB_TIMEOUT:-5}
 WEBCAM_GRACE=${WEBCAM_GRACE:-30}
 export WEBCAM_DEV WEBCAM_W WEBCAM_H WEBCAM_GRAB_TIMEOUT
 
-# The wired path is CSI-safe; WiFi is not (see check_transport below).
+# The wired path is CSI-safe; streaming over WiFi is not (see the transport
+# check in preflight). REQUIRE_WIRED=0 is the old override that streams over
+# whatever link the route picks -- contaminated, kept for diagnostics only.
 REQUIRE_WIRED=${REQUIRE_WIRED:-1}
 WIRED_IFACE=${WIRED_IFACE:-enp1s0}
+
+# How the board is reached. auto: the cable when the route to $BOARD leaves
+# via $WIRED_IFACE; otherwise WiFi, when this laptop is on the board's own AP
+# ($WIFI_SSID). Over WiFi the CSI is NOT streamed: the board records it to
+# its own $BOARD_SPOOL_DIR and the file is fetched once the capture is over
+# and the driver disarmed, so no transfer traffic rides the measured link
+# while it is measured. No live view in that mode.
+TRANSPORT=${TRANSPORT:-auto}            # auto | wired | wifi
+# The board's wlan0 address. Unset: read from $BOARD_WIFI_CACHE, which every
+# wired run refreshes ("<ip> <mac>"); when that address no longer answers as
+# the same MAC, the laptop's subnet is swept for the MAC.
+BOARD_WIFI=${BOARD_WIFI:-}
+BOARD_WIFI_CACHE=${BOARD_WIFI_CACHE:-$CAPTURE_DIR/.board_wlan0}
+BOARD_SPOOL_DIR=${BOARD_SPOOL_DIR:-/tmp}
 
 # LogLevel=ERROR suppresses the client's post-quantum key-exchange warning,
 # which this board's older sshd triggers on every single connection. Without
@@ -337,18 +353,94 @@ ensure_wifi() {
 # whose gain exceeds 1, ending with most of the CSI self-generated. Over the
 # cable the transfer is invisible: a 400 MB copy during a capture left the
 # group rate at 19.2/s with zero missing groups, identical to an idle run.
-iface=$(ip route get "$BOARD" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
-if [ "$iface" != "$WIRED_IFACE" ]; then
-    if [ "$REQUIRE_WIRED" = "1" ]; then
-        die "transfer would use '$iface', not wired '$WIRED_IFACE' -- CSI would be self-generated (set REQUIRE_WIRED=0 to override)"
-    fi
-    log "WARN  transfer over '$iface', not wired '$WIRED_IFACE' -- CSI may be contaminated"
-fi
+route_dev() {
+    ip route get "$1" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}'
+}
 
-if ! ping -c2 -W2 "$BOARD" >/dev/null 2>&1; then
-    log "board $BOARD silent on $WIRED_IFACE, trying serial wake"
-    wake_board || die "board $BOARD unreachable and serial wake failed"
+# Is $1 the board? It answers ping and ssh, and (when a MAC is known) its
+# wlan0 carries MAC $2 -- a stale DHCP lease must not send the capture to
+# some other host on the AP.
+board_is() {
+    ping -c1 -W2 "$1" >/dev/null 2>&1 || return 1
+    got=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "root@$1" \
+              'cat /sys/class/net/wlan0/address' 2>/dev/null | tr -d '\r')
+    [ -n "$got" ] || return 1
+    [ -z "$2" ] || [ "$got" = "$2" ]
+}
+
+# The address on $2's subnet that answers as MAC $1: one ping to every host
+# fills the neighbour table, then it is read back.
+find_by_mac() {
+    lap=$(ip -4 -o addr show dev "$2" | awk '{split($4,a,"/"); print a[1]; exit}')
+    [ -n "$lap" ] || return 1
+    for i in $(seq 1 254); do ping -c1 -W1 "${lap%.*}.$i" >/dev/null 2>&1 & done
+    wait
+    ip neigh show dev "$2" | awk -v m="$1" 'tolower($0) ~ m {print $1; exit}'
+}
+
+# The WiFi transport: this laptop must be on the board's AP, and the board's
+# wlan0 address has to be found. Sets BOARD and iface, or returns 1 with the
+# reason logged.
+wifi_transport() {
+    ssid=$(iw dev "$iface" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p' | head -1)
+    if [ "$ssid" != "$WIFI_SSID" ]; then
+        log "ABORT no cable to the board, and this laptop's '$iface' is on '${ssid:-no network}', not $WIFI_SSID -- plug the cable in or join $WIFI_SSID"
+        return 1
+    fi
+    mac="" cand=$BOARD_WIFI
+    if [ -r "$BOARD_WIFI_CACHE" ]; then
+        read -r cached mac <"$BOARD_WIFI_CACHE"
+        [ -n "$cand" ] || cand=$cached
+    fi
+    if [ -z "$cand" ] && [ -z "$mac" ]; then
+        log "ABORT board's WiFi address unknown -- one wired capture records it in $BOARD_WIFI_CACHE, or set BOARD_WIFI"
+        return 1
+    fi
+    if [ -n "$cand" ] && board_is "$cand" "$mac"; then
+        BOARD=$cand
+    elif [ -n "$mac" ] && found=$(find_by_mac "$mac" "$iface") && [ -n "$found" ] \
+         && board_is "$found" "$mac"; then
+        log "LINK  board's wlan0 moved: $cand -> $found ($mac)"
+        BOARD=$found
+        printf '%s %s\n' "$BOARD" "$mac" >"$BOARD_WIFI_CACHE"
+    else
+        log "ABORT board not reachable over WiFi (tried ${cand:-nothing}${mac:+, MAC $mac}) -- asleep, off $WIFI_SSID, or answering out of its unplugged eth0; plug the cable in"
+        return 1
+    fi
+    iface=$(route_dev "$BOARD")
+    return 0
+}
+
+iface=$(route_dev "$BOARD")
+if [ "$TRANSPORT" = auto ]; then
+    if [ "$iface" = "$WIRED_IFACE" ] || [ "$REQUIRE_WIRED" != "1" ]; then
+        TRANSPORT=wired
+    else
+        TRANSPORT=wifi
+    fi
 fi
+case $TRANSPORT in
+    wired)
+        if [ "$iface" != "$WIRED_IFACE" ]; then
+            if [ "$REQUIRE_WIRED" = "1" ]; then
+                die "transfer would use '$iface', not wired '$WIRED_IFACE' -- CSI would be self-generated (set REQUIRE_WIRED=0 to override)"
+            fi
+            log "WARN  transfer over '$iface', not wired '$WIRED_IFACE' -- CSI may be contaminated"
+        fi
+        if ! ping -c2 -W2 "$BOARD" >/dev/null 2>&1; then
+            log "board $BOARD silent on $WIRED_IFACE, trying serial wake"
+            wake_board || die "board $BOARD unreachable and serial wake failed"
+        fi
+        log "LINK  wired board $BOARD via $iface" ;;
+    wifi)
+        wifi_transport || exit 1
+        # The live shipper would push the growing file to lg while the board
+        # records, and over WiFi there is no growing file to push anyway.
+        LIVE=0
+        log "LINK  wifi board $BOARD via $iface (recorded on the board, fetched after)" ;;
+    *)
+        die "unknown TRANSPORT '$TRANSPORT' (expected auto, wired or wifi)" ;;
+esac
 
 # Reachable is not the same as ready: a board that has just woken answers ping
 # from the kernel while sshd is still coming up.
@@ -361,6 +453,18 @@ done
 [ "$ssh_ok" = "1" ] || die "ssh to $BOARD failed after 6 attempts"
 
 ensure_wifi || die "wlan0 not associated -- capture would contain no CSI"
+
+# Remember where the board sits on WiFi, so a later run without the cable can
+# find it. Never fatal: a missing record only costs a sweep.
+if [ "$TRANSPORT" = wired ]; then
+    w=$(ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+            'ip -4 -o addr show wlan0; cat /sys/class/net/wlan0/address' 2>/dev/null | tr -d '\r')
+    w_ip=$(printf '%s\n' "$w" | awk '/inet /{split($4,a,"/"); print a[1]; exit}')
+    w_mac=$(printf '%s\n' "$w" | awk '/^[0-9a-f][0-9a-f]:/{print; exit}')
+    if [ -n "$w_ip" ] && [ -n "$w_mac" ]; then
+        printf '%s %s\n' "$w_ip" "$w_mac" >"$BOARD_WIFI_CACHE"
+    fi
+fi
 
 # ------------------------------------------------------------- power save --
 # Held off on wlan0 for every capture, because a station in power save sleeps
@@ -425,6 +529,9 @@ read -r -d '' BOARD_SRC <<'BOARDEOF'
 # goes to stderr, which the host appends to its log.
 SECS=${1:-3300}
 IVAL=${2:-0.05}
+# $4, when given, is a file on the board to record into instead of stdout --
+# the WiFi transport, where nothing may stream over the measured link.
+SPOOL=${4:-}
 IW=/var/iwtools/iw-priv
 LOCK=/var/csi/capture.lock
 TOKEN=/var/csi/run_token
@@ -448,6 +555,16 @@ exec 9>"$LOCK"
 flock -n 9 || { say "FATAL another capture already running"; exit 3; }
 
 [ -x "$IW" ] || { say "FATAL $IW missing"; exit 4; }
+
+# Room for the whole capture before arming: ~180 kB/s at the 43 Hz stimulus,
+# budgeted at 250 kB/s so a faster AP cannot fill the spool halfway.
+if [ -n "$SPOOL" ]; then
+    need=$(( SECS * 250 ))
+    free=$(df -k "$(dirname "$SPOOL")" 2>/dev/null | awk 'NR==2 {print $4}')
+    [ "${free:-0}" -ge "$need" ] \
+        || { say "FATAL spool $(dirname "$SPOOL") has ${free:-?} kB free, need $need kB"; exit 7; }
+    rm -f "$SPOOL"
+fi
 
 # Holding the lock proves no other capture is live, so anything still armed is
 # debris from a run that was killed outright. Clearing it here rather than on
@@ -523,7 +640,11 @@ setsid sh -c "sleep $(( SECS + 45 ));
 WATCHDOG_PID=$!
 
 # The reader must start after arming and stay attached for the whole run.
-{ timeout "$SECS" cat /proc/net/wlan/csi_data; } 2>/dev/null
+if [ -n "$SPOOL" ]; then
+    { timeout "$SECS" cat /proc/net/wlan/csi_data >"$SPOOL"; } 2>/dev/null
+else
+    { timeout "$SECS" cat /proc/net/wlan/csi_data; } 2>/dev/null
+fi
 rc=$?
 # 143 (SIGTERM from timeout) is how a completed capture ends here; 124 is the
 # coreutils spelling. Neither is a failure.
@@ -616,8 +737,17 @@ fi
 # Backgrounded so the live shipper has a PID to guard on -- it needs to know
 # exactly when the writer stops, and `wait` returns the same status the
 # foreground form did.
-ssh "${SSH_OPTS[@]}" "root@$BOARD" \
-    "$BOARD_SCRIPT $DURATION $PING_INTERVAL" >"$OUT" 2>>"$LOG" &
+SPOOL=""
+if [ "$TRANSPORT" = wifi ]; then
+    # Only the board's diagnostics (stderr) cross the link while it measures.
+    SPOOL=$BOARD_SPOOL_DIR/csi_spool_$STAMP.bin
+    log "SPOOL $SPOOL on the board"
+    ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+        "$BOARD_SCRIPT $DURATION $PING_INTERVAL '' $SPOOL" >/dev/null 2>>"$LOG" &
+else
+    ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+        "$BOARD_SCRIPT $DURATION $PING_INTERVAL" >"$OUT" 2>>"$LOG" &
+fi
 CAPTURE_PID=$!
 
 SHIP_PID=""
@@ -681,6 +811,17 @@ fi
 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "root@$BOARD" \
     '/var/iwtools/iw-priv wlan0 driver "set_csi 0" >/dev/null 2>&1; pkill -x ping 2>/dev/null; true' \
     >/dev/null 2>&1
+
+# WiFi: the driver is off now, so the transfer can no longer feed the capture.
+if [ -n "$SPOOL" ]; then
+    fetch_start=$SECONDS
+    if ssh "${SSH_OPTS[@]}" "root@$BOARD" "cat '$SPOOL'" >"$OUT" 2>>"$LOG"; then
+        ssh "${SSH_OPTS[@]}" "root@$BOARD" "rm -f '$SPOOL'" >/dev/null 2>&1
+        log "FETCH $(basename "$OUT")  $(du -h "$OUT" | cut -f1) in $(( SECONDS - fetch_start ))s over $iface"
+    else
+        log "WARN  fetching $SPOOL failed -- left on the board"
+    fi
+fi
 
 # ---------------------------------------------------------------- validate ---
 size=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
