@@ -2045,6 +2045,8 @@ class CaptureStart(BaseModel):
     note: str | None = None
     upload: bool = True
     label: bool = True
+    # operator's ground truth for sessions without a webcam: "occupied" | "empty" | None
+    presence: str | None = None
 
 
 @app.get("/api/capture/status")
