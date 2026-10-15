@@ -43,6 +43,29 @@ Exactly where they went before: `/home/cyphy/feitcsi_parser/captures/<stamp>.bin
 (when a scenario was given), then `lg:/home/lg_csi/lg_csi_captures/<day>/`
 when lg is reachable. The server reports the directory it uses in the status.
 
+## Cable or WiFi
+
+The script picks the link itself (`TRANSPORT=auto`):
+
+* **cable** -- the route to the board (`192.168.50.80`) leaves via `enp1s0`.
+  The CSI streams to the laptop as it is recorded, as always, with the live
+  copy on lg.
+* **WiFi** -- no cable, and the laptop is on the board's own AP
+  (`ASUS_00_5G`). Streaming over that link would feed the transfer's TCP ACKs
+  back into the capture as stimulus (most of the CSI ends up self-generated),
+  so the board records into `/tmp/csi_spool_<stamp>.bin` on itself, only its
+  diagnostics cross the link while it measures, and the file is fetched once
+  the stream has closed and the driver is disarmed (`SPOOL` / `FETCH` lines in
+  the log). No live view in this mode. The board needs room for the whole
+  capture (it checks ~250 kB/s before arming).
+* anything else -- `ABORT`, saying which network the laptop is on.
+
+The board's WiFi address is not fixed (DHCP). Every wired run records it in
+`captures/.board_wlan0` (`<ip> <mac>`); a WiFi run tries that address, checks
+the MAC, and when it moved sweeps the laptop's subnet for the MAC. Before the
+first wired run there is nothing to go on: set `BOARD_WIFI=<ip>` or capture
+once over the cable. Serial wake works over the cable only.
+
 ## Status and preflight
 
 The page polls `/api/capture/status` once a second; the details panel shows the
@@ -50,7 +73,8 @@ script's own log (`mtk_capture.log`) from the moment the job started. Four
 checks run in the background and are shown as dots in the toolbar (green good,
 red not, grey unknown) and as words in the details panel:
 
-* **board** answers a ping on the cable. A silent board is woken over the
+* **board** answers a ping on the link a capture would use (cable, or WiFi at
+  the recorded address; the tooltip says which and why). A silent board is woken over the
   serial console by the script itself (about three minutes); the state shows
   *waking*.
 * **webcam** `/dev/video2` is free. A busy camera (the live stream) means the
