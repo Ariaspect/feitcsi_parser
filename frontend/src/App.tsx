@@ -624,6 +624,32 @@ export function App() {
         {meta && (
           <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <Badge variant="secondary">{meta.filename}</Badge>
+            {/* Ground truth of the capture being viewed: the operator's label from
+                the capture bar, and what the camera saw when there was one. */}
+            {(() => {
+              const cap = (captures ?? []).find((c) => c.path === path);
+              if (!cap) return null;
+              return (
+                <>
+                  {cap.presence && (
+                    <Badge
+                      variant={cap.presence === "occupied" ? "default" : "outline"}
+                      title={`ground truth from ${cap.presence_source ?? "the sidecar"}`}
+                    >
+                      GT: {cap.presence === "occupied" ? "person" : "empty"}
+                    </Badge>
+                  )}
+                  {cap.camera_occupancy !== undefined && (
+                    <Badge variant="outline" title="fraction of webcam frames with a person">
+                      camera: {Math.round(cap.camera_occupancy * 100)}% occupied
+                    </Badge>
+                  )}
+                  {!cap.presence && cap.camera_occupancy === undefined && (
+                    <Badge variant="outline" title="no operator label and no camera sidecar">GT: none</Badge>
+                  )}
+                </>
+              );
+            })()}
             <span>{meta.chipset} / {meta.bandwidth} MHz</span>
             <Separator orientation="vertical" className="h-4" />
             <span>{meta.total_frames.toLocaleString()} frames</span>
