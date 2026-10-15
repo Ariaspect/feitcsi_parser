@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { fetchCaptureStatus, startCapture, stopCapture, type CaptureRun, type CaptureStatus } from "./api";
+import { fetchCaptureStatus, startCapture, stopCapture, type CapturePreflight, type CaptureRun, type CaptureStatus } from "./api";
 
 // The capture controls live in the toolbar, next to MIMO, always visible
 // (user, 2026-10-12: not a tab). <CaptureBar /> is that compact row;
@@ -159,6 +159,15 @@ function SmallField({ id, label, children }: { id: string; label: string; childr
   );
 }
 
+const LINK_LABEL: Record<"wired" | "wifi" | "none", string> = { wired: "cable", wifi: "WiFi", none: "no link" };
+
+function boardText(pf: CapturePreflight): string {
+  const via = pf.link ? ` · ${pf.link_detail ?? LINK_LABEL[pf.link]}` : "";
+  if (pf.link === "none") return `no link${via}`;
+  if (pf.board_reachable) return `board answers${via}`;
+  return pf.link === "wifi" ? `board silent over WiFi${via}` : `board silent (serial wake on start)${via}`;
+}
+
 /** The always-visible row in the toolbar: three numbers, three buttons, one status chip. */
 export function CaptureBar() {
   const { status, busy, pending, form, setForm, begin, stop, open, setOpen, fetchError } = useCapture();
@@ -185,7 +194,7 @@ export function CaptureBar() {
 
   const dots = pf ? (
     <span className="flex items-center gap-1" title="board · webcam · lg · capture lock">
-      {dot(pf.board_reachable, true, pf.board_reachable ? "board answers" : "board silent (serial wake on start)")}
+      {dot(pf.board_reachable, true, boardText(pf))}
       {dot(pf.webcam_busy, false, pf.webcam_busy ? `webcam busy${pf.webcam_holder ? ` (${pf.webcam_holder})` : ""}` : "webcam free")}
       {dot(pf.remote_reachable, true, pf.remote_reachable ? "lg reachable" : "lg offline: files wait locally")}
       {dot(pf.capture_lock_busy, false, pf.capture_lock_busy ? "a capture is running outside this page" : "capture lock free")}
@@ -369,14 +378,17 @@ export function CaptureDetails() {
               </div>
             )}
             <div className="flex flex-wrap gap-2 text-sm">
-              <span>board {pf?.board_reachable == null ? "…" : pf.board_reachable ? "answers" : "silent"}</span>
+              <span>board {pf?.board_reachable == null ? "…" : pf.board_reachable ? "answers" : "silent"}{pf?.link ? ` · ${LINK_LABEL[pf.link]}` : ""}</span>
               <span>· webcam {pf?.webcam_busy == null ? "…" : pf.webcam_busy ? `busy${pf.webcam_holder ? ` (${pf.webcam_holder})` : ""}` : "free"}</span>
               <span>· lg {pf?.remote_reachable == null ? "…" : pf.remote_reachable ? "reachable" : "offline"}</span>
               <span>· lock {pf?.capture_lock_busy == null ? "…" : pf.capture_lock_busy ? "held elsewhere" : "free"}</span>
               {pf?.disk_free_mb != null && <span>· {(pf.disk_free_mb / 1000).toFixed(1)} GB free</span>}
             </div>
             <p className="text-xs text-muted-foreground">
-              A silent board is woken over the serial console (about three minutes). A busy webcam means the
+              {pf?.link_detail && <>Link: {pf.link_detail}{pf.board_address ? ` (board ${pf.board_address})` : ""}. </>}
+              Over WiFi the board records the capture itself and the file is fetched when it ends, so nothing
+              streams over the link being measured; there is no live view in that mode.
+              A silent board is woken over the serial console (about three minutes, cable only). A busy webcam means the
               capture records CSI without frames. An offline lg means the files wait in <code>{status?.capture_dir}</code>.
             </p>
             {status && status.runs.length > 0 && (

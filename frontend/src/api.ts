@@ -1528,6 +1528,9 @@ export async function fetchAf8(path: string, window: number, signal?: AbortSigna
 export interface CapturePreflight {
   checked_at: number | null;
   board_reachable: boolean | null;
+  link: "wired" | "wifi" | "none" | null;   // what a capture started now would use
+  link_detail: string | null;
+  board_address: string | null;
   webcam_busy: boolean | null;
   webcam_holder: string | null;
   remote_reachable: boolean | null;

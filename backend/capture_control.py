@@ -1,7 +1,8 @@
 """Start, stop and batch the one-minute captures from the web, so the operator at the wired laptop needs no shell.
 
 The capture itself is ``scripts/capture_mtk_hourly.sh``, unchanged: it wakes and arms the board over the cable and the
-serial console, streams the CSI into ``captures/<stamp>.bin``, grabs webcam frames beside it, and ships both to the
+serial console -- or, with no cable and this laptop on the board's AP, reaches it over WiFi and has it record on the
+board, fetched after the capture -- streams the CSI into ``captures/<stamp>.bin``, grabs webcam frames beside it, and ships both to the
 collection host when it can reach it. This module only *runs* that script and reads its log:
 
 * one job at a time -- ``count`` captures of ``duration_s`` each, a ``delay_s`` countdown before the first (the
@@ -47,6 +48,9 @@ DEFAULT_REMOTE_DIR = "/home/lg_csi/lg_csi_captures"
 WEBCAM_DEV = "/dev/video2"
 LOCAL_LOCK = "/tmp/mtk-capture.lock"          # the script's flock; busy = a capture is running, ours or not
 FRAME_TMP = "/tmp/csi-frames"
+WIRED_IFACE = "enp1s0"
+WIFI_SSID = "ASUS_00_5G"                      # the board's AP; on it, the script captures over WiFi (spooled on the board)
+BOARD_WIFI_CACHE = ".board_wlan0"             # in the capture dir: "<ip> <mac>" of the board's wlan0, kept by wired runs
 BOARD_LOCK = "/var/csi/capture.lock"
 BOARD_IW = "/var/iwtools/iw-priv"
 
@@ -125,12 +129,18 @@ class Run:
     outcome: str = "running"                   # running | done | failed | skipped | aborted | cancelled | hung
     summary: str = ""
     sidecar: str | None = None
+    link: str | None = None                    # "wired" | "wifi", from the script's LINK line
+    board: str | None = None                   # the address the script reached the board at
+    spool: str | None = None                   # WiFi only: the file the board records into
 
 
 @dataclass
 class Preflight:
     checked_at: float | None = None
     board_reachable: bool | None = None
+    link: str | None = None                    # "wired" | "wifi" | "none": what a capture started now would use
+    link_detail: str | None = None             # why, for the tooltip
+    board_address: str | None = None
     webcam_busy: bool | None = None
     webcam_holder: str | None = None
     remote_reachable: bool | None = None
@@ -423,11 +433,13 @@ class CaptureManager:
 
     def _cleanup_after_stop(self, run: Run) -> None:
         """The three things a local kill does not do: disarm the board, drop the partial file here and on lg."""
-        if self.board:
+        board = run.board or self.board
+        if board:
             cmd = (f"pids=$(fuser {BOARD_LOCK} 2>/dev/null); [ -n \"$pids\" ] && kill $pids 2>/dev/null; "
                    f"pkill -x ping 2>/dev/null; {BOARD_IW} wlan0 driver 'set_csi 0' >/dev/null 2>&1; sleep 1; "
-                   f"left=$(fuser {BOARD_LOCK} 2>/dev/null); [ -z \"$left\" ] && echo clean || echo \"still held: $left\"")
-            out = self._ssh(f"root@{self.board}", cmd, timeout=25)
+                   + (f"rm -f '{run.spool}'; " if run.spool else "")
+                   + f"left=$(fuser {BOARD_LOCK} 2>/dev/null); [ -z \"$left\" ] && echo clean || echo \"still held: $left\"")
+            out = self._ssh(f"root@{board}", cmd, timeout=25)
             with self._lock:
                 self._note(f"board cleanup: {out}")
         if run.stamp:
@@ -494,6 +506,15 @@ class CaptureManager:
                     self.state = "running"
                 elif tag == "WAKE":
                     self.state = "waking"
+                elif tag == "LINK":
+                    # "LINK  wired board 192.168.50.80 via enp1s0" / "LINK  wifi board 192.168.50.23 via wlo1 (...)"
+                    parts = body.split()
+                    if len(parts) >= 4 and parts[1] in ("wired", "wifi") and parts[2] == "board":
+                        run.link, run.board = parts[1], parts[3]
+                elif tag == "SPOOL":
+                    parts = body.split()
+                    if len(parts) > 1:
+                        run.spool = parts[1]
                 elif tag in ("DONE", "FAIL", "SKIP", "ABORT"):
                     run.summary = body
                     if tag == "DONE":
@@ -564,13 +585,42 @@ class CaptureManager:
             self._preflight_thread = threading.Thread(target=self._check_preflight, name="capture-preflight", daemon=True)
             self._preflight_thread.start()
 
-    def _check_preflight(self) -> None:
-        board = None
-        if self.board:
+    def _link(self) -> tuple[str | None, str | None, str | None]:
+        """What the script would pick now: (link, why, board address) -- its transport rule, read the same way."""
+        if not self.board:
+            return None, None, None
+        try:
+            route = subprocess.run(["ip", "route", "get", self.board], capture_output=True, text=True, timeout=5).stdout.split()
+        except (subprocess.TimeoutExpired, OSError):
+            return None, None, None
+        dev = route[route.index("dev") + 1] if "dev" in route[:-1] else None
+        if dev == WIRED_IFACE:
+            return "wired", f"cable ({dev})", self.board
+        ssid = None
+        if dev:
             try:
-                board = subprocess.run(["ping", "-c", "1", "-W", "1", self.board], capture_output=True, timeout=5).returncode == 0
+                out = subprocess.run(["iw", "dev", dev, "link"], capture_output=True, text=True, timeout=5).stdout
+                ssid = next((ln.split("SSID:", 1)[1].strip() for ln in out.splitlines() if "SSID:" in ln), None)
+            except (subprocess.TimeoutExpired, OSError):
+                ssid = None
+        if ssid != WIFI_SSID:
+            return "none", f"no cable, and {dev or 'WiFi'} is on {ssid or 'no network'}, not {WIFI_SSID}", None
+        try:
+            addr = (self.capture_dir / BOARD_WIFI_CACHE).read_text().split()[0]
+        except (OSError, IndexError):
+            return "wifi", f"{WIFI_SSID} ({dev}); board address unknown until one wired capture", None
+        return "wifi", f"{WIFI_SSID} ({dev}); recorded on the board, fetched after", addr
+
+    def _check_preflight(self) -> None:
+        link, why, addr = self._link()
+        board = None
+        if addr:
+            try:
+                board = subprocess.run(["ping", "-c", "1", "-W", "1", addr], capture_output=True, timeout=5).returncode == 0
             except (subprocess.TimeoutExpired, OSError):
                 board = False
+        elif link is not None:
+            board = False
         busy = holder = None
         if os.path.exists(self.webcam_dev):
             try:
@@ -593,7 +643,8 @@ class CaptureManager:
         except OSError:
             free = None
         with self._lock:
-            self.preflight = Preflight(checked_at=time.time(), board_reachable=board, webcam_busy=busy, webcam_holder=holder,
+            self.preflight = Preflight(checked_at=time.time(), board_reachable=board, link=link, link_detail=why,
+                                       board_address=addr, webcam_busy=busy, webcam_holder=holder,
                                        remote_reachable=remote, disk_free_mb=free, capture_lock_busy=self._lock_busy(), checking=False)
 
 
