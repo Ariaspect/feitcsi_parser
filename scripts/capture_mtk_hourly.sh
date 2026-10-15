@@ -281,7 +281,10 @@ wake_board() {
     while [ "$waited" -lt "$WAKE_WAIT" ]; do
         sleep 5
         waited=$(( waited + 5 ))
-        if ping -c1 -W2 "$BOARD" >/dev/null 2>&1; then
+        # Over the cable only: with no wired link the default route carries the
+        # ping out of the WiFi uplink, and on 2026-10-15 some host upstream
+        # answered for the board's address while the board was asleep.
+        if ping -I "$WIRED_IFACE" -c1 -W2 "$BOARD" >/dev/null 2>&1; then
             log "WAKE  board answered after ${waited}s"
             return 0
         fi
@@ -298,6 +301,10 @@ wake_board() {
 WIFI_SSID=${WIFI_SSID:-ASUS_00_5G}
 WIFI_PROFILE_ID=${WIFI_PROFILE_ID:-777}
 WIFI_WAIT=${WIFI_WAIT:-120}
+# Regulatory domain to assert on the board before scanning. After a reboot the
+# radio sat on "country 00", which lists no 5 GHz channel at all, so the 5 GHz
+# AP was never in a scan and no connect could reach it (2026-10-15).
+WIFI_COUNTRY=${WIFI_COUNTRY:-KR}
 
 # Association is read with iw/ip rather than the wifi service's own getstatus.
 # luna-send delivers its reply asynchronously: it exits 0 before the response
@@ -338,6 +345,18 @@ ensure_wifi() {
                 "luna-send -n 1 luna://com.webos.service.wifi/findnetworks '{}' >/dev/null 2>&1 & sleep 3;
                  luna-send -n 1 luna://com.webos.service.wifi/connect '{\"profileId\":$WIFI_PROFILE_ID}' >/dev/null 2>&1 &
                  sleep 1" \
+                >/dev/null 2>>"$LOG"
+            # Second route to the same AP, through connman, which is what the
+            # luna service drives underneath: assert the regulatory domain,
+            # scan, and connect the saved service for the SSID (its name
+            # carries the SSID in hex; the stored passphrase comes with it).
+            # On 2026-10-15 this is what moved the board from ASUS_00_2.4G to
+            # the 5 GHz AP after the luna connect had done nothing.
+            hex=$(printf '%s' "$WIFI_SSID" | od -An -tx1 | tr -d ' \n')
+            ssh "${SSH_OPTS[@]}" "root@$BOARD" \
+                "iw reg set $WIFI_COUNTRY >/dev/null 2>&1; connmanctl scan wifi >/dev/null 2>&1; sleep 4;
+                 svc=\$(connmanctl services 2>/dev/null | grep -o 'wifi_[0-9a-f]*_${hex}_[a-z0-9_]*' | head -1);
+                 [ -n \"\$svc\" ] && connmanctl connect \"\$svc\" >/dev/null 2>&1; true" \
                 >/dev/null 2>>"$LOG"
         fi
         sleep 5
@@ -418,6 +437,20 @@ wifi_transport() {
 }
 
 iface=$(route_dev "$BOARD")
+# A sleeping board drops its Ethernet link, so the route to it leaves by the
+# WiFi uplink and a run would be refused (or sent over WiFi) before the wake
+# ever ran -- the wake used to sit behind the transport check. When the cable
+# port has no carrier and the serial console is there, wake first and look
+# again (2026-10-15: every Start after the laptop's suspend aborted this way).
+wired_carrier() { [ "$(cat /sys/class/net/$WIRED_IFACE/carrier 2>/dev/null)" = "1" ]; }
+if [ "$TRANSPORT" = auto ] && [ "$iface" != "$WIRED_IFACE" ] && ! wired_carrier \
+   && tmux has-session -t "$TIO_SESSION" 2>/dev/null; then
+    log "LINK  no carrier on $WIRED_IFACE -- board asleep? trying the serial wake before choosing a transport"
+    if wake_board; then
+        sleep 3
+        iface=$(route_dev "$BOARD")
+    fi
+fi
 if [ "$TRANSPORT" = auto ]; then
     if [ "$iface" = "$WIRED_IFACE" ] || [ "$REQUIRE_WIRED" != "1" ]; then
         TRANSPORT=wired
