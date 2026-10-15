@@ -17,6 +17,7 @@ the laptop (see "Using the controls from lg's web").
 | **Stop** | ends the current capture and the rest of the batch (see below) |
 | Delay s | the countdown while the operator leaves the room; the chip counts it down |
 | (stimulus) | not a control: fixed at one ping every **0.02 s (≈43 Hz of CSI)**, the dataset's rate; the script's own default would be 0.05 s (≈19 Hz) |
+| GT: person / empty | the operator's own ground truth, for sessions without a webcam; written to the sidecar as `presence` with `presence_source: operator_manual`; both off = not stated |
 | Room / Scenario / Note (details panel) | written to `<stamp>_meta.json` beside the capture, uploaded with it; blank fields are not written |
 | upload to lg (details panel) | off keeps everything local (`UPLOAD=0 LIVE=0`); on, an unreachable lg only produces `WARN` lines and the files wait locally |
 | label frames on lg (details panel) | on runs the YOLO labelling on lg after each capture (`CV=1`); it adds up to a minute between captures |

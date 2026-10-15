@@ -109,6 +109,7 @@ class Job:
     note: str | None
     upload: bool
     label: bool
+    presence: str | None            # operator's ground truth: "occupied" | "empty" | None (not stated)
     created_at: float
 
 
@@ -184,13 +185,16 @@ class CaptureManager:
     # ------------------------------------------------------------------ public
     def start(self, *, duration_s: int = 60, delay_s: int = 10, count: int = 1, gap_s: int = 0,
               room: str | None = None, scenario: str | None = None, note: str | None = None,
-              upload: bool = True, label: bool = True) -> None:
+              upload: bool = True, label: bool = True, presence: str | None = None) -> None:
         values = {"duration_s": int(duration_s), "delay_s": int(delay_s), "count": int(count), "gap_s": int(gap_s)}
         for key, (lo, hi) in LIMITS.items():
             if not lo <= values[key] <= hi:
                 raise ValueError(f"{key} must be between {lo} and {hi}, got {values[key]}")
+        presence = _clean_text(presence, "presence")
+        if presence not in (None, "occupied", "empty"):
+            raise ValueError(f"presence must be 'occupied', 'empty' or unset, got {presence!r}")
         job = Job(**values, room=_clean_text(room, "room"), scenario=_clean_text(scenario, "scenario"),
-                  note=_clean_text(note, "note"), upload=bool(upload), label=bool(label),
+                  note=_clean_text(note, "note"), upload=bool(upload), label=bool(label), presence=presence,
                   created_at=time.time())
         if not self.script.is_file():
             raise RuntimeError(f"capture script not found: {self.script}")
@@ -211,6 +215,7 @@ class CaptureManager:
             self.countdown_until = time.time() + job.delay_s if job.delay_s > 0 else None
             self._note(f"job: {job.count} x {job.duration_s} s, delay {job.delay_s} s, gap {job.gap_s} s, "
                        f"stimulus every {PING_INTERVAL:g} s"
+                       + (f", GT {job.presence}" if job.presence else "")
                        + (f", scenario '{job.scenario}'" if job.scenario else "")
                        + ("" if job.upload else ", upload off") + ("" if job.label else ", labelling off"))
             self._thread = threading.Thread(target=self._worker, args=(job,), name="capture-job", daemon=True)
@@ -383,7 +388,7 @@ class CaptureManager:
                     run.summary = f"script exited rc={rc} without a DONE line" if run.outcome != "done" else ""
             self.state = "finishing"
             self._note(f"capture {run.index + 1}: {run.outcome}" + (f" -- {run.summary}" if run.summary else ""))
-        if run.outcome == "done" and run.stamp and (job.room or job.scenario or job.note):
+        if run.outcome == "done" and run.stamp and (job.room or job.scenario or job.note or job.presence):
             self._write_sidecar(run, job)
 
     # ------------------------------------------------------------------ stop path
@@ -515,6 +520,11 @@ class CaptureManager:
         for key in ("room", "scenario", "note"):
             if getattr(job, key):
                 meta[key] = getattr(job, key)
+        if job.presence:
+            # The operator's own answer to "was a person in the room", for sessions without a webcam
+            # (offline, no camera): the ground truth the builder can use when no _cv.json exists.
+            meta["presence"] = job.presence
+            meta["presence_source"] = "operator_manual"
         path = self.capture_dir / f"{stamp}_meta.json"
         path.write_text(json.dumps(meta, indent=1, ensure_ascii=False))
         run.sidecar = path.name

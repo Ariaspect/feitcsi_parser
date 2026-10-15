@@ -49,6 +49,7 @@ interface Form {
   note: string;
   upload: boolean;
   label: boolean;
+  presence: "" | "occupied" | "empty";
 }
 
 interface CaptureCtx {
@@ -80,7 +81,7 @@ export function CaptureProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setFormState] = useState<Form>({
-    duration: 60, delay: 10, count: 1, gap: 0, room: "", scenario: "", note: "", upload: true, label: true,
+    duration: 60, delay: 10, count: 1, gap: 0, room: "", scenario: "", note: "", upload: true, label: true, presence: "",
   });
   const setForm = useCallback((patch: Partial<Form>) => setFormState((f) => ({ ...f, ...patch })), []);
 
@@ -114,6 +115,7 @@ export function CaptureProvider({ children }: { children: ReactNode }) {
         note: form.note.trim() || undefined,
         upload: form.upload,
         label: form.label,
+        presence: form.presence || undefined,
       });
       setStatus(s);
     } catch (e) {
@@ -203,6 +205,21 @@ export function CaptureBar() {
       <SmallField id="cap-count" label="Count">
         <Input id="cap-count" type="number" min={1} max={200} className="w-14 h-8" value={form.count}
           onChange={(e) => setForm({ count: Number(e.target.value) })} disabled={busy} />
+      </SmallField>
+      {/* Operator's ground truth, for sessions without a webcam (offline, no
+          camera): written to the sidecar as presence / presence_source. Small
+          on purpose; blank means "not stated", never a guess. */}
+      <SmallField id="cap-gt" label="GT">
+        <div className="flex items-center gap-0.5" id="cap-gt" title="ground truth: was a person in the room during this capture? Saved to <stamp>_meta.json (presence). Leave both off when unsure.">
+          <Button size="sm" variant={form.presence === "occupied" ? "default" : "outline"} className="h-8 px-2 text-xs"
+            disabled={busy} onClick={() => setForm({ presence: form.presence === "occupied" ? "" : "occupied" })}>
+            person
+          </Button>
+          <Button size="sm" variant={form.presence === "empty" ? "default" : "outline"} className="h-8 px-2 text-xs"
+            disabled={busy} onClick={() => setForm({ presence: form.presence === "empty" ? "" : "empty" })}>
+            empty
+          </Button>
+        </div>
       </SmallField>
       <SmallField id="cap-start" label="Collect">
         <div className="flex items-center gap-1">
@@ -303,8 +320,9 @@ export function CaptureDetails() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Room, scenario and note are written to <code>&lt;stamp&gt;_meta.json</code> beside each capture when
-              given. They are the ground truth the files cannot recover afterwards.
+              Room, scenario, note and the GT toggle (person / empty) are written to{" "}
+              <code>&lt;stamp&gt;_meta.json</code> beside each capture when given. They are the ground truth the
+              files cannot recover afterwards; the GT toggle stands in for the webcam when there is none.
             </p>
             <div className="flex flex-wrap items-center gap-4 text-sm">
               <label className="flex items-center gap-2">

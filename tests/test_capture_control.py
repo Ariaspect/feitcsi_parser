@@ -148,7 +148,7 @@ def test_a_skipped_or_aborted_run_stops_the_batch_with_the_scripts_reason(fake, 
 def test_sidecar_is_written_when_the_operator_gave_a_scenario(fake, tmp_path):
     script, capdir = fake
     m = make_manager(script, capdir, tmp_path)
-    m.start(duration_s=10, delay_s=0, count=1, room="env2", scenario="fan rotating", note="  AP height  ", upload=False, label=False)
+    m.start(duration_s=10, delay_s=0, count=1, room="env2", scenario="fan rotating", note="  AP height  ", upload=False, label=False, presence="empty")
     assert wait_until(lambda: not m.status()["busy"], timeout=25)
     run = m.status()["runs"][0]
     side = capdir / f"{run['stamp']}_meta.json"
@@ -158,6 +158,7 @@ def test_sidecar_is_written_when_the_operator_gave_a_scenario(fake, tmp_path):
     assert meta["room"] == "env2" and meta["scenario"] == "fan rotating" and meta["note"] == "AP height"
     assert meta["scenario_source"] == "operator_reported_at_capture" and meta["requested_duration_s"] == 10
     assert meta["stimulus_interval_s"] == 0.02
+    assert meta["presence"] == "empty" and meta["presence_source"] == "operator_manual"
     assert (capdir / "env.seen").read_text().strip() == "retain=0 upload=0 cv=0 ping=0.02"
 
 
@@ -170,6 +171,8 @@ def test_validation_and_busy_rules(fake, tmp_path):
         m.start(count=0)
     with pytest.raises(ValueError):
         m.start(note="x" * 201)
+    with pytest.raises(ValueError):
+        m.start(presence="maybe")
     m.start(duration_s=10, delay_s=20, count=1)
     with pytest.raises(RuntimeError):
         m.start(duration_s=10, delay_s=0, count=1)
