@@ -1381,10 +1381,10 @@ export async function fetchClassifier(
 //  AF8 classifier (/api/af8) -- the ML tab                                    //
 // --------------------------------------------------------------------------- //
 
-/** The eight features, in the order the model's weights expect. */
+/** The ten features, in the order the model's weights expect. */
 export type Af8Feature =
   | "A_slope3" | "A_r025_2" | "A_r5_2" | "A_p90"
-  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd" | "C3_revisit";
+  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd" | "C3_revisit" | "C3xRun_diff";
 
 /** The model's arithmetic for one window, one entry per feature. */
 export interface Af8Model {
@@ -1438,6 +1438,15 @@ export interface Af8 {
     threshold: number;
     run: { windows: number; t0: number; t1: number } | null;
     rpmMean: number | null;
+  };
+  diff: {
+    periodS: number;          // the swing period T (s): C3's lag refined to one sample
+    c3: number | null;        // C3 clipped to 0..1, the multiplier
+    runDiff: number;          // F_run of the sweep on d(t) = r(t) - r(t - T)
+    time: number[];           // window centres on d (start T into the window)
+    peak: (number | null)[];
+    good: boolean[];
+    run: { windows: number; t0: number; t1: number } | null;
   };
   camera: { time: number[]; present: boolean[]; fraction: number | null } | null;
 }
@@ -1499,6 +1508,15 @@ export async function fetchAf8(path: string, window: number, signal?: AbortSigna
       threshold: b.breath.threshold,
       run: b.breath.run,
       rpmMean: b.breath.rpm_mean,
+    },
+    diff: {
+      periodS: b.diff.period_s,
+      c3: b.diff.c3,
+      runDiff: b.diff.run_diff,
+      time: nums(b.diff.time),
+      peak: b.diff.peak,
+      good: b.diff.good,
+      run: b.diff.run,
     },
     camera: b.camera,
   };

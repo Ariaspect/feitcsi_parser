@@ -44,6 +44,12 @@ const DESCRIPTION: Record<Af8Feature, string> = {
     "largest fall of D below that maximum, as a fraction of it (red). A rotating fan's head comes " +
     "back to the same angle every swing, so the channel returns to an earlier state and D dips at " +
     "the swing period (~0.7). A person never retraces a path exactly: D only grows, C3 near 0.",
+  C3xRun_diff:
+    "Breathing left once the fan is subtracted. T is the swing period (C3's lag, refined to one " +
+    "sample). d(t) = r(t) − r(t − T) cancels whatever repeats every T — the fan — while breathing, " +
+    "not locked to T, stays. Top: FarSense peaks of r (as F_run). Bottom: the same sweep on d; " +
+    "run_diff is its longest run ≥ 0.25 (shaded). Feature = C3 × run_diff, so with no fan (C3 ≈ 0) " +
+    "it is ≈ 0. d starts T into the window: there is nothing a period earlier to subtract before that.",
 };
 
 function fmt(v: number | null | undefined, digits = 4): string {
@@ -107,7 +113,7 @@ export function ML({ path, dark }: MLProps) {
       {error ? (
         <div className="text-muted-foreground p-8 text-sm">No AF8 verdict for this capture — {error}</div>
       ) : !data ? (
-        <ChartBusy busy empty height={150} label="computing the nine features" />
+        <ChartBusy busy empty height={150} label="computing the ten features" />
       ) : (
         <>
           <Header data={data} win={win} setWin={setWin} busy={busy} />
@@ -262,6 +268,7 @@ function FeatureChart({ name, data, width, dark }: {
 
   if (name === "A_slope3") return <LogLogChart data={data} width={w} dark={dark} />;
   if (name === "C3_revisit") return <RevisitChart data={data} width={w} dark={dark} />;
+  if (name === "C3xRun_diff") return <DiffChart data={data} width={w} dark={dark} />;
 
   if (name === "A_r025_2" || name === "A_r5_2") {
     const pair = name === "A_r025_2" ? ["0.25", "2"] : ["5", "2"];
@@ -346,6 +353,44 @@ function FeatureChart({ name, data, width, dark }: {
       bandColor="#2f9c6f"
       marker={name === "F_pkmax" && argmax >= 0 ? br.time[argmax] : null}
     />
+  );
+}
+
+/** FarSense peaks on r (top) and on d(t) = r(t) − r(t − T) (bottom); run_diff shaded. */
+function DiffChart({ data, width, dark }: { data: Af8; width: number; dark: boolean }) {
+  const br = data.breath;
+  const df = data.diff;
+  const muted = dark ? "#4b5563" : "#c3cad3";
+  const DIFF = "#2f9c6f";
+  const timeDomain: [number, number] = [data.windowS[0], data.windowS[0] + data.seconds];
+  const guide = [{ value: br.threshold, color: GUIDE, label: "0.25" }];
+  return (
+    <>
+      <Chart
+        width={width} dark={dark} height={95} times={br.time} domain={timeDomain}
+        yDomain={[-0.2, 1]} yLabel="peak on r"
+        series={[{ values: br.peak, color: GUIDE, width: 1.1, label: "peak on r" }]}
+        dots={{ values: br.peak, colors: br.good.map((g) => (g ? PERSON : muted)), radius: 1.8, label: "peak on r" }}
+        guides={guide}
+        bands={br.run ? [{ t0: br.run.t0 - 0.5, t1: br.run.t1 + 0.5 }] : []}
+        bandColor={GUIDE}
+      />
+      <Chart
+        width={width} dark={dark} height={95} times={df.time} domain={timeDomain}
+        yDomain={[-0.2, 1]} yLabel="peak on d"
+        series={[{ values: df.peak, color: DIFF, width: 1.3, label: "peak on d" }]}
+        dots={{ values: df.peak, colors: df.good.map((g) => (g ? DIFF : muted)), radius: 2.2, label: "peak on d" }}
+        guides={guide}
+        bands={df.run ? [{ t0: df.run.t0 - 0.5, t1: df.run.t1 + 0.5 }] : []}
+        bandColor={DIFF}
+      />
+      <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground tabular-nums">
+        <span>T = {df.periodS.toFixed(2)} s</span>
+        <span>F_run on r = {fmt(data.features.F_run, 3)} s</span>
+        <span style={{ color: DIFF }}>run_diff on d = {fmt(df.runDiff, 3)} s</span>
+        <span>× C3 {fmt(df.c3, 3)} = {fmt(data.features.C3xRun_diff, 3)}</span>
+      </div>
+    </>
   );
 }
 

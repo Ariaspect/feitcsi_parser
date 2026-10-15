@@ -1,4 +1,4 @@
-"""What the ML tab draws: AF8's nine features and the series each is read from.
+"""What the ML tab draws: AF8's ten features and the series each is read from.
 
 Server-side only -- the board runs ``backend.af8`` and nothing here. The
 features are ``af8``'s own (``af8.motion_features`` / ``af8.breath_features``
@@ -62,6 +62,36 @@ def _per_second_median(values: np.ndarray, times: np.ndarray,
     return out
 
 
+def _sweep(g: np.ndarray, fab: np.ndarray, fs: float, start_s: float) -> dict[str, Any]:
+    """The FarSense sweep with af8's settings, per window, for drawing.
+
+    *start_s* is the time of ``g[0]`` from the capture's first frame. Returns
+    window centres, peaks, rates, which windows count as breathing, and the
+    longest run of them -- ``af8.breath_features``, spelled out.
+    """
+    prep = farsense.prepare(g, fs, fabricated=fab, window_seconds=10.0, hop_seconds=1.0,
+                            band_rpm=(10.0, 30.0), savgol_seconds=1.0, savgol_order=3,
+                            highpass_hz=0.0)
+    fz = farsense._run(prep, dict(n_theta=200, fft_size=8192, keep_fraction=0.65,
+                                  motion_frac_hi=1e9, max_gap_fraction=0.5, min_peak=-1.0,
+                                  positive_only=True), None)
+    pk = np.where(fz["unknown"], np.nan, fz["acf_peak_norm"]).astype(float)
+    rpm = np.asarray(fz["rpm"], float)
+    win_t = start_s + np.asarray(fz["time_s"], float)   # window centres
+    good = np.isfinite(pk) & (pk >= af8.BREATH_PEAK)
+    best = cur = 0
+    run_end = -1
+    for i, gi in enumerate(good):
+        cur = cur + 1 if gi else 0
+        if cur > best:
+            best, run_end = cur, i
+    run = None
+    if best:
+        a, b = run_end - best + 1, run_end
+        run = {"windows": int(best), "t0": float(win_t[a]), "t1": float(win_t[b])}
+    return {"time": win_t, "peak": pk, "rpm": rpm, "good": good, "run": run}
+
+
 def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
     """Features, model breakdown and drawing series for one window of a capture.
 
@@ -94,6 +124,9 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
         feats = af8.motion_features(g, fs)
         feats.update(af8.breath_features(g, fab, fs))
         feats.update(af8.revisit_feature(g, fs))
+        d, fd, L_swing = af8.diff_signal(g, fab, fs)
+        run_diff = af8.breath_features(d, fd, fs)["F_run"]
+        feats["C3xRun_diff"] = float(np.clip(feats["C3_revisit"], 0.0, 1.0)) * run_diff
 
         grid_t = (tt[0] - origin) + np.arange(len(g)) / fs     # s from the first frame
 
@@ -123,26 +156,12 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
         p90_t = grid_t[Lp + np.arange(m) * k + k // 2]
 
         # --- breathing: the FarSense sweep with af8's settings ---------------
-        prep = farsense.prepare(g, fs, fabricated=fab, window_seconds=10.0, hop_seconds=1.0,
-                                band_rpm=(10.0, 30.0), savgol_seconds=1.0, savgol_order=3,
-                                highpass_hz=0.0)
-        fz = farsense._run(prep, dict(n_theta=200, fft_size=8192, keep_fraction=0.65,
-                                      motion_frac_hi=1e9, max_gap_fraction=0.5, min_peak=-1.0,
-                                      positive_only=True), None)
-        pk = np.where(fz["unknown"], np.nan, fz["acf_peak_norm"]).astype(float)
-        rpm = np.asarray(fz["rpm"], float)
-        win_t = (tt[0] - origin) + np.asarray(fz["time_s"], float)   # window centres
-        good = np.isfinite(pk) & (pk >= af8.BREATH_PEAK)
-        best = cur = 0
-        run_end = -1
-        for i, gi in enumerate(good):
-            cur = cur + 1 if gi else 0
-            if cur > best:
-                best, run_end = cur, i
-        run = None
-        if best:
-            a, b = run_end - best + 1, run_end
-            run = {"windows": int(best), "t0": float(win_t[a]), "t1": float(win_t[b])}
+        sw = _sweep(g, fab, fs, tt[0] - origin)
+        pk, rpm, win_t, good, run = sw["peak"], sw["rpm"], sw["time"], sw["good"], sw["run"]
+
+        # --- C3 x run_diff: the same sweep on r(t) - r(t - T) -----------------
+        # d's first sample is grid sample L_swing, so its times start T later.
+        sd = _sweep(d, fd, fs, tt[0] - origin + L_swing / fs)
 
         # --- revisit: D(tau) over 10..30 s, its running maximum and the drop --
         rv_t, rv_D = af8.revisit_curve(g, fs)
@@ -212,5 +231,14 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
             "threshold": af8.BREATH_PEAK,
             "run": run,
             "rpm_mean": _num(np.nanmean(good_rpm)) if np.isfinite(good_rpm).any() else None,
+        },
+        "diff": {
+            "period_s": L_swing / fs,
+            "c3": _num(np.clip(feats["C3_revisit"], 0.0, 1.0)),
+            "run_diff": float(run_diff),
+            "time": _nums(sd["time"]),
+            "peak": _nums(sd["peak"]),
+            "good": [bool(v) for v in sd["good"]],
+            "run": sd["run"],
         },
     }

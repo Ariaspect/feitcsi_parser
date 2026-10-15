@@ -61,6 +61,12 @@ def test_the_series_drawn_give_back_the_features(tmp_path: Path) -> None:
     assert np.nanmax(drop) == pytest.approx(f["C3_revisit"], rel=1e-12)
     assert rv["running_max"] == list(np.maximum.accumulate(rv["D"]))
 
+    # C3 x run_diff: the drawn run on d, times the drawn C3.
+    df = out["diff"]
+    assert (df["run"]["windows"] if df["run"] else 0) == df["run_diff"]
+    assert df["c3"] * df["run_diff"] == pytest.approx(f["C3xRun_diff"], rel=1e-12)
+    assert df["time"][0] >= br["time"][0] + df["period_s"] - 1e-9          # d starts T in
+
 
 def test_the_model_breakdown_adds_up(tmp_path: Path) -> None:
     out = af8_explain.explain(_capture(tmp_path, n=1200))

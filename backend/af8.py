@@ -1,4 +1,4 @@
-"""AF8: the A+F presence classifier -- eight features plus the revisit C3. 60 s of CSI in, P(person) out.
+"""AF8: the A+F presence classifier -- eight features, the revisit C3 and C3 x run_diff. 60 s of CSI in, P(person) out.
 
     python3 -m backend.af8 CAPTURE.bin            # prints 1 (person) or 0
     python3 -m backend.af8 CAPTURE.bin --json     # and the features behind it
@@ -26,15 +26,25 @@ wins, and the disagreement is noted where it falls:
    maximum. A rotating fan's head returns to the same angle every swing
    (20 s here), so the channel returns to an earlier state and ``D`` dips;
    a person never retraces a path exactly, so ``D`` only grows;
-7. median impute, standardise, logistic regression; person when p > 0.5.
+7. **C3 x run_diff (1):** the swing period T is where ``D`` dips (C3's lag,
+   refined to one sample at full rate within +-1 s). The difference
+   ``d(t) = r(t) - r(t - T)`` cancels whatever repeats every T -- the fan --
+   and keeps breathing, which is not locked to T. ``run_diff`` is ``F_run``
+   of the FarSense sweep on ``d``; times C3, so it only speaks when a fan
+   is there (no fan: C3 ~ 0, the feature ~ 0);
+8. median impute, standardise, logistic regression; person when p > 0.5.
 
-The model is the 8-feature guide's pipeline refitted with C3 on all 811
-labelled windows (2026-10-09: the guide's 705 less its vacuum windows, plus
-78 robot-vacuum, 20 static-fan and 79 rotating-fan windows) and is
+The model is the guide's pipeline refitted with C3 and C3 x run_diff on all
+1151 labelled windows (2026-10-15: the 811 of the 9-feature model -- the
+guide's environments 1 and 2 with their robot-vacuum and fan windows -- plus
+the 340 one-minute captures of the 10/12-10/14 room, fans with and without a
+person among them) and is
 plain arithmetic here -- no sklearn -- so this runs where ``hybrid2_calc``
 does: NumPy and the pure backend modules, no scipy, no CSIKit. On the LG
 board that is its own 32-bit Python and NumPy 1.26.4, ~1.6 s and 85 MB a
-one-minute capture (docs/board_calculator.md).
+one-minute capture with nine features (docs/board_calculator.md); the
+difference adds a second FarSense sweep and the period refinement, ~2.5 s
+measured on the board (2026-10-14), not yet optimised.
 
 Not hybrid 2's rule and not its numbers: ``A_p90`` is a mean-folded P90 on a
 resampled grid, ~4-5 % below hybrid 2's median-folded one, and 0.035 / 0.25
@@ -48,7 +58,8 @@ How the functions fit together (``evaluate`` calls them in this order)::
       -> motion_features()   A_slope3, A_r025_2, A_r5_2, A_p90
       -> breath_features()   F_pkmax, F_pkmed, F_run, F_rpm_sd
       -> revisit_feature()   C3_revisit
-      -> probability()       9 features -> p(person)
+      -> diff_feature()      C3xRun_diff (the swing period, then FarSense on r(t) - r(t-T))
+      -> probability()       10 features -> p(person)
       -> label = 1 if p > 0.5 else 0
 """
 
@@ -76,23 +87,24 @@ from backend import doppler, farsense, framediff, mtk
 #  The model                                                                   #
 # --------------------------------------------------------------------------- #
 
-# The nine inputs of the model, in the order the weights below expect.
-# A_* describe motion, F_* describe breathing, C3_revisit a periodic return.
+# The ten inputs of the model, in the order the weights below expect.
+# A_* describe motion, F_* describe breathing, C3_revisit a periodic return,
+# C3xRun_diff breathing left once that return is subtracted.
 FEATURES = ("A_slope3", "A_r025_2", "A_r5_2", "A_p90",
-            "F_pkmax", "F_pkmed", "F_run", "F_rpm_sd", "C3_revisit")
+            "F_pkmax", "F_pkmed", "F_run", "F_rpm_sd", "C3_revisit", "C3xRun_diff")
 
 # The guide's §5 pipeline: SimpleImputer(median) -> StandardScaler ->
 # LogisticRegression (L2, C=1, class_weight="balanced"), sklearn 1.9, refitted
-# with C3 on all 811 windows (people 264, empty 370, non-human 177).
+# with C3 and C3 x run_diff on all 1151 windows (people 434, no person 717).
 # Each array has one number per feature, in the FEATURES order:
 #   IMPUTER_MEDIAN -- value used when a feature is missing (NaN)
 #   SCALER_MEAN / SCALER_SCALE -- turn each feature into a z-score
 #   COEF / INTERCEPT -- the logistic regression weights
-IMPUTER_MEDIAN = np.array([0.043556, 0.919526, 1.04915, 0.025822, 0.285531, 0.089163, 1.0, 1.328616, 0.041145])
-SCALER_MEAN = np.array([0.102338, 0.831873, 1.091961, 0.062552, 0.313132, 0.119899, 3.747226, 1.56335, 0.115799])
-SCALER_SCALE = np.array([0.126299, 0.201035, 0.138961, 0.076984, 0.101441, 0.090028, 7.999783, 1.150963, 0.205717])
-COEF = np.array([0.151716, -0.241967, 1.412994, 3.270307, 1.145794, 2.458743, 1.43124, 0.262968, -2.027551])
-INTERCEPT = -0.559622
+IMPUTER_MEDIAN = np.array([0.0604191, 0.8842, 1.05259, 0.03098, 0.304242, 0.097725, 1, 1.74699, 0.0461517, 0.0298995])
+SCALER_MEAN = np.array([0.112305, 0.812451, 1.09822, 0.0569722, 0.321849, 0.121508, 3.56646, 1.97063, 0.127434, 0.190408])
+SCALER_SCALE = np.array([0.124958, 0.199671, 0.132516, 0.0673569, 0.0993294, 0.0832089, 7.16485, 1.29628, 0.199536, 0.495036])
+COEF = np.array([0.398483, -1.59421, 0.68567, 1.863, 0.822525, 1.89851, 0.575673, 0.127644, -2.62478, 0.577191])
+INTERCEPT = -0.224378
 THRESHOLD = 0.5           # p(person) above this -> label 1
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +118,7 @@ P90_LAG = 2.0             # seconds; the lag of the motion P90
 BREATH_PEAK = 0.25        # a FarSense window counts as "breathing" at peak >= this
 REVISIT_LAGS = tuple(float(t) for t in range(10, 31))   # seconds; C3's lags, 1 s apart
 REVISIT_HZ = 10.0         # C3 reads the grid thinned to about this rate
+PERIOD_REFINE = 1.0       # seconds; the swing period is refined within +-this of C3's lag
 MIN_SECONDS = 30.0        # less usable grid than this and the window is not judged
 # A one-minute capture is one window, [0, 61) s from its first frame -- the
 # guide's §6. (The reference inventory ended those windows at the *camera's*
@@ -326,11 +339,58 @@ def revisit_feature(g: np.ndarray, fs: float) -> dict[str, float]:
     return {"C3_revisit": float(np.max((peak - D) / peak))}
 
 
+def swing_period(g: np.ndarray, fs: float) -> int:
+    """The lag, in samples, at which the channel comes closest to where it was.
+
+    C3's lag -- where ``drop(tau)`` peaks on the 1 s, ~10 Hz curve -- refined
+    to one sample on the full grid: the lag within +-``PERIOD_REFINE`` s of it
+    with the smallest median step. A whole sample, so ``r(t) - r(t - T)``
+    needs no interpolation.
+    """
+    taus, D = revisit_curve(g, fs)
+    peak = np.maximum.accumulate(D)
+    t0 = float(taus[int(np.nanargmax((peak - D) / peak))])
+    lo = max(1, int((t0 - PERIOD_REFINE) * fs))
+    hi = min(len(g) - 1, int((t0 + PERIOD_REFINE) * fs))
+    best = None
+    for L in range(lo, hi + 1):
+        v = float(np.nanmedian(_step(g, L)))
+        if best is None or v < best[0]:
+            best = (v, L)
+    return best[1]
+
+
+def diff_signal(g: np.ndarray, fab: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray, int]:
+    """``d(t) = r(t) - r(t - T)`` one swing period apart, its fabricated mask, and T in samples.
+
+    Whatever repeats every T (a rotating fan's head) cancels; breathing, a
+    few seconds a breath and not locked to T, does not. A sample of ``d`` is
+    fabricated when either of its two samples was.
+    """
+    L = swing_period(g, fs)
+    return g[L:] - g[:-L], fab[L:] | fab[:-L], L
+
+
+def diff_feature(g: np.ndarray, fab: np.ndarray, fs: float, c3: float) -> dict[str, float]:
+    """C3 x run_diff: breathing that is still there once the fan is subtracted.
+
+    ``run_diff`` is ``F_run`` of :func:`breath_features` on :func:`diff_signal`
+    -- the longest run of 10 s windows with peak >= 0.25 on ``d``. Multiplied
+    by ``C3_revisit`` (clipped to 0..1), so with no fan (C3 ~ 0) the feature is
+    ~0 whatever ``run_diff`` reads, and with a fan it says whether a breathing
+    person remains under it. Also returns ``run_diff`` and ``T_swing`` (s),
+    which the model does not read.
+    """
+    d, fd, L = diff_signal(g, fab, fs)
+    run = breath_features(d, fd, fs)["F_run"]
+    return {"C3xRun_diff": float(np.clip(c3, 0.0, 1.0)) * run, "run_diff": run, "T_swing": L / fs}
+
+
 def probability(features: dict[str, float]) -> float:
     """The fitted pipeline as arithmetic: impute, standardise, logistic.
 
     This is the whole "machine learning" step. The model was trained earlier
-    (scikit-learn, 811 labelled windows); its learned numbers are the
+    (scikit-learn, 1151 labelled windows); its learned numbers are the
     constants at the top of this file, so predicting is three lines of maths:
 
     1. a missing feature (NaN) is replaced by its training median;
@@ -353,7 +413,7 @@ def evaluate(path: str | Path, t0: float = 0.0, t1: float = WINDOW_SECONDS) -> d
     ``F_rpm_sd`` (NaN there just means no breathing) coming out NaN.
 
     Runs the whole pipeline on ``[t0, t1)`` seconds of one capture and
-    returns a dict with the label, p(person), the nine features, and how
+    returns a dict with the label, p(person), the ten features, and how
     long each stage took (``stage_ms``) -- the last for timing on the board.
     """
     t_start = time.perf_counter()
@@ -402,13 +462,18 @@ def evaluate(path: str | Path, t0: float = 0.0, t1: float = WINDOW_SECONDS) -> d
         feats.update(revisit_feature(g, fs))
         mark("C3")
 
+        # 6. C3 x run_diff: breathing on r(t) - r(t - T)
+        extra = diff_feature(g, fab, fs, feats["C3_revisit"])
+        feats["C3xRun_diff"] = extra["C3xRun_diff"]
+        mark("diff")
+
     # A missing breathing-rate spread is normal (no breathing seen); any other
     # missing feature means there was not enough data to judge.
     missing = [f for f in FEATURES if f != "F_rpm_sd" and not np.isfinite(feats[f])]
     if missing:
         raise ValueError(f"not judged: {', '.join(missing)} undefined")
 
-    # 6. the model
+    # 7. the model
     p = probability(feats)
     mark("model")
     return {
@@ -416,6 +481,8 @@ def evaluate(path: str | Path, t0: float = 0.0, t1: float = WINDOW_SECONDS) -> d
         "label": int(p > THRESHOLD),
         "p_person": p,
         "features": {f: (None if not np.isfinite(feats[f]) else feats[f]) for f in FEATURES},
+        "run_diff": extra["run_diff"],
+        "T_swing_s": extra["T_swing"],
         "window_s": [float(t0), float(t1)],
         "seconds": round(len(g) / fs, 3),
         "subcarriers": int(g.shape[1]),

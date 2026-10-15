@@ -1,4 +1,4 @@
-"""Tests for backend.af8 -- the A+F presence classifier, eight features plus the revisit C3."""
+"""Tests for backend.af8 -- the A+F presence classifier: eight features, the revisit C3 and C3 x run_diff."""
 
 from __future__ import annotations
 
@@ -18,18 +18,18 @@ REPO = Path(__file__).resolve().parent.parent
 CAPTURES = Path("/home/cyphy/feitcsi_parser/captures")
 
 NAN = float("nan")
-# The implementation guide's §8-1: stem -> (window end, the nine features, p(person)).
+# The implementation guide's §8-1: stem -> (window end, the ten features, p(person)).
 # The four inventory windows end at the reference inventory's t1 (the camera's
 # span); the 10/7 vacuum was scored on [0, 61). The eight A/F features are the
 # guide's; C3_revisit is the reference implementation's (2026-10-09, lg
-# /tmp/kpi_c3.py) and p is sklearn's predict_proba of the refitted model on
-# these nine numbers.
+# /tmp/kpi_c3.py); C3xRun_diff and p are the 10-feature refit's (2026-10-15,
+# sklearn's predict_proba on these ten numbers).
 GUIDE = {
-    "20261002_200002": (58.01800012588501, [0.139047, 0.715367, 1.070326, 0.039499, 0.588157, 0.474106, 25, 0.865930, 0.203071], 1.0000),
-    "20261001_190002": (58.00699996948242, [0.110295, 0.788755, 1.094998, 0.164787, 0.231604, 0.079279, 0, NAN, 0.034949], 0.8719),
-    "20261006_134123": (58.00399994850159, [0.114377, 0.796932, 1.126240, 0.041756, 0.304580, 0.102428, 2, 0.974911, 0.074938], 0.1603),
-    "20261002_030003": (59.01599979400635, [0.017029, 0.970799, 1.023366, 0.013313, 0.221556, 0.055651, 0, NAN, 0.028781], 0.0019),
-    "20261007_142632": (61.0, [0.016134, 0.958254, 1.002992, 0.045931, 0.380780, 0.080732, 1, 0.943273, 0.047044], 0.0637),
+    "20261002_200002": (58.01800012588501, [0.139047, 0.715367, 1.070326, 0.039499, 0.588157, 0.474106, 25, 0.865930, 0.203071, 0.609214], 1.0000),
+    "20261001_190002": (58.00699996948242, [0.110295, 0.788755, 1.094998, 0.164787, 0.231604, 0.079279, 0, NAN, 0.034949, 0.034949], 0.8743),
+    "20261006_134123": (58.00399994850159, [0.114377, 0.796932, 1.126240, 0.041756, 0.304580, 0.102428, 2, 0.974911, 0.074938, 0.0], 0.3311),
+    "20261002_030003": (59.01599979400635, [0.017029, 0.970799, 1.023366, 0.013313, 0.221556, 0.055651, 0, NAN, 0.028781, 0.0], 0.0070),
+    "20261007_142632": (61.0, [0.016134, 0.958254, 1.002992, 0.045931, 0.380780, 0.080732, 1, 0.943273, 0.047044, 0.0], 0.0826),
 }
 
 
@@ -87,6 +87,27 @@ def test_the_revisit_finds_a_periodic_return_and_not_a_drift() -> None:
     assert person < 0.2
     lags, D = af8.revisit_curve(base + 0.5 * swing * base, fs)
     assert lags[int(np.argmin(D))] == 20.0
+
+
+def test_the_difference_cancels_the_fan_and_keeps_breathing() -> None:
+    """r(t) - r(t - T) at the swing period: the fan cancels to the sample, breathing remains."""
+    fs, n = 40.0, 2400
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(1)
+    base = 1.0 + 0.05 * rng.standard_normal((1, 31))
+    swing = 0.5 * base * np.exp(1j * 3.0 * np.sin(2 * np.pi * t / 20.0))[:, None]
+    breath = 0.05 * base * np.sin(2 * np.pi * t * 14 / 60.0)[:, None]          # 14 a minute: not a divisor of 20 s
+    fab = np.zeros(n, bool)
+    assert af8.swing_period(base + swing, fs) == 800                          # 20 s, to the sample
+    d, fd, L = af8.diff_signal(base + swing, fab, fs)
+    assert L == 800 and len(d) == n - 800 and not fd.any()
+    assert np.abs(d).max() < 1e-12                                            # the fan alone: nothing left
+    noise = 0.002 * (rng.standard_normal((n, 31)) + 1j * rng.standard_normal((n, 31)))
+    fan = af8.diff_feature(base + swing + noise, fab, fs, 0.7)
+    both = af8.diff_feature(base + swing + breath + noise, fab, fs, 0.7)
+    assert fan["run_diff"] <= 2                                               # no breathing under it
+    assert both["run_diff"] >= 20 and both["C3xRun_diff"] == pytest.approx(0.7 * both["run_diff"])
+    assert af8.diff_feature(base + swing + breath + noise, fab, fs, 0.0)["C3xRun_diff"] == 0.0   # no fan: off
 
 
 # --------------------------------------------------------------------------- #
