@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
+import { fetchCaptureConditions, fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
@@ -146,6 +146,8 @@ export function App() {
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
   const [filters, setFilters] = useState<Filters | null>(null);
   const [captures, setCaptures] = useState<CaptureFile[] | null>(null);
+  // The viewed capture's recorded conditions, read fresh with each meta load (GT label, camera verdict).
+  const [conditions, setConditions] = useState<Partial<CaptureFile> | null>(null);
   const [mimo, setMimo] = useState<string>("all");
   // The day the capture picker is narrowed to: a yyyymmdd stamp, or "all".
   // The "Group by" select lists every day the listing holds and the picker
@@ -226,6 +228,9 @@ export function App() {
           setError(null);
           setLastUpdate(Date.now());
         }
+        // Sidecars can appear after a capture ended (presence label, camera
+        // verdict), so they are read per view rather than from the listing.
+        fetchCaptureConditions(path).then((c) => { if (!cancelled) setConditions(c); }).catch(() => { if (!cancelled) setConditions(null); });
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : String(e));
@@ -627,7 +632,7 @@ export function App() {
             {/* Ground truth of the capture being viewed: the operator's label from
                 the capture bar, and what the camera saw when there was one. */}
             {(() => {
-              const cap = (captures ?? []).find((c) => c.path === path);
+              const cap = conditions ?? (captures ?? []).find((c) => c.path === path);
               if (!cap) return null;
               return (
                 <>

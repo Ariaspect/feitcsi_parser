@@ -103,3 +103,15 @@ def test_the_operators_presence_label_and_the_camera_fraction_are_listed(day: Pa
     assert got["a"]["camera_occupancy"] == pytest.approx(0.97)      # both shown, never merged
     assert got["b"]["presence"] == "occupied" and "camera_occupancy" not in got["b"]
     assert "presence" not in got["c"]                                 # only the two values the bar can send
+
+
+def test_conditions_of_one_capture_are_read_fresh(day: Path) -> None:
+    _capture(day, "a", cv={"summary": {"fraction_occupied": 0.0}})
+    client = TestClient(app)
+    path = _listing()["a"]["path"]
+    first = client.get("/api/capture_conditions", params={"path": path}).json()
+    assert first["camera_occupancy"] == 0.0 and "presence" not in first
+    (day / "a_meta.json").write_text(json.dumps({"presence": "occupied", "presence_source": "operator_manual"}))
+    again = client.get("/api/capture_conditions", params={"path": path}).json()
+    assert again["presence"] == "occupied" and again["camera_occupancy"] == 0.0   # new sidecar seen without a reload
+    assert client.get("/api/capture_conditions", params={"path": str(day / "nope.bin")}).status_code == 404
