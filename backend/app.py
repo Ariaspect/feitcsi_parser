@@ -1949,16 +1949,25 @@ def _capture_conditions(found: _Found) -> dict:
                 "activity", "facing", "distance_m"):
         if meta.get(key) not in (None, ""):
             out[key] = meta[key]
-    if "scenario" not in out:
-        cv = _sidecar_json(found, "_cv.json") or {}
-        try:
-            frac = cv["summary"]["fraction_occupied"]
-        except (KeyError, TypeError):
-            frac = None
-        if frac is not None:
-            out["scenario"] = ("empty" if frac == 0.0
-                               else "occupied" if frac > 0.5 else "partial")
-            out["occupancy"] = float(frac)
+    # The operator's own ground truth from the capture bar (sessions without a
+    # webcam): "occupied" / "empty", never guessed, with where it came from.
+    if meta.get("presence") in ("occupied", "empty"):
+        out["presence"] = meta["presence"]
+        if meta.get("presence_source"):
+            out["presence_source"] = str(meta["presence_source"])
+    cv = _sidecar_json(found, "_cv.json") or {}
+    try:
+        frac = cv["summary"]["fraction_occupied"]
+    except (KeyError, TypeError):
+        frac = None
+    if frac is not None:
+        # What the camera saw, whenever it was there -- shown beside the
+        # operator's label so the two can be read against each other.
+        out["camera_occupancy"] = float(frac)
+    if "scenario" not in out and frac is not None:
+        out["scenario"] = ("empty" if frac == 0.0
+                           else "occupied" if frac > 0.5 else "partial")
+        out["occupancy"] = float(frac)
     return out
 
 

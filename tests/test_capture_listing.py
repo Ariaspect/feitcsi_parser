@@ -91,3 +91,15 @@ def test_the_path_walk_used_by_phase_1_finds_the_same_captures(day: Path) -> Non
     root = day.parent
     walked = {p.relative_to(root).as_posix() for p in _walk_captures(root, 8, set())}
     assert walked == {c["filename"] for c in _listing().values()}
+
+
+def test_the_operators_presence_label_and_the_camera_fraction_are_listed(day: Path) -> None:
+    _capture(day, "a", cv={"summary": {"fraction_occupied": 0.97}},
+             meta={"presence": "empty", "presence_source": "operator_manual"})
+    _capture(day, "b", meta={"presence": "occupied"})
+    _capture(day, "c", meta={"presence": "maybe"})
+    got = _listing()
+    assert got["a"]["presence"] == "empty" and got["a"]["presence_source"] == "operator_manual"
+    assert got["a"]["camera_occupancy"] == pytest.approx(0.97)      # both shown, never merged
+    assert got["b"]["presence"] == "occupied" and "camera_occupancy" not in got["b"]
+    assert "presence" not in got["c"]                                 # only the two values the bar can send
