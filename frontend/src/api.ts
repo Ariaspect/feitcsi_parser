@@ -1596,6 +1596,8 @@ export interface CaptureStatus {
   /** present when this server forwarded the request to the capture laptop */
   proxied_via?: string;
   proxy_host?: string;
+  /** catch-up upload of captures recorded while lg was unreachable */
+  sync?: { running: boolean; last_at: number | null; last_result: string | null; pending: number | null; error: string | null };
 }
 
 export interface CaptureStartRequest {
@@ -1642,5 +1644,19 @@ export async function startCapture(req: CaptureStartRequest): Promise<CaptureSta
 export async function stopCapture(): Promise<CaptureStatus> {
   const res = await fetch("/api/capture/stop", { method: "POST" });
   if (!res.ok) throw await captureError(res, "capture stop");
+  return (await res.json()) as CaptureStatus;
+}
+
+/** The conditions of one capture read fresh from its sidecars (presence, camera_occupancy, scenario ...):
+ *  the listing is fetched once per page load and would miss a sidecar written after a capture ended. */
+export async function fetchCaptureConditions(path: string, signal?: AbortSignal): Promise<Partial<CaptureFile>> {
+  const res = await fetch(`/api/capture_conditions?path=${encodeURIComponent(path)}`, { signal });
+  if (!res.ok) throw await captureError(res, "capture conditions");
+  return (await res.json()) as Partial<CaptureFile>;
+}
+
+export async function syncCaptures(): Promise<CaptureStatus> {
+  const res = await fetch("/api/capture/sync", { method: "POST" });
+  if (!res.ok) throw await captureError(res, "capture sync");
   return (await res.json()) as CaptureStatus;
 }

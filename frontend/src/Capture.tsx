@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { fetchCaptureStatus, startCapture, stopCapture, type CapturePreflight, type CaptureRun, type CaptureStatus } from "./api";
+import { fetchCaptureStatus, startCapture, stopCapture, syncCaptures, type CapturePreflight, type CaptureRun, type CaptureStatus } from "./api";
 
 // The capture controls live in the toolbar, next to MIMO, always visible
 // (user, 2026-10-12: not a tab). <CaptureBar /> is that compact row;
@@ -62,6 +62,7 @@ interface CaptureCtx {
   setForm: (patch: Partial<Form>) => void;
   begin: (count: number) => Promise<void>;
   stop: () => Promise<void>;
+  sync: () => Promise<void>;
   open: boolean;
   setOpen: (v: boolean) => void;
 }
@@ -139,8 +140,17 @@ export function CaptureProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const sync = useCallback(async () => {
+    setActionError(null);
+    try {
+      setStatus(await syncCaptures());
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   const value: CaptureCtx = {
-    status, fetchError, actionError, pending, busy: status?.busy ?? false, form, setForm, begin, stop, open, setOpen,
+    status, fetchError, actionError, pending, busy: status?.busy ?? false, form, setForm, begin, stop, sync, open, setOpen,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -258,7 +268,7 @@ export function CaptureBar() {
 
 /** The panel under the header: scenario fields, status, per-capture table, log. Shown when the bar's ▾ is open. */
 export function CaptureDetails() {
-  const { status, busy, form, setForm, fetchError, actionError, open } = useCapture();
+  const { status, busy, form, setForm, fetchError, actionError, open, sync } = useCapture();
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => {
     const el = logRef.current;
@@ -343,6 +353,28 @@ export function CaptureDetails() {
                 label frames on lg after each capture (adds time between captures)
               </label>
             </div>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span>
+                lg sync:{" "}
+                {status?.sync?.running
+                  ? "running…"
+                  : status?.sync?.last_result
+                    ? `${status.sync.last_result}${status.sync.last_at ? ` (${new Date(status.sync.last_at * 1000).toLocaleTimeString()})` : ""}`
+                    : "not run yet"}
+                {status?.sync?.pending != null && status.sync.pending > 0 && (
+                  <> · <b>{status.sync.pending} file{status.sync.pending === 1 ? "" : "s"} not on lg</b></>
+                )}
+              </span>
+              <Button size="sm" variant="outline" className="h-7" onClick={() => void sync()}
+                disabled={busy || status?.sync?.running === true || status?.preflight?.remote_reachable === false}
+                title="upload captures recorded while lg was unreachable, then label them on lg">
+                Sync now
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Captures recorded while lg was away stay on the laptop; a sync runs by itself after each job and when
+              lg comes back, and can be started here.
+            </p>
             <p className="text-xs text-muted-foreground">
               Stop ends the current capture and the rest of the batch: every local process of the run is killed as
               one group, the board's stream is killed and its driver disarmed, and the partial file is removed on the
