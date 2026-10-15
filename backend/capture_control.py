@@ -40,6 +40,7 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_SCRIPT = REPO / "scripts" / "capture_mtk_hourly.sh"
+DEFAULT_SYNC_SCRIPT = REPO / "scripts" / "sync_captures.sh"
 # The script's own default; web-started runs write where cron and the operators' shells always have.
 SHARED_CAPTURE_DIR = Path("/home/cyphy/feitcsi_parser/captures")
 DEFAULT_BOARD = "192.168.50.80"
@@ -166,8 +167,10 @@ class CaptureManager:
     def __init__(self, script: Path | str = DEFAULT_SCRIPT, capture_dir: Path | str | None = None,
                  board: str | None = DEFAULT_BOARD, remote: str | None = DEFAULT_REMOTE,
                  remote_dir: str = DEFAULT_REMOTE_DIR, webcam_dev: str = WEBCAM_DEV,
-                 local_lock: str = LOCAL_LOCK, frame_tmp: str = FRAME_TMP) -> None:
+                 local_lock: str = LOCAL_LOCK, frame_tmp: str = FRAME_TMP,
+                 sync_script: Path | str | None = DEFAULT_SYNC_SCRIPT) -> None:
         self.script = Path(script)
+        self.sync_script = Path(sync_script) if sync_script else None
         if capture_dir is None:
             capture_dir = SHARED_CAPTURE_DIR if SHARED_CAPTURE_DIR.is_dir() else REPO / "captures"
         self.capture_dir = Path(capture_dir)
@@ -191,6 +194,11 @@ class CaptureManager:
         self.log: list[str] = []
         self.preflight = Preflight()
         self._preflight_thread: threading.Thread | None = None
+        # Catch-up upload of captures recorded while lg was unreachable (scripts/sync_captures.sh): run after every
+        # job that had upload on, on request, and once lg comes back after being away; the result is shown.
+        self.sync: dict[str, Any] = {"running": False, "last_at": None, "last_result": None, "pending": None, "error": None}
+        self._sync_thread: threading.Thread | None = None
+        self._remote_was_reachable: bool | None = None
 
     # ------------------------------------------------------------------ public
     def start(self, *, duration_s: int = 60, delay_s: int = 10, count: int = 1, gap_s: int = 0,
@@ -271,6 +279,7 @@ class CaptureManager:
                 "limits": LIMITS,
                 "ping_interval": PING_INTERVAL,
                 "host": HOST,
+                "sync": dict(self.sync),
             }
 
     # ------------------------------------------------------------------ worker
@@ -305,6 +314,8 @@ class CaptureManager:
                 self._proc = None
                 self.countdown_until = None
                 self._thread = None
+            if job.upload:
+                self.start_sync(reason="after the job")
 
     def _countdown(self, seconds: float, state: str) -> bool:
         deadline = time.time() + seconds
@@ -561,6 +572,56 @@ class CaptureManager:
         with self._lock:
             self._note(msg)
 
+    # ------------------------------------------------------------------ catch-up sync
+    def start_sync(self, reason: str = "requested") -> bool:
+        """Run scripts/sync_captures.sh in the background; False when one is already running or there is no script."""
+        if not self.sync_script or not self.sync_script.is_file() or not self.remote:
+            return False
+        with self._lock:
+            if self._sync_thread is not None and self._sync_thread.is_alive():
+                return False
+            self.sync.update({"running": True, "error": None})
+            self._note(f"sync to {self.remote} started ({reason})")
+            self._sync_thread = threading.Thread(target=self._run_sync, name="capture-sync", daemon=True)
+            self._sync_thread.start()
+        return True
+
+    def _sync_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update({"CAPTURE_DIR": str(self.capture_dir), "REMOTE": self.remote or "", "REMOTE_DIR": self.remote_dir})
+        return env
+
+    def _run_sync(self) -> None:
+        try:
+            res = subprocess.run([str(self.sync_script)], capture_output=True, text=True, timeout=1800,
+                                 env=self._sync_env(), cwd=str(self.sync_script.parent.parent))
+            lines = [l for l in (res.stdout + res.stderr).splitlines() if l.strip()]
+            summary = lines[-1] if lines else f"rc={res.returncode}"
+            with self._lock:
+                self.sync.update({"running": False, "last_at": time.time(), "last_result": summary,
+                                  "error": None if res.returncode == 0 else summary})
+                for l in lines[-6:]:
+                    self._note(f"sync: {l}")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            with self._lock:
+                self.sync.update({"running": False, "last_at": time.time(), "last_result": f"failed: {exc}", "error": str(exc)})
+                self._note(f"sync failed: {exc}")
+        self._count_pending()
+
+    def _count_pending(self) -> None:
+        """How many local files lg still lacks (the script's --check), recorded in the status."""
+        if not self.sync_script or not self.sync_script.is_file() or not self.remote:
+            return
+        try:
+            res = subprocess.run([str(self.sync_script), "--check"], capture_output=True, text=True, timeout=120,
+                                 env=self._sync_env())
+            m = [l for l in res.stdout.splitlines() if l.startswith("pending ")]
+            with self._lock:
+                self.sync["pending"] = int(m[-1].split()[1]) if m and res.returncode == 0 else None
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            with self._lock:
+                self.sync["pending"] = None
+
     # ------------------------------------------------------------------ preflight
     def _lock_busy(self) -> bool:
         try:
@@ -646,6 +707,12 @@ class CaptureManager:
             self.preflight = Preflight(checked_at=time.time(), board_reachable=board, link=link, link_detail=why,
                                        board_address=addr, webcam_busy=busy, webcam_holder=holder,
                                        remote_reachable=remote, disk_free_mb=free, capture_lock_busy=self._lock_busy(), checking=False)
+            came_back = remote is True and self._remote_was_reachable is not True
+            self._remote_was_reachable = remote
+            job_running = self._thread is not None and self._thread.is_alive()
+        if came_back and not job_running:
+            # lg reachable again (or for the first time since start): push whatever the offline hours left behind.
+            self.start_sync(reason="lg reachable again")
 
 
 # ---------------------------------------------------------------------- singleton
@@ -670,6 +737,7 @@ def manager() -> CaptureManager:
                 remote=env.get("CAPTURE_REMOTE", DEFAULT_REMOTE) or None,
                 remote_dir=env.get("CAPTURE_REMOTE_DIR", DEFAULT_REMOTE_DIR),
                 local_lock=env.get("CAPTURE_LOCK", LOCAL_LOCK),
+                sync_script=env.get("CAPTURE_SYNC_SCRIPT", str(DEFAULT_SYNC_SCRIPT)) or None,
             )
         return _manager
 

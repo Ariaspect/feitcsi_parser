@@ -2087,6 +2087,40 @@ def capture_stop() -> dict:
     return m.status()
 
 
+@app.post("/api/capture/sync")
+def capture_sync() -> dict:
+    """Push captures recorded while lg was unreachable (scripts/sync_captures.sh) and label them; runs in the background.
+
+    The capture script uploads as it goes and only warns when lg is away, so an offline session leaves files on the
+    laptop that lg never lists. 409 when a sync is already running. Proxied like the other capture calls.
+    """
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/capture/sync")
+    m = capture_control.manager()
+    if not m.start_sync():
+        raise HTTPException(409, "a sync is already running, or no collection host is configured")
+    return m.status()
+
+
+@app.get("/api/capture_conditions")
+def capture_conditions(path: str = Query(..., description="Capture file (absolute, or as /api/captures lists it)")) -> dict:
+    """The recorded conditions of one capture, read fresh from its sidecars.
+
+    The same fields ``/api/captures`` carries per capture (room, scenario, presence, camera_occupancy, ...), but for
+    one file and read now: the listing is fetched once per page load, so a sidecar written when a capture ended --
+    the operator's presence label, the camera verdict -- would otherwise show as absent until the next reload.
+    """
+    p = resolve_capture_path(path)
+    if not p.is_file():
+        raise HTTPException(404, f"File not found: {path}")
+    fd = os.open(str(p.parent), os.O_RDONLY)
+    try:
+        found = _Found(path=p, stat=p.stat(), dir_fd=fd, siblings=frozenset(os.listdir(p.parent)))
+        return _capture_conditions(found)
+    finally:
+        os.close(fd)
+
+
 class _HashedStatic(StaticFiles):
     """Static files with cache headers that match how Vite names them.
 

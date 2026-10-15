@@ -310,3 +310,26 @@ def test_proxy_mode_forwards_to_the_capture_laptop(monkeypatch):
     from backend.app import app as app2
     r = TestClient(app2).get("/api/capture/status")
     assert r.status_code == 503 and "not reachable" in r.json()["detail"]
+
+
+def test_sync_runs_after_a_job_and_on_request(fake, tmp_path):
+    """The catch-up script runs after a job with upload on, on request, and its last line becomes the status."""
+    script, capdir = fake
+    sync = tmp_path / "scripts" / "sync_captures.sh"
+    sync.write_text("#!/usr/bin/env bash\nif [ \"${1:-}\" = --check ]; then echo 'pending 2'; exit 0; fi\n"
+                    "echo \"uploaded 1, failed 0, labelled 0, pending-before 1\"\n")
+    sync.chmod(sync.stat().st_mode | stat.S_IEXEC)
+    m = CaptureManager(script=script, capture_dir=capdir, board=None, remote="lg-fake",
+                       local_lock=str(tmp_path / "lock"), frame_tmp=str(tmp_path / "frames"), sync_script=sync)
+    m.start(duration_s=10, delay_s=0, count=1, upload=True)
+    assert wait_until(lambda: not m.status()["busy"], timeout=25)
+    assert wait_until(lambda: m.status()["sync"]["last_result"] is not None and not m.status()["sync"]["running"], timeout=10)
+    s = m.status()["sync"]
+    assert s["last_result"].startswith("uploaded 1") and s["pending"] == 2 and s["error"] is None
+    assert any("sync to lg-fake started (after the job)" in l for l in m.status()["log"])
+    assert m.start_sync() is True
+    assert wait_until(lambda: not m.status()["sync"]["running"], timeout=10)
+    assert sum("sync to lg-fake started" in l for l in m.status()["log"]) == 2
+    # no remote configured -> nothing to sync, no thread
+    n = CaptureManager(script=script, capture_dir=capdir, board=None, remote=None, local_lock=str(tmp_path / "lock2"), sync_script=sync)
+    assert n.start_sync() is False and n.status()["sync"]["last_result"] is None
