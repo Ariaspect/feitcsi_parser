@@ -107,9 +107,9 @@ if [ "$SHOW_CRON" = "1" ]; then
 fi
 
 # Stimulus. The board pings its own gateway over wlan0; CSI comes from received
-# frames, so without downlink traffic there is nothing to measure. 20/s yields
-# ~19.2 groups/s.
-PING_INTERVAL=${PING_INTERVAL:-0.05}
+# frames, so without downlink traffic there is nothing to measure. 50/s yields
+# ~43-44 groups/s, the rate the dataset is collected at (0.05 gave ~19/s).
+PING_INTERVAL=${PING_INTERVAL:-0.02}
 
 # Measured per 10min segment: 43.5 MB of CSI at 4.8 MB/min, plus a 41 MB frame
 # archive (JPEG barely compresses, so the archive is near the frames' raw size).
