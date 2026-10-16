@@ -25,7 +25,7 @@ the laptop (see "Using the controls from lg's web").
 The capture itself is unchanged: `capture_mtk_hourly.sh` does what it does for
 cron and for the shell. The web only runs it, with three differences:
 
-* `PING_INTERVAL=0.02`, fixed (the script's own default is 0.05);
+* `PING_INTERVAL=0.02`, fixed (also the script's own default since 2026-10-16, so shell runs match);
 * `RETAIN_DAYS=0`: no pruning of local captures. The script's default removes
   local files older than seven days, which is safe only when every capture has
   been uploaded, and offline sessions are exactly when it has not.
