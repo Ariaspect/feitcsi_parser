@@ -1,4 +1,7 @@
-"""What the ML tab draws: AF8's ten features and the series each is read from.
+"""What the ML tab draws: the env1 model's twelve features and the series each is read from.
+
+The verdict is ``backend.af8_env1`` -- AF8's ten features plus the stationary-fan
+switch (gate_dc, X_gate_dc), trained on the 270 env1 captures only.
 
 Server-side only -- the board runs ``backend.af8`` and nothing here. The
 features are ``af8``'s own (``af8.motion_features`` / ``af8.breath_features``
@@ -23,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from backend import af8, farsense, mtk
+from backend import af8, af8_env1, farsense, mtk
 
 # The model reads D(tau) at af8.SHAPE_LAGS only; the other lags are drawn as
 # context, so a reader sees the curve the three points sit on.
@@ -127,6 +130,8 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
         d, fd, L_swing = af8.diff_signal(g, fab, fs)
         run_diff = af8.breath_features(d, fd, fs)["F_run"]
         feats["C3xRun_diff"] = float(np.clip(feats["C3_revisit"], 0.0, 1.0)) * run_diff
+        sw12 = af8_env1.stationary_switch(g, fab, fs, feats["C3_revisit"])
+        feats.update(sw12)
 
         grid_t = (tt[0] - origin) + np.arange(len(g)) / fs     # s from the first frame
 
@@ -170,13 +175,13 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
         rv_at = float(rv_t[int(np.nanargmax(rv_drop))]) if rv_D.size and np.isfinite(rv_drop).any() else None
 
     # --- the model, step by step (af8.probability, spelled out) ----------------
-    x = np.array([feats[f] for f in af8.FEATURES], dtype=float)
+    x = np.array([feats[f] for f in af8_env1.FEATURES], dtype=float)
     imputed = ~np.isfinite(x)
-    x = np.where(imputed, af8.IMPUTER_MEDIAN, x)
-    z = (x - af8.SCALER_MEAN) / af8.SCALER_SCALE
-    contrib = af8.COEF * z
-    logit = float(af8.INTERCEPT + contrib.sum())
-    p = af8.probability(feats)
+    x = np.where(imputed, af8_env1.IMPUTER_MEDIAN, x)
+    z = (x - af8_env1.SCALER_MEAN) / af8_env1.SCALER_SCALE
+    contrib = af8_env1.COEF * z
+    logit = float(af8_env1.INTERCEPT + contrib.sum())
+    p = af8_env1.probability(feats)
 
     good_rpm = rpm[good]
     return {
@@ -188,19 +193,20 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
         "subcarriers": int(g.shape[1]),
         "seconds": round(len(g) / fs, 3),
         "p_person": p,
-        "label": int(p > af8.THRESHOLD),
-        "threshold": af8.THRESHOLD,
-        "features": {f: _num(feats[f]) for f in af8.FEATURES},
+        "label": int(p > af8_env1.THRESHOLD),
+        "threshold": af8_env1.THRESHOLD,
+        "features": {f: _num(feats[f]) for f in af8_env1.FEATURES},
         "model": {
-            "features": list(af8.FEATURES),
+            "name": af8_env1.TRAINED_ON,
+            "features": list(af8_env1.FEATURES),
             "value": _nums(x),
             "imputed": [bool(v) for v in imputed],
-            "mean": _nums(af8.SCALER_MEAN),
-            "scale": _nums(af8.SCALER_SCALE),
-            "coef": _nums(af8.COEF),
+            "mean": _nums(af8_env1.SCALER_MEAN),
+            "scale": _nums(af8_env1.SCALER_SCALE),
+            "coef": _nums(af8_env1.COEF),
             "z": _nums(z),
             "contribution": _nums(contrib),
-            "intercept": float(af8.INTERCEPT),
+            "intercept": float(af8_env1.INTERCEPT),
             "logit": logit,
         },
         "motion": {
@@ -240,5 +246,10 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
             "peak": _nums(sd["peak"]),
             "good": [bool(v) for v in sd["good"]],
             "run": sd["run"],
+        },
+        "fan": {
+            "ev_drift": _num(sw12["ev_drift"]),
+            "r_f_run": _num(sw12["R_F_run"]),
+            "a_p90": _num(feats["A_p90"]),
         },
     }

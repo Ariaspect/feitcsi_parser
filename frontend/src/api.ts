@@ -1387,13 +1387,15 @@ export async function fetchClassifier(
 //  AF8 classifier (/api/af8) -- the ML tab                                    //
 // --------------------------------------------------------------------------- //
 
-/** The ten features, in the order the model's weights expect. */
+/** The env1 model's features, in the order its weights expect (A_g15 is no longer one). */
 export type Af8Feature =
   | "A_slope3" | "A_r025_2" | "A_r5_2" | "A_p90"
-  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd" | "C3_revisit" | "C3xRun_diff";
+  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd" | "C3_revisit" | "C3xRun_diff"
+  | "gate_dc" | "X_gate_dc" | "A_g15";
 
 /** The model's arithmetic for one window, one entry per feature. */
 export interface Af8Model {
+  name: string;               // what the weights were trained on
   features: Af8Feature[];
   value: number[];            // after imputation
   imputed: boolean[];         // true where the feature was missing
@@ -1454,6 +1456,11 @@ export interface Af8 {
     good: boolean[];
     run: { windows: number; t0: number; t1: number } | null;
   };
+  fan: {
+    evDrift: number | null;   // median drift of the leading subcarrier direction, 2 s blocks
+    rFRun: number | null;     // FarSense run with the fan's two directions projected out
+    aP90: number | null;      // A_p90 before the direct path is removed, beside A_g15
+  };
   camera: { time: number[]; present: boolean[]; fraction: number | null } | null;
 }
 
@@ -1478,6 +1485,7 @@ export async function fetchAf8(path: string, window: number, signal?: AbortSigna
     threshold: b.threshold,
     features: b.features,
     model: {
+      name: b.model.name,
       features: b.model.features,
       value: nums(b.model.value),
       imputed: b.model.imputed,
@@ -1523,6 +1531,11 @@ export async function fetchAf8(path: string, window: number, signal?: AbortSigna
       peak: b.diff.peak,
       good: b.diff.good,
       run: b.diff.run,
+    },
+    fan: {
+      evDrift: b.fan.ev_drift,
+      rFRun: b.fan.r_f_run,
+      aP90: b.fan.a_p90,
     },
     camera: b.camera,
   };

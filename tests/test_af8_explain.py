@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from backend import af8, af8_explain
+from backend import af8, af8_env1, af8_explain
 from backend.app import app
 from tests.test_hybrid2 import _capture
 
@@ -22,15 +22,17 @@ def test_a_short_capture_is_one_window_and_a_long_one_is_cut_in_minutes() -> Non
     (1200, 0, (0.0, af8.WINDOW_SECONDS)),   # 60 s at 20 Hz: the one-minute case
     (4000, 1, (60.0, 120.0)),               # 200 s: the second 60 s window
 ])
-def test_the_features_are_af8s_own(tmp_path: Path, n: int, window: int, span) -> None:
+def test_the_features_are_the_models_own(tmp_path: Path, n: int, window: int, span) -> None:
     """The tab must never show a number the model did not see."""
     p = _capture(tmp_path, n=n)
     out = af8_explain.explain(p, window)
-    ref = af8.evaluate(p, *span)
+    ref = af8_env1.evaluate(p, *span)
     assert out["window_s"] == list(span)
     assert out["features"] == ref["features"]
     assert out["p_person"] == ref["p_person"]
     assert out["label"] == ref["label"]
+    ten = af8.evaluate(p, *span)["features"]                 # the first ten are af8's
+    assert {f: out["features"][f] for f in af8.FEATURES} == ten
 
 
 def test_the_series_drawn_give_back_the_features(tmp_path: Path) -> None:
@@ -83,6 +85,6 @@ def test_the_endpoint(tmp_path: Path) -> None:
     assert "NaN" not in res.text
     body = res.json()
     assert body["window"] == 1 and len(body["windows"]) == 3
-    assert set(body["features"]) == set(af8.FEATURES)
+    assert set(body["features"]) == set(af8_env1.FEATURES)
     assert body["camera"] is not None                 # the fixture carries a _cv.json
     assert client.get("/api/af8", params={"path": str(p), "window": 3}).status_code == 400

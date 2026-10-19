@@ -1668,9 +1668,9 @@ def af8_classifier(
 ) -> dict:
     """The AF8 classifier on one window, with every feature and the series behind it.
 
-    See ``backend.af8_explain``. The features and p(person) are ``backend.af8``'s
-    own -- what the board computes -- and the camera, where a capture has one,
-    is reported beside them, never used.
+    See ``backend.af8_explain``. The verdict is ``backend.af8_env1``'s (AF8's ten
+    features plus gate_dc and X_gate_dc, trained on the 270 env1 captures);
+    the camera, where a capture has one, is reported beside it, never used.
     """
     p = resolve_capture_path(path)
     try:

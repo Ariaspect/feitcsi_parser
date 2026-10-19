@@ -6,9 +6,9 @@ import { fetchAf8, type Af8, type Af8Feature } from "./api";
 import { Chart } from "./Chart";
 import { ticks } from "./series";
 
-// The AF8 classifier (backend/af8.py) on one 60 s window: the verdict, how the
-// model weighed each feature, and one panel per feature showing the series it
-// was read from. The numbers are af8's own -- the board computes the same.
+// The env1 model (backend/af8_env1.py: AF8's ten features plus gate_dc and X_gate_dc,
+// trained on the 270 env1 captures) on one 60 s window: the verdict,
+// how the model weighed each feature, and one panel per feature.
 
 const PERSON = "#2f6fed";
 const RED = "#d62728";
@@ -50,6 +50,22 @@ const DESCRIPTION: Record<Af8Feature, string> = {
     "not locked to T, stays. Top: FarSense peaks of r (as F_run). Bottom: the same sweep on d; " +
     "run_diff is its longest run ≥ 0.25 (shaded). Feature = C3 × run_diff, so with no fan (C3 ≈ 0) " +
     "it is ≈ 0. d starts T into the window: there is nothing a period earlier to subtract before that.",
+  gate_dc:
+    "Stationary-fan switch. The leading subcarrier direction of each 2 s block is compared with the " +
+    "next; ev_drift is the median of 1 − |⟨v, v_next⟩|. A fan that stays put shakes one path the same " +
+    "way all minute, so the direction holds (ev_drift ≈ 0.005); noise and people wander (≈ 0.1–0.2). " +
+    "Feature = −log10(ev_drift + 1e-4) × (1 − C3): large when one path shakes steadily, off when C3 " +
+    "says the fan rotates.",
+  X_gate_dc:
+    "Switch × breathing left under a stationary fan. The two directions the fast (1 s high-pass) part " +
+    "shakes along — the blades — are projected out of the whole signal, which also removes the slow " +
+    "fake breathing the blades alias into; FarSense's longest run on the rest is R_F_run. A person on " +
+    "another path keeps breathing there. Feature = gate_dc × R_F_run.",
+  A_g15:
+    "Motion with the direct path removed. Per frame, chain 1 goes to the delay domain (80 MHz: one tap " +
+    "≈ 3.75 m); the strongest tap — the direct AP→TV path — is zeroed within ±1.5 taps and the rest " +
+    "transformed back; then A_p90 of H1_gated / H0. A fan that shakes the direct path drops out; a " +
+    "person seen in the reflections stays. A fan far off the AP–TV line is in the reflections and stays too.",
 };
 
 function fmt(v: number | null | undefined, digits = 4): string {
@@ -113,7 +129,7 @@ export function ML({ path, dark }: MLProps) {
       {error ? (
         <div className="text-muted-foreground p-8 text-sm">No AF8 verdict for this capture — {error}</div>
       ) : !data ? (
-        <ChartBusy busy empty height={150} label="computing the ten features" />
+        <ChartBusy busy empty height={150} label="computing the twelve features" />
       ) : (
         <>
           <Header data={data} win={win} setWin={setWin} busy={busy} />
@@ -126,7 +142,8 @@ export function ML({ path, dark }: MLProps) {
             ))}
           </div>
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            The classifier is <code>backend/af8.py</code> — the code the LG board runs. The window is
+            The classifier is <code>backend/af8_env1.py</code> — AF8's ten features (<code>backend/af8.py</code>,
+            the code the LG board runs) plus gate_dc and X_gate_dc, trained on env1 only. The window is
             what it was trained on: a capture under 90 s is one window, [0, 61) s; a longer one is
             cut into 60 s windows. Frames: the dominant AP, 2×1, full width; every 8th of the live
             subcarriers ({data.subcarriers} here); the CSI ratio r = H1/H0 on an even {data.fsHz.toFixed(1)} Hz
@@ -153,6 +170,7 @@ function Header({ data, win, setWin, busy }: {
       >
         {person ? "PERSON" : "NO PERSON"} · p = {data.pPerson.toFixed(3)}
       </span>
+      <span>model: <b className="text-foreground">{data.model.name}</b></span>
       <span>
         camera:{" "}
         {cam == null
@@ -269,6 +287,27 @@ function FeatureChart({ name, data, width, dark }: {
   if (name === "A_slope3") return <LogLogChart data={data} width={w} dark={dark} />;
   if (name === "C3_revisit") return <RevisitChart data={data} width={w} dark={dark} />;
   if (name === "C3xRun_diff") return <DiffChart data={data} width={w} dark={dark} />;
+  if (name === "gate_dc" || name === "X_gate_dc" || name === "A_g15") {
+    const fan = data.fan;
+    const c3 = data.features.C3_revisit;
+    const rows: [string, string][] =
+      name === "gate_dc"
+        ? [["ev_drift", fmt(fan.evDrift, 3)], ["C3 (clipped)", fmt(c3 == null ? null : Math.min(1, Math.max(0, c3)), 3)],
+           ["gate_dc", fmt(data.features.gate_dc, 3)]]
+        : name === "X_gate_dc"
+          ? [["gate_dc", fmt(data.features.gate_dc, 3)], ["R_F_run (s)", fmt(fan.rFRun, 3)],
+             ["F_run before projection (s)", fmt(data.features.F_run, 3)], ["X_gate_dc", fmt(data.features.X_gate_dc, 3)]]
+          : [["A_p90 (direct path kept)", fmt(fan.aP90, 3)], ["A_g15 (direct path removed)", fmt(data.features.A_g15, 3)]];
+    return (
+      <table className="text-[11px] tabular-nums">
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}><td className="pr-4 text-muted-foreground">{k}</td><td className="text-foreground">{v}</td></tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
 
   if (name === "A_r025_2" || name === "A_r5_2") {
     const pair = name === "A_r025_2" ? ["0.25", "2"] : ["5", "2"];
