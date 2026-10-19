@@ -6,8 +6,8 @@ import { fetchAf8, type Af8, type Af8Feature } from "./api";
 import { Chart } from "./Chart";
 import { ticks } from "./series";
 
-// The env1 model (backend/af8_env1.py: AF8's ten features plus gate_dc and X_gate_dc,
-// trained on the 270 env1 captures) on one 60 s window: the verdict,
+// The 12B model (backend/af8_env1.py: AF8's ten features plus gate_dc and X_gate_dc,
+// trained on env1 + env2 with SNR-augmented copies) on one 60 s window: the verdict,
 // how the model weighed each feature, and one panel per feature.
 
 const PERSON = "#2f6fed";
@@ -143,7 +143,7 @@ export function ML({ path, dark }: MLProps) {
           </div>
           <p className="text-[11px] text-muted-foreground leading-relaxed">
             The classifier is <code>backend/af8_env1.py</code> — AF8's ten features (<code>backend/af8.py</code>,
-            the code the LG board runs) plus gate_dc and X_gate_dc, trained on env1 only. The window is
+            the code the LG board runs) plus gate_dc and X_gate_dc, trained on env1 + env2 with SNR-augmented copies. The window is
             what it was trained on: a capture under 90 s is one window, [0, 61) s; a longer one is
             cut into 60 s windows. Frames: the dominant AP, 2×1, full width; every 8th of the live
             subcarriers ({data.subcarriers} here); the CSI ratio r = H1/H0 on an even {data.fsHz.toFixed(1)} Hz

@@ -1,9 +1,11 @@
-"""The env1 model: AF8's ten features plus the stationary-fan switch (12B).
+"""The 12B model: AF8's ten features plus the stationary-fan switch.
 
     python3 -m backend.af8_env1 CAPTURE.bin [--json]
 
-Trained on the 270 selected one-minute captures of the 10/12-10/14 room
-("env1") only -- not on the 1151 windows of ``backend.af8``'s model. The ten
+Trained on the user's GT selection of one-minute captures from both rooms --
+env1 (10/12-10/14, 270) and env2 (260) -- plus two SNR-augmented copies of
+each (see the end of this docstring); not on the 1151 windows of
+``backend.af8``'s model. (The module keeps its first name, env1.) The ten
 features are ``af8``'s own; two are added (12B):
 
 * ``gate_dc`` (#11) -- the stationary-fan switch. The leading subcarrier
@@ -31,7 +33,23 @@ person), and a fan shaking a reflection reads like a person. Per
 
 The window, grid and every setting are ``af8``'s; the weights below are the
 same pipeline (median impute, standardise, logistic, class-balanced) fitted on
-the 270 env1 captures with these twelve features.
+the 530 selected captures with these twelve features, each capture three times:
+
+* as captured;
+* two "farther" copies. On the resampled grid ``g`` the change around each
+  subcarrier's mean is scaled by ``a`` (0.6, 0.35) and fresh white noise at
+  the capture's own level (from its 1-sample difference) refills the rest, so
+  the noise floor stays put: a person or object farther from the link moves
+  the channel less, the receiver noise does not. The copies' ten af8
+  features are recomputed; ``gate_dc`` and ``X_gate_dc`` are the original
+  capture's, because white noise is not the receiver's (its timing jitter is
+  common to all subcarriers) and recomputing them broke the stationary-fan
+  switch (env1 static fan, leave-one-session-out, 45 -> 10 %). Only the same
+  capture's information is used.
+
+On env1 alone (train and test env1, leave-one-session-out) the augmentation
+moved KPI#2 70.0 -> 71.9; on copies at a = 0.35 the model holds 74 % against
+58 % without it, and the 10/19 far small movements went 3/8 -> 5/8.
 """
 
 from __future__ import annotations
@@ -50,14 +68,15 @@ from backend import af8, framediff, mtk
 
 FEATURES = af8.FEATURES + ("gate_dc", "X_gate_dc")
 
-# Fitted on the 270 env1 captures (2026-10-19), FEATURES order.
-IMPUTER_MEDIAN = np.array([0.103448, 0.79268, 1.08001, 0.0371857, 0.342179, 0.122804, 2, 2.50774, 0.0645865, 0.0934715, 0.798856, 1.11255])
-SCALER_MEAN = np.array([0.139411, 0.75968, 1.11563, 0.043426, 0.342243, 0.12414, 3.13333, 2.6206, 0.140114, 0.363661, 0.935901, 3.89171])
-SCALER_SCALE = np.array([0.116144, 0.185376, 0.11519, 0.0313867, 0.0841514, 0.0598485, 4.67111, 1.44338, 0.168289, 0.766029, 0.558727, 8.1281])
-COEF = np.array([0.441315, -1.8264, 0.121828, 0.183886, 0.0969837, 0.969859, -0.0783441, 0.0329412, -2.19223, 0.942492, -0.580191, 1.88131])
-INTERCEPT = 0.63885
+# Fitted on env1 270 + env2 260 (user's GT selection) x {original, a=0.6, a=0.35}
+# (2026-10-19), FEATURES order.
+IMPUTER_MEDIAN = np.array([0.0645842, 0.871246, 1.05091, 0.0242607, 0.32004, 0.114291, 1, 1.81537, 0.0449383, 0.0482942, 0.888664, 1.10207])
+SCALER_MEAN = np.array([0.105382, 0.819076, 1.09548, 0.0423376, 0.328244, 0.128712, 3.76415, 2.04394, 0.123209, 0.249725, 1.08318, 7.40922])
+SCALER_SCALE = np.array([0.108161, 0.177403, 0.114489, 0.0530163, 0.0924005, 0.0782143, 6.80596, 1.28134, 0.171773, 0.620005, 0.714522, 17.1996])
+COEF = np.array([-0.329558, -3.5474, 0.72351, 0.422936, 0.239057, 1.35927, -0.0304757, -0.146206, -3.08036, 0.375433, -0.740362, 3.95794])
+INTERCEPT = 1.89452
 THRESHOLD = af8.THRESHOLD
-TRAINED_ON = "env1: 270 one-minute captures of 10/12-10/14"
+TRAINED_ON = "env1 270 + env2 260, SNR-augmented (gate features from the original)"
 
 DRIFT_BLOCK = 2.0         # seconds; ev_drift compares the leading eigenvector of consecutive blocks
 DRIFT_FLOOR = 1e-4        # keeps -log10 finite when ev_drift is 0

@@ -1,7 +1,7 @@
-"""What the ML tab draws: the env1 model's twelve features and the series each is read from.
+"""What the ML tab draws: the 12B model's twelve features and the series each is read from.
 
 The verdict is ``backend.af8_env1`` -- AF8's ten features plus the stationary-fan
-switch (gate_dc, X_gate_dc), trained on the 270 env1 captures only.
+switch (gate_dc, X_gate_dc), trained on env1 + env2 with SNR-augmented copies.
 
 Server-side only -- the board runs ``backend.af8`` and nothing here. The
 features are ``af8``'s own (``af8.motion_features`` / ``af8.breath_features``
