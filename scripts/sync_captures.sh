@@ -43,7 +43,7 @@ stems=$(find "$CAPTURE_DIR" -maxdepth 1 -name '????????_??????.bin' -mtime -"$DA
 days=$(printf '%s\n' "$stems" | cut -c1-8 | sort -u)
 
 # One round trip: everything lg has for those days.
-remote=$(ssh "${SSH_OPTS[@]}" "$REMOTE" "for d in $(printf '%s ' $days); do ls '$REMOTE_DIR'/\$d 2>/dev/null; done") \
+remote=$(ssh "${SSH_OPTS[@]}" "$REMOTE" "for d in $(printf '%s ' $days); do ls '$REMOTE_DIR'/\$d 2>/dev/null; done; true") \
     || { echo "lg not reachable" >&2; exit 1; }
 # A here-string, not a pipe: under pipefail, grep -q closing the pipe early
 # would fail the pipeline and report every file as missing.
