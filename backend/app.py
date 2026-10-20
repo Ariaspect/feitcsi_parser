@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from typing import NamedTuple
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -89,6 +91,9 @@ app.add_middleware(
         "X-Doppler-ScaleMax",
     ],
 )
+# The bundle (550 kB) and the capture listing (350 kB of JSON) shrink to a
+# fifth or less; the page is often opened over a slow remote link.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 ROOTS_ENV_VAR = "FEITCSI_CAPTURE_ROOTS"
@@ -1871,7 +1876,7 @@ class _Found(NamedTuple):
     path: Path                  # spelled under the root the walk started from
     stat: os.stat_result
     dir_fd: int                 # the capture's directory; valid only until the walk resumes
-    siblings: frozenset[str]    # every name in that directory
+    siblings: Mapping[str, os.DirEntry | None]  # every name in that directory
 
 
 def _scan_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[_Found]:
@@ -1909,7 +1914,21 @@ def _scan_dir(fd: int, path: Path, real: Path, depth: int,
             entries = sorted(os.scandir(fd), key=lambda e: e.name)
         except OSError:
             return
-        siblings = frozenset(e.name for e in entries)
+        siblings = {e.name: e for e in entries}
+        # A capture's own artifacts sit beside it in folders named after it
+        # (``<stem>_cv_annotated`` holds the camera frames). They never hold a
+        # capture, and on lg there are over a thousand of them: opening and
+        # listing each one was half of the 3.9 s the listing took.
+        stems = [PurePath(n).stem + "_" for n in siblings
+                 if PurePath(n).suffix in CAPTURE_SUFFIXES]
+        # Every stat the listing will need -- the captures' and their JSON
+        # sidecars' -- issued together. Each is a ~0.4 ms round trip on the 9p
+        # mount and they were the whole remaining cost done one by one; a
+        # DirEntry keeps its stat, so the later calls below are free.
+        wanted = [e for e in entries
+                  if PurePath(e.name).suffix in CAPTURE_SUFFIXES + (".json",)]
+        if len(wanted) > 8:
+            list(_STAT_POOL.map(_stat_quietly, wanted))
         for entry in entries:
             try:
                 is_dir = entry.is_dir()  # follows symlinks; False if broken
@@ -1917,6 +1936,8 @@ def _scan_dir(fd: int, path: Path, real: Path, depth: int,
             except OSError:
                 continue
             if is_dir:
+                if not is_link and any(entry.name.startswith(s) for s in stems):
+                    continue
                 # A plain subdirectory's real path is its parent's plus its
                 # name; only a symlink needs resolving.
                 sub_real = (real / entry.name).resolve() if is_link else real / entry.name
@@ -1940,6 +1961,16 @@ def _scan_dir(fd: int, path: Path, real: Path, depth: int,
         os.close(fd)
 
 
+_STAT_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="capture-stat")
+
+
+def _stat_quietly(entry: os.DirEntry) -> None:
+    try:
+        entry.stat()
+    except OSError:
+        pass
+
+
 def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
     """The paths :func:`_scan_captures` finds, for callers that need no more."""
     for found in _scan_captures(root, depth, seen):
@@ -1952,17 +1983,36 @@ def _sidecar_json(found: _Found, suffix: str) -> dict | None:
     Presence is read off the directory listing the walk already made and the
     file is opened through the walk's descriptor, so neither costs a path
     lookup.
+
+    Parsed sidecars are kept in memory keyed by their size and mtime: a stat
+    costs a third of an open + read + close on lg's 9p mount, and sidecars
+    rarely change, so a repeat listing re-reads only the ones that did.
     """
     name = f"{found.path.stem}{suffix}"
     if name not in found.siblings:
         return None
+    entry = found.siblings[name]
+    try:
+        st = entry.stat() if entry is not None else os.stat(name, dir_fd=found.dir_fd)
+    except OSError:
+        return None
+    key = (str(found.path.parent / name), st.st_size, st.st_mtime_ns)
+    hit = _SIDECAR_CACHE.get(key[0])
+    if hit is not None and hit[0] == key:
+        return hit[1]
     try:
         fd = os.open(name, os.O_RDONLY, dir_fd=found.dir_fd)
         with os.fdopen(fd, "rb") as fh:
             obj = json.loads(fh.read())
     except (OSError, ValueError):
         return None
-    return obj if isinstance(obj, dict) else None
+    obj = obj if isinstance(obj, dict) else None
+    _SIDECAR_CACHE[key[0]] = (key, obj)
+    return obj
+
+
+# path -> ((path, size, mtime_ns), parsed sidecar); see _sidecar_json.
+_SIDECAR_CACHE: dict[str, tuple[tuple[str, int, int], dict | None]] = {}
 
 
 def _capture_conditions(found: _Found) -> dict:
@@ -2040,6 +2090,13 @@ def list_captures() -> list[dict]:
 
     files.sort(key=lambda f: f["mtime"], reverse=True)
     return files
+
+
+@app.on_event("startup")
+def _warm_capture_listing() -> None:
+    """Read every sidecar once in the background, so the first page load after
+    a restart gets the cached listing (0.4 s) instead of the cold one (2.5 s)."""
+    _STAT_POOL.submit(list_captures)
 
 
 class CaptureStart(BaseModel):
@@ -2145,7 +2202,7 @@ def capture_conditions(path: str = Query(..., description="Capture file (absolut
         raise HTTPException(404, f"File not found: {path}")
     fd = os.open(str(p.parent), os.O_RDONLY)
     try:
-        found = _Found(path=p, stat=p.stat(), dir_fd=fd, siblings=frozenset(os.listdir(p.parent)))
+        found = _Found(path=p, stat=p.stat(), dir_fd=fd, siblings=dict.fromkeys(os.listdir(p.parent)))
         return _capture_conditions(found)
     finally:
         os.close(fd)

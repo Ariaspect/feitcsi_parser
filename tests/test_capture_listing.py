@@ -115,3 +115,25 @@ def test_conditions_of_one_capture_are_read_fresh(day: Path) -> None:
     again = client.get("/api/capture_conditions", params={"path": path}).json()
     assert again["presence"] == "occupied" and again["camera_occupancy"] == 0.0   # new sidecar seen without a reload
     assert client.get("/api/capture_conditions", params={"path": str(day / "nope.bin")}).status_code == 404
+
+
+def test_a_rewritten_sidecar_is_read_again_not_served_from_the_cache(day: Path) -> None:
+    import os
+    _capture(day, "a", meta={"scenario": "seated"})
+    assert _listing()["a"]["scenario"] == "seated"
+    meta = day / "a_meta.json"
+    meta.write_text(json.dumps({"scenario": "standing"}))
+    st = meta.stat()
+    os.utime(meta, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    assert _listing()["a"]["scenario"] == "standing"
+
+
+def test_a_capture_s_own_folders_are_not_walked_but_other_folders_are(day: Path) -> None:
+    _capture(day, "a")
+    frames = day / "a_cv_annotated"
+    frames.mkdir()
+    (frames / "stray.bin").write_bytes(b"\x01" * 16)   # never a capture in there
+    other = day / "batch2"
+    other.mkdir()
+    _capture(other, "b")
+    assert sorted(_listing()) == ["a", "b"]
