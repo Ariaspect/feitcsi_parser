@@ -656,6 +656,11 @@ export function App() {
                       GT: {cap.presence === "occupied" ? "person" : "empty"}
                     </Badge>
                   )}
+                  {cap.recorded && (
+                    <Badge variant="outline" title={`what was captured -- ${cap.recorded_source ?? ""}`}>
+                      {cap.recorded}
+                    </Badge>
+                  )}
                   {cap.camera_occupancy !== undefined && (
                     <Badge variant="outline" title="fraction of webcam frames with a person">
                       camera: {Math.round(cap.camera_occupancy * 100)}% occupied

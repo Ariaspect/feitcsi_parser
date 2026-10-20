@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 from collections.abc import Iterator, Mapping
@@ -2015,6 +2016,60 @@ def _sidecar_json(found: _Found, suffix: str) -> dict | None:
 _SIDECAR_CACHE: dict[str, tuple[tuple[str, int, int], dict | None]] = {}
 
 
+GT_TABLES_CSV = Path(__file__).resolve().parent.parent / "data" / "gt_tables.csv"
+
+# The user's condition names in the GT tables, as a viewer reads them.
+_GT_WORDS = {
+    "empty": "empty room", "small move": "small move", "large move": "large move",
+    "still": "still (breathing)", "standing/walking": "standing / walking",
+    "static fan": "static fan only", "rot fan": "rotating fan only",
+    "vacuum": "robot vacuum only",
+}
+_GT_THINGS = {"static fan": "static fan", "rot fan": "rotating fan", "vacuum": "robot vacuum"}
+_GT_PEOPLE = {"still": "still (breathing)", "small": "small move"}
+
+
+def _gt_words(cond: str) -> str:
+    """'rot fan + small' -> 'small move + rotating fan': the person first."""
+    if " + " in cond:
+        thing, person = cond.split(" + ", 1)
+        return f"{_GT_PEOPLE.get(person, person)} + {_GT_THINGS.get(thing, thing)}"
+    return _GT_WORDS.get(cond, cond)
+
+
+_GT_TABLE: tuple[int, dict[str, dict]] | None = None
+
+
+def _gt_table() -> dict[str, dict]:
+    """stem -> its row of data/gt_tables.csv, re-read when the file changes."""
+    global _GT_TABLE
+    try:
+        mtime = GT_TABLES_CSV.stat().st_mtime_ns
+    except OSError:
+        return {}
+    if _GT_TABLE is None or _GT_TABLE[0] != mtime:
+        with GT_TABLES_CSV.open(newline="") as fh:
+            _GT_TABLE = (mtime, {r["stem"]: r for r in csv.DictReader(fh)})
+    return _GT_TABLE[1]
+
+
+def _recorded(stem: str, meta_scenario: object) -> dict:
+    """What the capture was taken of, in a few words, and who says so.
+
+    The user's GT tables first (data/gt_tables.csv, sessions by start time);
+    otherwise the scenario the operator typed when capturing. Never the
+    camera's guess -- that has its own badge.
+    """
+    row = _gt_table().get(stem)
+    if row:
+        return {"recorded": _gt_words(row["cond"]),
+                "recorded_source": f"GT table {row['env']}, session {row['session']}"}
+    if isinstance(meta_scenario, str) and meta_scenario.strip():
+        return {"recorded": meta_scenario.strip(),
+                "recorded_source": "operator, at capture time"}
+    return {}
+
+
 def _capture_conditions(found: _Found) -> dict:
     """room/configuration/scenario for a capture, as far as they are recorded.
 
@@ -2029,6 +2084,7 @@ def _capture_conditions(found: _Found) -> dict:
                 "activity", "facing", "distance_m"):
         if meta.get(key) not in (None, ""):
             out[key] = meta[key]
+    out.update(_recorded(found.path.stem, meta.get("scenario")))
     # The operator's own ground truth from the capture bar (sessions without a
     # webcam): "occupied" / "empty", never guessed, with where it came from.
     if meta.get("presence") in ("occupied", "empty"):

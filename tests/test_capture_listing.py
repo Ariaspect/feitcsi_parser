@@ -137,3 +137,24 @@ def test_a_capture_s_own_folders_are_not_walked_but_other_folders_are(day: Path)
     other.mkdir()
     _capture(other, "b")
     assert sorted(_listing()) == ["a", "b"]
+
+
+def test_what_was_captured_comes_from_the_gt_table_then_the_operator(
+        day: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import backend.app as app_mod
+    table = tmp_path / "gt_tables.csv"
+    table.write_text("env,cond,y,stem,date,session,train,dur\n"
+                     "env1,rot fan + small,1,a,1012,1012 21:16-21:47,True,\n"
+                     "env1,static fan,0,b,1012,1012 22:08-22:28,True,\n")
+    monkeypatch.setattr(app_mod, "GT_TABLES_CSV", table)
+    _capture(day, "a", meta={"scenario": "typed at capture"})
+    _capture(day, "b")
+    _capture(day, "c", meta={"scenario": "fan mov / small mov"})
+    _capture(day, "d", cv={"summary": {"fraction_occupied": 0.9}})
+    got = _listing()
+    assert got["a"]["recorded"] == "small move + rotating fan"      # table wins
+    assert "1012 21:16-21:47" in got["a"]["recorded_source"]
+    assert got["b"]["recorded"] == "static fan only"
+    assert got["c"]["recorded"] == "fan mov / small mov"
+    assert got["c"]["recorded_source"].startswith("operator")
+    assert "recorded" not in got["d"]                                # never the camera's guess

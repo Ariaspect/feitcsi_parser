@@ -40,6 +40,11 @@ export interface CaptureFile {
   presence_source?: string;
   /** Fraction of camera frames with a person, whenever a camera sidecar exists. */
   camera_occupancy?: number;
+  /** What the capture was taken of, in a few words ("small move + rotating
+   *  fan"): the user's GT table, else the scenario typed at capture time.
+   *  `recorded_source` says which. */
+  recorded?: string;
+  recorded_source?: string;
 }
 
 export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {
