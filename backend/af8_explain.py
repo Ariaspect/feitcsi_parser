@@ -1,7 +1,7 @@
-"""What the ML tab draws: the 12B model's twelve features and the series each is read from.
+"""What the ML tab draws: the 11-feature model's features and the series each is read from.
 
 The verdict is ``backend.af8_env1`` -- AF8's ten features plus the stationary-fan
-switch (gate_dc, X_gate_dc), trained on env1 + env2 with SNR-augmented copies.
+switch X_gate_dc (gate_dc x residual breathing), trained on env1 + env2 with SNR-augmented copies.
 
 Server-side only -- the board runs ``backend.af8`` and nothing here. The
 features are ``af8``'s own (``af8.motion_features`` / ``af8.breath_features``
@@ -195,7 +195,7 @@ def explain(path: str | Path, window: int = 0) -> dict[str, Any]:
         "p_person": p,
         "label": int(p > af8_env1.THRESHOLD),
         "threshold": af8_env1.THRESHOLD,
-        "features": {f: _num(feats[f]) for f in af8_env1.FEATURES},
+        "features": {f: _num(feats[f]) for f in af8_env1.FEATURES + ("gate_dc",)},
         "model": {
             "name": af8_env1.TRAINED_ON,
             "features": list(af8_env1.FEATURES),

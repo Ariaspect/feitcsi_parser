@@ -1,4 +1,4 @@
-"""The 12B model: AF8's ten features plus the stationary-fan switch.
+"""The 11-feature model: AF8's ten features plus X_gate_dc (the stationary-fan switch times residual breathing).
 
     python3 -m backend.af8_env1 CAPTURE.bin [--json]
 
@@ -6,16 +6,17 @@ Trained on the user's GT selection of one-minute captures from both rooms --
 env1 (10/12-10/14, 270) and env2 (260) -- plus two SNR-augmented copies of
 each (see the end of this docstring); not on the 1151 windows of
 ``backend.af8``'s model. (The module keeps its first name, env1.) The ten
-features are ``af8``'s own; two are added (12B):
+features are ``af8``'s own; one is added, ``X_gate_dc`` (#11), built from two parts:
 
-* ``gate_dc`` (#11) -- the stationary-fan switch. The leading subcarrier
+* ``gate_dc`` -- the stationary-fan switch (computed, NOT a model input since
+  2026-10-21: dropping it alone left accuracy the same or higher). The leading subcarrier
   eigenvector of each 2 s block (detrended) is compared with the next one;
   ``ev_drift`` is the median of ``1 - |<v_i, v_i+1>|``. A fan that stays put
   shakes one path the same way all minute, so its direction holds
   (ev_drift ~ 0.005); noise and people wander (~0.1-0.2).
   ``gate_dc = -log10(ev_drift + 1e-4) * (1 - clip(C3, 0, 1))``: large when
   one path shakes steadily, switched off when C3 says the fan rotates.
-* ``X_gate_dc`` (#12) -- the switch times ``R_F_run``: the FarSense run on
+* ``X_gate_dc`` (#11) -- the switch times ``R_F_run``: the FarSense run on
   the grid with the fan's subspace projected out. The subspace is the top two
   eigendirections of the 1 s high-pass (the blades' fast part); removing them
   from the whole signal removes the slow fake breathing the blades alias
@@ -33,7 +34,7 @@ person), and a fan shaking a reflection reads like a person. Per
 
 The window, grid and every setting are ``af8``'s; the weights below are the
 same pipeline (median impute, standardise, logistic, class-balanced) fitted on
-the 530 selected captures with these twelve features, each capture three times:
+the 530 selected captures with these eleven features, each capture three times:
 
 * as captured;
 * two "farther" copies. On the resampled grid ``g`` the change around each
@@ -41,7 +42,7 @@ the 530 selected captures with these twelve features, each capture three times:
   the capture's own level (from its 1-sample difference) refills the rest, so
   the noise floor stays put: a person or object farther from the link moves
   the channel less, the receiver noise does not. The copies' ten af8
-  features are recomputed; ``gate_dc`` and ``X_gate_dc`` are the original
+  features are recomputed; ``X_gate_dc`` is the original
   capture's, because white noise is not the receiver's (its timing jitter is
   common to all subcarriers) and recomputing them broke the stationary-fan
   switch (env1 static fan, leave-one-session-out, 45 -> 10 %). Only the same
@@ -66,17 +67,17 @@ import numpy as np
 
 from backend import af8, framediff, mtk
 
-FEATURES = af8.FEATURES + ("gate_dc", "X_gate_dc")
+FEATURES = af8.FEATURES + ("X_gate_dc",)
 
 # Fitted on env1 270 + env2 260 (user's GT selection) x {original, a=0.6, a=0.35}
-# (2026-10-19), FEATURES order.
-IMPUTER_MEDIAN = np.array([0.0645842, 0.871246, 1.05091, 0.0242607, 0.32004, 0.114291, 1, 1.81537, 0.0449383, 0.0482942, 0.888664, 1.10207])
-SCALER_MEAN = np.array([0.105382, 0.819076, 1.09548, 0.0423376, 0.328244, 0.128712, 3.76415, 2.04394, 0.123209, 0.249725, 1.08318, 7.40922])
-SCALER_SCALE = np.array([0.108161, 0.177403, 0.114489, 0.0530163, 0.0924005, 0.0782143, 6.80596, 1.28134, 0.171773, 0.620005, 0.714522, 17.1996])
-COEF = np.array([-0.329558, -3.5474, 0.72351, 0.422936, 0.239057, 1.35927, -0.0304757, -0.146206, -3.08036, 0.375433, -0.740362, 3.95794])
-INTERCEPT = 1.89452
+# (2026-10-21, 11 features: gate_dc dropped), FEATURES order.
+IMPUTER_MEDIAN = np.array([0.0645842, 0.871246, 1.05091, 0.0242607, 0.32004, 0.114291, 1, 1.81537, 0.0449383, 0.0482942, 1.10207])
+SCALER_MEAN = np.array([0.105382, 0.819076, 1.09548, 0.0423376, 0.328244, 0.128712, 3.76415, 2.04394, 0.123209, 0.249725, 7.40922])
+SCALER_SCALE = np.array([0.108161, 0.177403, 0.114489, 0.0530163, 0.0924005, 0.0782143, 6.80596, 1.28134, 0.171773, 0.620005, 17.1996])
+COEF = np.array([-0.170463, -3.71581, 0.645044, 0.256662, 0.226932, 1.2454, -0.106985, -0.190893, -2.99984, 0.361517, 2.93606])
+INTERCEPT = 1.64562
 THRESHOLD = af8.THRESHOLD
-TRAINED_ON = "env1 270 + env2 260, SNR-augmented (gate features from the original)"
+TRAINED_ON = "env1 270 + env2 260, SNR-augmented (X_gate_dc from the original), 11 features"
 
 DRIFT_BLOCK = 2.0         # seconds; ev_drift compares the leading eigenvector of consecutive blocks
 DRIFT_FLOOR = 1e-4        # keeps -log10 finite when ev_drift is 0
@@ -161,7 +162,7 @@ def probability(features: dict[str, float]) -> float:
 
 
 def features(path: str | Path, t0: float = 0.0, t1: float = af8.WINDOW_SECONDS, gated: bool = False) -> dict[str, Any]:
-    """The twelve features of one window, plus what they are built from; ``gated`` also adds A_g15 (not a model input)."""
+    """The eleven model features of one window (and gate_dc), plus what they are built from; ``gated`` also adds A_g15 (not a model input)."""
     path = Path(path)
     index = mtk.MTKIndex(path)
     with warnings.catch_warnings():
@@ -188,6 +189,7 @@ def evaluate(path: str | Path, t0: float = 0.0, t1: float = af8.WINDOW_SECONDS) 
     p = probability(f)
     return {"file": Path(path).name, "label": int(p > THRESHOLD), "p_person": p,
             "features": {k: (None if not np.isfinite(f[k]) else float(f[k])) for k in FEATURES},
+            "gate_dc": f["gate_dc"],
             "ev_drift": f["ev_drift"], "R_F_run": f["R_F_run"],
             "elapsed_s": round(time.perf_counter() - start, 3)}
 
