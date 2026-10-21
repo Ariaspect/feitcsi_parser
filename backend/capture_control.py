@@ -339,6 +339,8 @@ class CaptureManager:
             "UPLOAD": "1" if job.upload else "0",
             "LIVE": "1" if job.upload else "0",
             "CV": "1" if job.label else "0",
+            # Upload + labelling in the background so the next capture of a batch need not wait ~30 s for them.
+            "POST_ASYNC": "1",
             "RETAIN_DAYS": "0",
             "PING_INTERVAL": f"{PING_INTERVAL:g}",
         })

@@ -36,6 +36,14 @@ for a in "$@"; do
     esac
 done
 
+# A capture's own upload and labelling may still be running in the background
+# (capture_mtk_hourly.sh POST_ASYNC=1, holding POST_LOCK shared). Wait for them,
+# or this would send the same files a second time and label twice.
+if [ "$check" = 0 ]; then
+    exec 8>"${POST_LOCK:-/tmp/mtk-post.lock}"
+    flock -w 900 8 || echo "background uploads still running after 900 s, syncing anyway" >&2
+fi
+
 # Local stems of the last DAYS days: the flat layout the capture script writes.
 stems=$(find "$CAPTURE_DIR" -maxdepth 1 -name '????????_??????.bin' -mtime -"$DAYS" -printf '%f\n' 2>/dev/null \
         | sed 's/\.bin$//' | sort)
