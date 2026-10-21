@@ -129,6 +129,17 @@ MIN_FREE_MB=${MIN_FREE_MB:-3000}
 REMOTE=${REMOTE:-lg}
 REMOTE_DIR=${REMOTE_DIR:-/home/lg_csi/lg_csi_captures}
 UPLOAD=${UPLOAD:-1}
+# POST_ASYNC=1 (default; 0 = the old inline order): once the capture and its
+# frame archive are on disk, the upload and the labelling below go to a
+# background child and this script exits, so the next capture of a batch
+# starts ~30 s sooner. The radio concern above does not apply to it: the frame
+# archive is ~4 MB, the .bin is a remote mv of the live copy (which already
+# streams during every capture over wlo1, far from the board's channel), and
+# labelling runs on lg's GPU. The child holds POST_LOCK shared;
+# scripts/sync_captures.sh waits for it exclusively, so the catch-up sync never
+# races a still-running upload.
+POST_ASYNC=${POST_ASYNC:-1}
+POST_LOCK=${POST_LOCK:-/tmp/mtk-post.lock}
 
 # ------------------------------------------------------------------- live ---
 # Stream the capture to the collection host while it is still being written, so
@@ -940,62 +951,78 @@ fi
 # Date directory from the segment's own stamp, not from today's date: a segment
 # that starts at 23:59 and is uploaded after midnight belongs with the day it
 # recorded, not the day it finished.
-if [ "$UPLOAD" = "1" ]; then
-    day=${STAMP%%_*}
-    dest=$REMOTE_DIR/$day
-    if ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p '$dest'" 2>>"$LOG"; then
-        # The live copy is already the whole file. Promote it with a remote
-        # mv rather than sending the same 45 MB a second time; fall through to
-        # scp if it is short or missing.
-        if [ "$live_ok" = 1 ]; then
-            lsz=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
-            if ssh "${SSH_OPTS[@]}" "$REMOTE" \
-                 "[ \"\$(stat -c %s '$LIVE_PATH' 2>/dev/null || echo 0)\" = '$lsz' ] \
-                  && mv -f '$LIVE_PATH' '$dest/'" 2>>"$LOG"; then
-                log "UPLOAD $(basename "$OUT") -> $REMOTE:$dest/ (promoted live copy)"
-                promoted=1
+# plog tags lines from the background child "POST" so the web, already
+# following the next capture, does not read them as this one finishing.
+plog() { if [ "$POST_ASYNC" = "1" ]; then log "POST  $*"; else log "$*"; fi; }
+
+post_upload() {
+    if [ "$UPLOAD" = "1" ]; then
+        day=${STAMP%%_*}
+        dest=$REMOTE_DIR/$day
+        if ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p '$dest'" 2>>"$LOG"; then
+            # The live copy is already the whole file. Promote it with a remote
+            # mv rather than sending the same 45 MB a second time; fall through to
+            # scp if it is short or missing.
+            if [ "$live_ok" = 1 ]; then
+                lsz=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
+                if ssh "${SSH_OPTS[@]}" "$REMOTE" \
+                     "[ \"\$(stat -c %s '$LIVE_PATH' 2>/dev/null || echo 0)\" = '$lsz' ] \
+                      && mv -f '$LIVE_PATH' '$dest/'" 2>>"$LOG"; then
+                    plog "UPLOAD $(basename "$OUT") -> $REMOTE:$dest/ (promoted live copy)"
+                    promoted=1
+                else
+                    plog "WARN  live copy incomplete, falling back to scp"
+                    promoted=0
+                fi
             else
-                log "WARN  live copy incomplete, falling back to scp"
                 promoted=0
             fi
+
+            for f in "$OUT" "$ARCHIVE"; do
+                [ -f "$f" ] || continue
+                [ "$f" = "$OUT" ] && [ "$promoted" = 1 ] && continue
+                if scp -o BatchMode=yes -o LogLevel=ERROR -q "$f" "$REMOTE:$dest/" 2>>"$LOG"; then
+                    plog "UPLOAD $(basename "$f") -> $REMOTE:$dest/"
+                else
+                    # Left on disk deliberately. Retention prunes by age, so a
+                    # failed upload survives days of retries rather than being
+                    # lost at the end of this run.
+                    plog "WARN  upload of $(basename "$f") failed, kept locally"
+                fi
+            done
         else
-            promoted=0
+            plog "WARN  cannot mkdir $dest on $REMOTE, skipping upload"
         fi
 
-        for f in "$OUT" "$ARCHIVE"; do
-            [ -f "$f" ] || continue
-            [ "$f" = "$OUT" ] && [ "$promoted" = 1 ] && continue
-            if scp -o BatchMode=yes -o LogLevel=ERROR -q "$f" "$REMOTE:$dest/" 2>>"$LOG"; then
-                log "UPLOAD $(basename "$f") -> $REMOTE:$dest/"
+        # Label the frames while the capture is still fresh. A capture whose labels
+        # were never generated is one nobody can score later without going back to
+        # find the frames, and by then the reason for caring has usually passed.
+        #
+        # Runs after the upload because it works on the archive that upload just
+        # placed, and on the collection host because that is where the GPU is --
+        # 55 fps there against a CPU crawl here, and labelling must never compete
+        # with a capture for this laptop's radio or its camera.
+        #
+        # Never fatal. The frames are archived either way, and scripts/label_frames.sh
+        # re-runs against them at any time.
+        if [ "${CV:-1}" = "1" ] && [ -f "$ARCHIVE" ]; then
+            if out=$("$(dirname "$0")/label_frames.sh" "$STAMP" 2>&1); then
+                printf '%s\n' "$out" | while IFS= read -r line; do plog "LABEL$line"; done
             else
-                # Left on disk deliberately. Retention prunes by age, so a
-                # failed upload survives days of retries rather than being
-                # lost at the end of this run.
-                log "WARN  upload of $(basename "$f") failed, kept locally"
+                plog "WARN  labelling skipped: $(printf '%s' "$out" | tail -1)"
             fi
-        done
-    else
-        log "WARN  cannot mkdir $dest on $REMOTE, skipping upload"
-    fi
-
-    # Label the frames while the capture is still fresh. A capture whose labels
-    # were never generated is one nobody can score later without going back to
-    # find the frames, and by then the reason for caring has usually passed.
-    #
-    # Runs after the upload because it works on the archive that upload just
-    # placed, and on the collection host because that is where the GPU is --
-    # 55 fps there against a CPU crawl here, and labelling must never compete
-    # with a capture for this laptop's radio or its camera.
-    #
-    # Never fatal. The frames are archived either way, and scripts/label_frames.sh
-    # re-runs against them at any time.
-    if [ "${CV:-1}" = "1" ] && [ -f "$ARCHIVE" ]; then
-        if out=$("$(dirname "$0")/label_frames.sh" "$STAMP" 2>&1); then
-            printf '%s\n' "$out" | while IFS= read -r line; do log "LABEL$line"; done
-        else
-            log "WARN  labelling skipped: $(printf '%s' "$out" | tail -1)"
         fi
     fi
+}
+
+if [ "$POST_ASYNC" = "1" ] && [ "$UPLOAD" = "1" ]; then
+    exec 8>"$POST_LOCK"
+    flock -s 8
+    # 9>&-: the child must not keep the capture lock, or the next run SKIPs.
+    ( exec 9>&-; post_upload ) </dev/null &
+    log "POST  upload + labelling of $STAMP continue in the background (pid $!)"
+else
+    post_upload
 fi
 
 exit 0
