@@ -80,7 +80,7 @@ from typing import Any
 
 import numpy as np
 
-from backend import hybrid, hybrid2, liu_features, ml_columns
+from backend import feature_marks, hybrid, hybrid2, liu_features, ml_columns
 
 # One unit per one-minute capture.
 UNIT_SECONDS = 60.0
@@ -1008,6 +1008,8 @@ for _f in FEATURES:
 # tab's 11 model inputs and its P(person).
 FEATURES.extend(liu_features.FEATURES)
 FEATURES.extend(ml_columns.FEATURES)
+# Which columns do real work, and what for (stars, note, per-room evidence).
+feature_marks.apply(FEATURES)
 
 # The verdict, step by step, with the numbers the tab should print beside it.
 DECISION: list[dict[str, Any]] = [

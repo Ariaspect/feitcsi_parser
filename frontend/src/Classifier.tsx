@@ -12,7 +12,7 @@ import {
   type Meta,
 } from "./api";
 import { Chart, CHART_MARGIN } from "./Chart";
-import { ClassifierCompare, useCompareEntries } from "./ClassifierCompare";
+import { ClassifierCompare, markTitle, starPrefix, useCompareEntries } from "./ClassifierCompare";
 import { formatTime, linearScale, runs } from "./series";
 import type { TimeLink } from "./timelink";
 
@@ -305,9 +305,9 @@ export function Classifier({
                     <th
                       key={f.key}
                       className="px-2 py-1 text-right font-medium whitespace-nowrap"
-                      title={`${f.description}${f.reference != null ? ` Reference ${f.reference}.` : ""} (${f.status}, test ${f.test})`}
+                      title={`${f.description}${f.reference != null ? ` Reference ${f.reference}.` : ""} (${f.status}, test ${f.test})${markTitle(f)}`}
                     >
-                      {f.label}
+                      {starPrefix(f)}{f.label}
                       {f.reference != null && <span className="text-muted-foreground/70"> › {f.reference}</span>}
                     </th>
                   ))}

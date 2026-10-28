@@ -1255,6 +1255,8 @@ export interface ClassifierFeature {
   role: string;
   /** The one-line answers the test gave: what this column separates, and what it does not. */
   separates: string;
+  /** Set on the columns that do real work (feature_marks); null otherwise. */
+  mark?: FeatureMark | null;
   notSeparates: string;
 }
 
@@ -1324,8 +1326,29 @@ export interface ClassifierOptions {
   interpolate?: boolean;
 }
 
+/** Which pair a marked column separates, how well (stars from the sweep), and its per-room AUCs. */
+export interface FeatureMarkTag {
+  pair: string;
+  label: string;
+  stars: number;
+  direction: "higher" | "lower";
+  auc: (number | null)[];
+}
+
+/** A column marked as doing real work: best stars, the tags behind them, and a short note. */
+export interface FeatureMark {
+  stars: number;
+  tags: FeatureMarkTag[];
+  explain: string;
+  strength: string;
+  weakness: string;
+  source: string;
+  rooms: string[];
+}
+
 function parseClassifierFeature(f: Record<string, unknown>): ClassifierFeature {
   return {
+    mark: (f.mark as FeatureMark | null) ?? null,
     key: f.key as string,
     label: f.label as string,
     test: String(f.test),

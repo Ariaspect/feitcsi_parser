@@ -68,6 +68,26 @@ function inkOn(t: number, dark: boolean): string | undefined {
   return dark ? "#0b1220" : "#ffffff";
 }
 
+/** The column's stars, as a prefix: two for every room past 0.9 (or 0.1), one past 0.75 (0.25). */
+export function starPrefix(f: ClassifierFeature): string {
+  if (!f.mark) return "";
+  return f.mark.stars >= 2 ? "★★ " : f.mark.stars === 1 ? "★ " : "☆ ";
+}
+
+function aucText(v: (number | null)[]): string {
+  return v.map((x) => (x == null ? "–" : x.toFixed(2))).join(" / ");
+}
+
+/** The mark as hover text: what the column is, where it is strong and weak, and the evidence. */
+export function markTitle(f: ClassifierFeature): string {
+  const m = f.mark;
+  if (!m) return "";
+  const tags = m.tags
+    .map((t) => `${"★".repeat(t.stars)} ${t.label}: ${t.direction} with the person/mover, AUC ${aucText(t.auc)} (${m.rooms.join(" / ")})`)
+    .join("\n");
+  return `\n\n${m.explain}\nStrength: ${m.strength}\nWeakness: ${m.weakness}${tags ? `\n\n${tags}` : ""}`;
+}
+
 function entryId(path: string, t0: number | null, t1: number | null): string {
   return `${path}|${t0 ?? "all"}|${t1 ?? "all"}`;
 }
@@ -455,6 +475,11 @@ export function ClassifierCompare({
           <div className="flex flex-wrap gap-2">
             <Button size="xs" variant="outline" onClick={() => setKeys(DEFAULT_KEYS)}>default set</Button>
             <Button size="xs" variant="outline"
+              title="Every column marked as doing real work in the env1-3 sweep"
+              onClick={() => setKeys((p) => [...new Set([...p, ...bank.filter((f) => f.mark).map((f) => f.key)])])}>
+              + ★ marked
+            </Button>
+            <Button size="xs" variant="outline"
               onClick={() => setKeys((p) => [...new Set([...p, ...bank.filter((f) => f.key.startsWith("liu_")).map((f) => f.key)])])}>
               + all Liu
             </Button>
@@ -473,16 +498,50 @@ export function ClassifierCompare({
                 return (
                   <button
                     key={f.key} type="button" onClick={() => toggleKey(f.key)}
-                    title={`${f.description} (${f.status})`}
+                    title={`${f.description} (${f.status})${markTitle(f)}`}
                     className={`rounded border px-1.5 py-0.5 text-[11px] ${
                       on ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground hover:bg-muted"}`}
                   >
-                    {f.label}
+                    {starPrefix(f)}{f.label}
                   </button>
                 );
               })}
             </div>
           ))}
+        </div>
+      </details>
+
+      {/* ---- what the marks mean */}
+      <details className="rounded-md border border-border/60 px-2 py-1">
+        <summary className="cursor-pointer text-[11px] text-muted-foreground">
+          ★ Marked features — what each is good for ({bank.filter((f) => f.mark).length})
+        </summary>
+        <div className="mt-2 space-y-2 text-[11px] leading-relaxed">
+          <p className="text-muted-foreground">
+            ★★ = every room at AUC ≥ 0.9 (or ≤ 0.1, "lower"), ★ = ≥ 0.75 (≤ 0.25), on matched pairs: the same
+            mover with and without a person. Rooms env1 / env2 / env3, six captures each — thin evidence; env1 and
+            env2 are in the 11F model&apos;s training set, so its columns are fair only on env3.
+          </p>
+          <ul className="space-y-2">
+            {[...bank].filter((f) => f.mark).sort((a, b) => (b.mark!.stars - a.mark!.stars)).map((f) => (
+              <li key={f.key} className="rounded border border-border/50 px-2 py-1.5">
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="font-semibold">{starPrefix(f)}{f.label}</span>
+                  <span className="text-muted-foreground">{f.mark!.explain}</span>
+                </div>
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {f.mark!.tags.map((t) => (
+                    <span key={t.pair} className="rounded bg-muted px-1.5 py-0.5 text-[10px]"
+                      title={`AUC per room (${f.mark!.rooms.join(" / ")}): ${aucText(t.auc)}`}>
+                      {"★".repeat(t.stars)} {t.label} · {t.direction} · {aucText(t.auc)}
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-0.5"><span className="font-medium">Strength.</span> {f.mark!.strength}</div>
+                <div><span className="font-medium">Weakness.</span> {f.mark!.weakness}</div>
+              </li>
+            ))}
+          </ul>
         </div>
       </details>
 
@@ -534,8 +593,8 @@ export function ClassifierCompare({
                 <th className="px-2 py-1 text-right font-medium" title="Camera's occupied fraction in the row's range (or the capture's, marked *)">camera</th>
                 {columns.map((f) => (
                   <th key={f.key} className="px-2 py-1 text-right font-medium whitespace-nowrap"
-                    title={`${f.description} (${f.status}, test ${f.test})`}>
-                    {f.label}
+                    title={`${f.description} (${f.status}, test ${f.test})${markTitle(f)}`}>
+                    {starPrefix(f)}{f.label}
                   </th>
                 ))}
               </tr>
