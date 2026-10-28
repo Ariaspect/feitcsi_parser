@@ -5,12 +5,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   fetchClassifier,
+  type CaptureFile,
   type Classifier as ClassifierData,
   type ClassifierFeature,
   type ClassifierUnit,
   type Meta,
 } from "./api";
 import { Chart, CHART_MARGIN } from "./Chart";
+import { ClassifierCompare, useCompareEntries } from "./ClassifierCompare";
 import { formatTime, linearScale, runs } from "./series";
 import type { TimeLink } from "./timelink";
 
@@ -72,11 +74,14 @@ export interface ClassifierProps {
   sourceMac: string;
   interpolate: boolean;
   dark: boolean;
+  /** The capture listing, for the compare table's picker. */
+  captures?: CaptureFile[] | null;
 }
 
 export function Classifier({
-  path, meta, timeLink, mimo, sourceMac, interpolate, dark,
+  path, meta, timeLink, mimo, sourceMac, interpolate, dark, captures = null,
 }: ClassifierProps) {
+  const compare = useCompareEntries();
   const [unitS, setUnitS] = useState(60);
   const [acfFrames, setAcfFrames] = useState(84);
   const [lagS, setLagS] = useState(2);
@@ -160,6 +165,18 @@ export function Classifier({
   const occupancyLabel = (u: ClassifierUnit) =>
     u.cameraOccupancy == null ? "no camera" : `camera ${(u.cameraOccupancy * 100).toFixed(0)} % occupied`;
 
+  const comparePanel = (
+    <ClassifierCompare
+      captures={captures}
+      currentPath={path}
+      currentUnits={data ? data.units.map((u) => ({ t0: u.t0, t1: u.t1 })) : []}
+      features={data?.features ?? null}
+      options={{ acfFrames, lagS, mimo, sourceMac, interpolate }}
+      dark={dark}
+      compare={compare}
+    />
+  );
+
   return (
     <div className="space-y-4" ref={holder}>
       <div className="flex flex-wrap items-center gap-3">
@@ -188,9 +205,12 @@ export function Classifier({
       </div>
 
       {error ? (
-        <div className="text-muted-foreground p-8 text-sm">
-          No features for this range — {error}
-        </div>
+        <>
+          <div className="text-muted-foreground p-8 text-sm">
+            No features for this range — {error}
+          </div>
+          {comparePanel}
+        </>
       ) : !data ? (
         <ChartBusy busy empty height={150} label="computing the feature bank" />
       ) : (
@@ -278,6 +298,7 @@ export function Classifier({
             <table className="w-full text-[11px] tabular-nums">
               <thead>
                 <tr className="text-muted-foreground">
+                  <th className="px-1 py-1" title="Add a unit to the compare table below" />
                   <th className="px-2 py-1 text-left font-medium">unit</th>
                   <th className="px-2 py-1 text-right font-medium" title="Fraction of camera frames in the unit with a person">camera</th>
                   {data.features.map((f) => (
@@ -295,6 +316,17 @@ export function Classifier({
               <tbody>
                 {data.units.map((u, i) => (
                   <tr key={i} className="border-t border-border/50">
+                    <td className="px-1 py-1">
+                      <button
+                        type="button"
+                        className="rounded px-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        onClick={() => compare.add([{ path, t0: u.t0, t1: u.t1 }])}
+                        title="Add this unit to the compare table"
+                        aria-label="add this unit to the compare table"
+                      >
+                        +
+                      </button>
+                    </td>
                     <td className="px-2 py-1 whitespace-nowrap">
                       {formatTime(u.t0, span)} – {formatTime(u.t1, span)}
                       <span className="text-muted-foreground"> · {u.nWindows} w</span>
@@ -318,6 +350,8 @@ export function Classifier({
               </tbody>
             </table>
           </div>
+
+          {comparePanel}
 
           {data.truthExcluded && (
             <p className="text-[11px] text-red-500">

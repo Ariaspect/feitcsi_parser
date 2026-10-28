@@ -404,6 +404,7 @@ _cache_lock = Lock()
 def reset_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _item_cache.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -698,8 +699,13 @@ def compute_features(
     _, psi_phase = acf_windows(phase, times, acf_frames)
     lam_share, ev_drift = coherence_windows(ratio, times, acf_frames)
 
-    # The step the range rule reads, on whole seconds of the capture clock.
-    seconds = np.arange(np.floor(float(t0)), float(t1), 1.0)
+    # The step the range rule reads, on whole seconds of the capture clock --
+    # over the frames, not the request: a range asked far wider than the
+    # capture (an open-ended t1) would otherwise allocate a second per second
+    # of the request.
+    s_lo = max(float(t0), float(times[0])) if times.size else float(t0)
+    s_hi = min(float(t1), float(times[-1])) if times.size else float(t1)
+    seconds = np.arange(np.floor(s_lo), max(s_hi, s_lo + 1e-9), 1.0)
     level, steps = hybrid2.motion_per_second(
         path, t0, t1, seconds, mimo=mimo, source_mac=source_mac,
         interpolate=interpolate, gate_gain=False, lag_seconds=lag_seconds,
@@ -840,6 +846,82 @@ def compute_features(
         "mimo": lvl["mimo"],
         "features": FEATURES,
     }
+
+
+# --------------------------------------------------------------------------- #
+#  One item of the compare table                                             #
+# --------------------------------------------------------------------------- #
+
+# The compare table asks for one range at a time -- a whole one-minute capture
+# or one unit of a longer one -- and asks again whenever it is redrawn, so the
+# answers are kept. Keyed on the file's size and mtime: a capture still being
+# written is a new key every time it grows.
+ITEM_MAX_SECONDS = 600.0
+_ITEM_CACHE_SIZE = 4096
+_item_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+# One computation at a time: the table asks for several rows at once, and
+# three concurrent banks make the numeric library's threads fight -- measured
+# 2.3 s for one row alone, over a minute each with three at once. Cache hits
+# do not wait for it.
+_item_compute_lock = Lock()
+
+
+def item_values(
+    path,
+    t0: float | None = None,
+    t1: float | None = None,
+    *,
+    acf_frames: int = ACF_WINDOW_FRAMES,
+    lag_seconds: float = STEP_LAG_SECONDS,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> dict[str, Any]:
+    """Every column of the bank for one range, as a single unit.
+
+    ``t0`` / ``t1`` default to the capture's first and last frame, so a
+    one-minute capture is one call. A range longer than ITEM_MAX_SECONDS is
+    refused: it should be added unit by unit. Returns ``{"t0", "t1",
+    "values", "fs_hz"}``; ``values`` is the unit dict of ``compute_features``.
+    """
+    from backend.tiles import get_index
+
+    path = Path(path)
+    st = path.stat()
+    if t0 is None or t1 is None:
+        ta = np.asarray(get_index(path).times, dtype=float)
+        if ta.size < 2:
+            raise ValueError("the capture has fewer than 2 frames")
+        t0 = float(ta[0]) if t0 is None else float(t0)
+        t1 = float(ta[-1]) if t1 is None else float(t1)
+    t0, t1 = float(t0), float(t1)
+    span = t1 - t0
+    if span <= 0:
+        raise ValueError("the range must be positive")
+    if span > ITEM_MAX_SECONDS:
+        raise ValueError(f"{span:.0f} s is longer than {ITEM_MAX_SECONDS:.0f} s -- open the capture and add its units")
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns, round(t0, 3), round(t1, 3),
+           int(acf_frames), float(lag_seconds), mimo, source_mac, bool(interpolate))
+    with _cache_lock:
+        hit = _item_cache.get(key)
+        if hit is not None:
+            _item_cache.move_to_end(key)
+            return hit
+    with _item_compute_lock:
+        with _cache_lock:
+            hit = _item_cache.get(key)          # computed while this call waited
+        if hit is not None:
+            return hit
+        out = compute_features(path, t0, t1, unit_seconds=span, acf_frames=acf_frames,
+                               lag_seconds=lag_seconds, mimo=mimo, source_mac=source_mac,
+                               interpolate=interpolate)
+    u = out["units"][0]
+    res = {"t0": float(u["t0"]), "t1": float(u["t1"]), "values": u, "fs_hz": out["fs_hz"]}
+    with _cache_lock:
+        _item_cache[key] = res
+        while len(_item_cache) > _ITEM_CACHE_SIZE:
+            _item_cache.popitem(last=False)
+    return res
 
 
 # --------------------------------------------------------------------------- #

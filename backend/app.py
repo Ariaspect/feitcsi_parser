@@ -2085,6 +2085,15 @@ def _capture_conditions(found: _Found) -> dict:
         if meta.get(key) not in (None, ""):
             out[key] = meta[key]
     out.update(_recorded(found.path.stem, meta.get("scenario")))
+    # Binary ground truth for pickers: the user's GT table first, else the
+    # operator's presence below. Absent when neither says.
+    row = _gt_table().get(found.path.stem)
+    if row and str(row.get("y")) in ("0", "1"):
+        out["gt"] = "person" if str(row["y"]) == "1" else "empty"
+        out["gt_source"] = f"GT table {row.get('env', '')}".strip()
+    elif meta.get("presence") in ("occupied", "empty"):
+        out["gt"] = "person" if meta["presence"] == "occupied" else "empty"
+        out["gt_source"] = str(meta.get("presence_source") or "operator")
     # The operator's own ground truth from the capture bar (sessions without a
     # webcam): "occupied" / "empty", never guessed, with where it came from.
     if meta.get("presence") in ("occupied", "empty"):
@@ -2243,6 +2252,117 @@ def capture_sync() -> dict:
     if not m.start_sync():
         raise HTTPException(409, "a sync is already running, or no collection host is configured")
     return m.status()
+
+
+def _json_num(v: object) -> float | int | None:
+    """A unit field as JSON: ints stay ints, non-finite floats become null."""
+    if v is None:
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return int(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    try:
+        f = float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _item_truth(p: Path, t0: float, t1: float) -> dict:
+    """Ground truth for one compare item, with where each part comes from.
+
+    ``gt`` ("person" / "empty"): the user's GT table (data/gt_tables.csv)
+    first, else the operator's presence in the ``_meta.json`` sidecar; absent
+    when neither says. ``condition``: what the capture was taken of (the GT
+    table's words, else the scenario typed at capture). ``camera``: the
+    camera's occupied fraction inside [t0, t1] when the frames are there, else
+    the capture's own summary (``camera_scope`` says which).
+    """
+    out: dict = {}
+    row = _gt_table().get(p.stem)
+    try:
+        meta = json.loads(p.with_name(f"{p.stem}_meta.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if row and str(row.get("y")) in ("0", "1"):
+        out["gt"] = "person" if str(row["y"]) == "1" else "empty"
+        out["gt_source"] = f"GT table {row.get('env', '')}".strip()
+    elif meta.get("presence") in ("occupied", "empty"):
+        out["gt"] = "person" if meta["presence"] == "occupied" else "empty"
+        out["gt_source"] = str(meta.get("presence_source") or "operator")
+    rec = _recorded(p.stem, meta.get("scenario"))
+    if rec:
+        out["condition"] = rec["recorded"]
+        out["condition_source"] = rec["recorded_source"]
+    room = meta.get("room") or (row.get("env") if row else None)
+    if room:
+        out["room"] = str(room)
+    try:
+        cam = _camera_truth(p)
+    except (OSError, ValueError):
+        cam = None
+    if cam is not None and cam.size:
+        m = (cam[:, 0] >= t0) & (cam[:, 0] <= t1)
+        if m.any():
+            out["camera"] = float(np.mean(cam[m, 1] > 0.5))
+            out["camera_scope"] = "range"
+    if "camera" not in out:
+        try:
+            cv = json.loads(p.with_name(f"{p.stem}_cv.json").read_text())
+            frac = cv["summary"]["fraction_occupied"]
+            if frac is not None:
+                out["camera"] = float(frac)
+                out["camera_scope"] = "capture"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return out
+
+
+@app.get("/api/classifier/features")
+def classifier_feature_list() -> dict:
+    """The bank's columns -- key, label, test, status, description, role,
+    what each separates -- without computing anything, for the compare
+    table's column picker."""
+    return {"features": classifier.FEATURES}
+
+
+@app.get("/api/classifier/item")
+def classifier_item(
+    path: str = Query(..., description="Capture file"),
+    t0: float | None = Query(None, description="Start of the range, capture clock; default the first frame"),
+    t1: float | None = Query(None, description="End of the range, capture clock; default the last frame"),
+    acf_frames: int = Query(classifier.ACF_WINDOW_FRAMES, ge=8, le=4000, description="Frames per autocorrelation window"),
+    lag_s: float = Query(classifier.STEP_LAG_SECONDS, ge=0, le=10, description="Lag of the frame step, seconds"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """Every column of the bank for one range (default: the whole capture) as
+    one unit, with its ground truth -- one row of the classifier tab's
+    compare table. Cached; at most ``classifier.ITEM_MAX_SECONDS`` long."""
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        res = classifier.item_values(
+            p, t0, t1, acf_frames=acf_frames, lag_seconds=lag_s, mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac), interpolate=interpolate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "path": str(p),
+        "t0": res["t0"],
+        "t1": res["t1"],
+        "fs_hz": _json_num(res["fs_hz"]),
+        "values": {k: _json_num(v) for k, v in res["values"].items()},
+        **_item_truth(p, res["t0"], res["t1"]),
+    }
 
 
 @app.get("/api/capture_conditions")

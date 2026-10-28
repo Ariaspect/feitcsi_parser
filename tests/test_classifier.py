@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -336,3 +337,51 @@ def test_endpoint_honours_the_unit_length_and_refuses_an_empty_range(tmp_path: P
     res = client.get("/api/classifier", params={"path": str(p), "t0": 150.0, "t1": 150.01})
     assert res.status_code == 400
     assert "frames" in res.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+#  The compare table                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_an_open_ended_range_does_not_allocate_a_second_per_second_of_it(tmp_path: Path) -> None:
+    """The per-second grid spans the frames, not the request: t1 = 1e9 on a
+    200 s capture is the same three units, not a billion-slot array."""
+    units = classifier.compute_features(_capture(tmp_path), 0.0, 1e9)["units"]
+    assert len(units) == 3
+
+
+def test_an_item_is_one_unit_over_its_range_and_is_kept(tmp_path: Path) -> None:
+    p = _capture(tmp_path)
+    classifier.reset_cache()
+    a = classifier.item_values(p, 80.0, 140.0)
+    assert a["t0"] == pytest.approx(80.0, abs=0.1) and a["t1"] == pytest.approx(140.0, abs=0.1)
+    for f in classifier.FEATURES:
+        assert f["key"] in a["values"]
+    assert classifier.item_values(p, 80.0, 140.0) is a          # cached
+    whole = classifier.item_values(p)                           # default: first to last frame
+    assert whole["t1"] - whole["t0"] == pytest.approx(199.95, abs=0.1)
+    with pytest.raises(ValueError, match="longer than"):
+        classifier.item_values(p, 0.0, 700.0)
+
+
+def test_item_endpoint_carries_the_values_and_the_ground_truth(tmp_path: Path) -> None:
+    p = _capture(tmp_path)
+    client = TestClient(app)
+    body = client.get("/api/classifier/item", params={"path": str(p), "t0": 80.0, "t1": 140.0}).json()
+    assert set(f["key"] for f in classifier.FEATURES) <= set(body["values"])
+    assert body["camera"] > 0.9 and body["camera_scope"] == "range"
+    assert "gt" not in body                                     # nothing recorded yet
+    p.with_name("hybrid2_meta.json").write_text(json.dumps({"presence": "occupied", "presence_source": "operator_manual",
+                                                            "scenario": "seated", "room": "lab"}))
+    body = client.get("/api/classifier/item", params={"path": str(p)}).json()
+    assert body["gt"] == "person" and body["gt_source"] == "operator_manual"
+    assert body["condition"] == "seated" and body["room"] == "lab"
+    assert body["t1"] - body["t0"] == pytest.approx(199.95, abs=0.1)
+    res = client.get("/api/classifier/item", params={"path": str(p), "t0": 0.0, "t1": 700.0})
+    assert res.status_code == 400 and "longer than" in res.json()["detail"]
+
+
+def test_the_feature_list_endpoint_is_the_bank(tmp_path: Path) -> None:
+    body = TestClient(app).get("/api/classifier/features").json()
+    assert [f["key"] for f in body["features"]] == [f["key"] for f in classifier.FEATURES]

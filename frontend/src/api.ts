@@ -45,6 +45,9 @@ export interface CaptureFile {
    *  `recorded_source` says which. */
   recorded?: string;
   recorded_source?: string;
+  /** Binary ground truth: the user's GT table, else the operator's presence. */
+  gt?: "person" | "empty";
+  gt_source?: string;
 }
 
 export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {
@@ -54,6 +57,18 @@ export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]
     throw new Error(`HTTP ${res.status}: ${text}`);
   }
   return (await res.json()) as CaptureFile[];
+}
+
+/** The capture to open when none was asked for: the newest one of ordinary
+ *  length. The tabs are read on one-minute captures; a multi-hour session
+ *  (20261023_132301, 1.7 GB) is newest by mtime but costs minutes and GBs to
+ *  open, so "ordinary" is at most twice the listing's median size -- a
+ *  one-minute capture is ~11 MB at 43 Hz, and the median follows the rate if
+ *  it changes. Falls back to the newest of all. *captures* is newest first. */
+export function defaultCapture(captures: CaptureFile[]): CaptureFile {
+  const sizes = captures.map((f) => f.size_bytes).sort((a, b) => a - b);
+  const median = sizes[Math.floor(sizes.length / 2)] ?? 0;
+  return captures.find((f) => f.size_bytes <= 2 * median) ?? captures[0];
 }
 
 export function formatBytes(bytes: number): string {
@@ -1309,6 +1324,86 @@ export interface ClassifierOptions {
   interpolate?: boolean;
 }
 
+function parseClassifierFeature(f: Record<string, unknown>): ClassifierFeature {
+  return {
+    key: f.key as string,
+    label: f.label as string,
+    test: String(f.test),
+    status: f.status as string,
+    reference: (f.reference as number | null) ?? null,
+    axis: (f.axis as [number, number] | null) ?? null,
+    decimals: (f.decimals as number) ?? 3,
+    description: (f.description as string) ?? "",
+    role: (f.role as string) ?? "",
+    separates: (f.separates as string) ?? "",
+    notSeparates: (f.not_separates as string) ?? "",
+  };
+}
+
+/** The bank's columns without computing anything -- the compare table's picker. */
+export async function fetchClassifierFeatures(signal?: AbortSignal): Promise<ClassifierFeature[]> {
+  const res = await fetch("/api/classifier/features", { signal });
+  if (!res.ok) throw new Error(`classifier features: ${res.status}`);
+  const body = await res.json();
+  return (body.features ?? []).map(parseClassifierFeature);
+}
+
+/** One row of the compare table: every column of the bank over one range,
+ *  and what is known to be true about it. */
+export interface ClassifierItem {
+  path: string;
+  t0: number;
+  t1: number;
+  fsHz: number | null;
+  values: Record<string, number | null>;
+  /** "person" | "empty" from the user's GT table, else the operator's sidecar label. */
+  gt: "person" | "empty" | null;
+  gtSource: string | null;
+  /** What the capture was taken of, in a few words. */
+  condition: string | null;
+  conditionSource: string | null;
+  room: string | null;
+  /** Camera's occupied fraction: inside the range ("range") or the capture's summary ("capture"). */
+  camera: number | null;
+  cameraScope: "range" | "capture" | null;
+}
+
+export async function fetchClassifierItem(
+  path: string,
+  t0: number | null,
+  t1: number | null,
+  options: ClassifierOptions = {},
+  signal?: AbortSignal,
+): Promise<ClassifierItem> {
+  const { acfFrames = 84, lagS = 2, mimo, sourceMac, interpolate } = options;
+  const url =
+    `/api/classifier/item?path=${encodeURIComponent(path)}` +
+    (t0 != null ? `&t0=${t0}` : "") + (t1 != null ? `&t1=${t1}` : "") +
+    `&acf_frames=${acfFrames}&lag_s=${lagS}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `classifier item: ${res.status}`);
+  }
+  const b = await res.json();
+  return {
+    path: b.path,
+    t0: b.t0,
+    t1: b.t1,
+    fsHz: b.fs_hz ?? null,
+    values: b.values ?? {},
+    gt: b.gt ?? null,
+    gtSource: b.gt_source ?? null,
+    condition: b.condition ?? null,
+    conditionSource: b.condition_source ?? null,
+    room: b.room ?? null,
+    camera: b.camera ?? null,
+    cameraScope: b.camera_scope ?? null,
+  };
+}
+
 export async function fetchClassifier(
   path: string,
   t0: number,
@@ -1329,19 +1424,7 @@ export async function fetchClassifier(
     throw new Error(body.detail ?? `classifier: ${res.status}`);
   }
   const body = await res.json();
-  const features: ClassifierFeature[] = (body.features ?? []).map((f: Record<string, unknown>) => ({
-    key: f.key as string,
-    label: f.label as string,
-    test: String(f.test),
-    status: f.status as string,
-    reference: (f.reference as number | null) ?? null,
-    axis: (f.axis as [number, number] | null) ?? null,
-    decimals: (f.decimals as number) ?? 3,
-    description: (f.description as string) ?? "",
-    role: (f.role as string) ?? "",
-    separates: (f.separates as string) ?? "",
-    notSeparates: (f.not_separates as string) ?? "",
-  }));
+  const features: ClassifierFeature[] = (body.features ?? []).map(parseClassifierFeature);
   const decision: ClassifierDecision[] = (body.decision ?? []).map((d: Record<string, unknown>) => ({
     step: String(d.step), test: String(d.test), key: String(d.key), text: String(d.text ?? ""), evidence: String(d.evidence ?? ""),
   }));

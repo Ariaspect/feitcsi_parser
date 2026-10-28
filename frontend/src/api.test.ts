@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchClassifier, fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, truncateCaptureName } from "./api";
+import { defaultCapture, fetchClassifier, fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -559,5 +559,17 @@ describe("capture control", () => {
     expect(s.busy).toBe(false);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/capture/stop");
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+  });
+});
+
+describe("defaultCapture", () => {
+  const f = (name: string, mb: number) => ({ filename: name, path: `/c/${name}`, size_bytes: mb * 1e6, mtime: 0 });
+  it("skips a multi-hour session that is newest, for the newest one-minute capture", () => {
+    const list = [f("long.bin", 1725), f("a.bin", 11), f("b.bin", 10.7), f("c.bin", 11.1)];
+    expect(defaultCapture(list).filename).toBe("a.bin");
+  });
+  it("falls back to the newest when every capture is long", () => {
+    const list = [f("x.bin", 1700), f("y.bin", 1600)];
+    expect(defaultCapture(list).filename).toBe("x.bin");
   });
 });

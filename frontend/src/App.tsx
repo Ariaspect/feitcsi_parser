@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchCaptureConditions, fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
+import { defaultCapture, fetchCaptureConditions, fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
@@ -35,6 +35,7 @@ import {
 import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon, SlidersHorizontalIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
+
 const DEFAULT_REFRESH_MS = 300;
 // Characters the capture trigger can show at w-72 / text-sm. Every capture
 // name in the repo fits whole; longer nested ones lose their middle.
@@ -349,7 +350,7 @@ export function App() {
         // (or a real default file) is left alone.
         setPath((current) =>
           current === DEFAULT_PATH && c.length > 0 && !c.some((f) => f.path === DEFAULT_PATH || f.filename === DEFAULT_PATH)
-            ? c[0].path
+            ? defaultCapture(c).path
             : current,
         );
       })
@@ -1022,6 +1023,7 @@ export function App() {
                 sourceMac={sourceMac}
                 interpolate={interpolate}
                 dark={dark}
+                captures={captures}
               />
             </TabsContent>
 

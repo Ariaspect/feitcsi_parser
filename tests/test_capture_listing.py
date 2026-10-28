@@ -158,3 +158,24 @@ def test_what_was_captured_comes_from_the_gt_table_then_the_operator(
     assert got["c"]["recorded"] == "fan mov / small mov"
     assert got["c"]["recorded_source"].startswith("operator")
     assert "recorded" not in got["d"]                                # never the camera's guess
+
+
+def test_binary_gt_comes_from_the_gt_table_then_the_operators_presence(
+        day: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compare table's picker filters on one person / empty field: the
+    user's GT table first, else the operator's label; never the camera."""
+    import backend.app as app_mod
+    table = tmp_path / "gt_tables.csv"
+    table.write_text("env,cond,y,stem,date,session,train,dur\n"
+                     "env1,rot fan + small,1,a,1012,1012 21:16-21:47,True,\n"
+                     "env1,static fan,0,b,1012,1012 22:08-22:28,True,\n")
+    monkeypatch.setattr(app_mod, "GT_TABLES_CSV", table)
+    _capture(day, "a", meta={"presence": "empty"})                    # the table wins over the sidecar
+    _capture(day, "b")
+    _capture(day, "c", meta={"presence": "occupied", "presence_source": "operator_manual"})
+    _capture(day, "d", cv={"summary": {"fraction_occupied": 0.9}})
+    got = _listing()
+    assert got["a"]["gt"] == "person" and got["a"]["gt_source"] == "GT table env1"
+    assert got["b"]["gt"] == "empty"
+    assert got["c"]["gt"] == "person" and got["c"]["gt_source"] == "operator_manual"
+    assert "gt" not in got["d"]
