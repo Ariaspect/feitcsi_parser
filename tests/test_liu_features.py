@@ -98,7 +98,8 @@ def test_short_or_empty_input_is_blank_not_an_error() -> None:
 def test_the_columns_are_appended_display_only_and_feed_nothing() -> None:
     keys = [f["key"] for f in classifier.FEATURES]
     liu = [f["key"] for f in L.FEATURES]
-    assert keys[-len(liu):] == liu                      # appended last, in order
+    i = keys.index(liu[0])
+    assert keys[i:i + len(liu)] == liu                  # appended after the bank, in order
     for f in L.FEATURES:
         assert f["status"] == "display only" and f["reference"] is None
         assert f["role"] and f["separates"] and f["not_separates"]

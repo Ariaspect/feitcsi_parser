@@ -65,8 +65,10 @@ the mechanism behind the noisy state is still unknown.
 *Display only -- features from K. J. Ray Liu's group* (``liu_features``):
 short-lag periodicity, steadiness, speed from the autocorrelation, frequency
 coherence width (all bands and the breathing band), the previous unit's
-P(occupied), and the maximal-ratio-combined lag-1 statistic. Appended to the
-bank as columns to read against the camera; no score, rule or model uses them.
+P(occupied), and the maximal-ratio-combined lag-1 statistic. Then the ML tab's
+11-feature model inputs and its P(person) on each unit (``ml_columns``).
+Appended to the bank as columns to read against the camera; no score or rule
+on this tab uses them.
 """
 
 from __future__ import annotations
@@ -78,7 +80,7 @@ from typing import Any
 
 import numpy as np
 
-from backend import hybrid, hybrid2, liu_features
+from backend import hybrid, hybrid2, liu_features, ml_columns
 
 # One unit per one-minute capture.
 UNIT_SECONDS = 60.0
@@ -745,6 +747,9 @@ def compute_features(
         return int(run), med, peak
 
     gain = lvl["gain_state"]
+    # The ML model's window clock: seconds from the capture's first frame.
+    from backend.tiles import get_index
+    t_first = float(np.asarray(get_index(path).times, dtype=float)[0])
     # Units span the frames, not the request: a range asked wider than the
     # capture would otherwise put its last units over nothing and cut the
     # capture's own minute short of its end.
@@ -782,6 +787,8 @@ def compute_features(
             "lam_share_median": l_med, "ev_drift_p90": d_p90, "delay_spread": spread,
             "revisit": revisit, "revisit_tau": revisit_tau,
             **liu_features.unit_features(ratio[fsel], times[fsel], psi_amp[wsel], level[ssel]),
+            # half-open on the model's side; the last unit keeps its last frame
+            **ml_columns.unit_features(Path(path), a - t_first, b - t_first + (1e-6 if last else 0.0)),
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })
@@ -997,8 +1004,10 @@ FEATURE_NOTES: dict[str, dict[str, str]] = {
 for _f in FEATURES:
     _f.update(FEATURE_NOTES.get(_f["key"], {"role": "context", "separates": "--", "not_separates": "--"}))
 # Display-only columns, appended last so they sit after the bank on the tab;
-# each carries its own role and answers.
+# each carries its own role and answers: the Liu candidates, then the ML
+# tab's 11 model inputs and its P(person).
 FEATURES.extend(liu_features.FEATURES)
+FEATURES.extend(ml_columns.FEATURES)
 
 # The verdict, step by step, with the numbers the tab should print beside it.
 DECISION: list[dict[str, Any]] = [

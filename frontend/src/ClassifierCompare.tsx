@@ -458,6 +458,10 @@ export function ClassifierCompare({
               onClick={() => setKeys((p) => [...new Set([...p, ...bank.filter((f) => f.key.startsWith("liu_")).map((f) => f.key)])])}>
               + all Liu
             </Button>
+            <Button size="xs" variant="outline"
+              onClick={() => setKeys((p) => [...new Set([...p, ...bank.filter((f) => f.key.startsWith("ml_")).map((f) => f.key)])])}>
+              + 11F model
+            </Button>
             <Button size="xs" variant="outline" onClick={() => setKeys(bank.map((f) => f.key))}>all</Button>
             <Button size="xs" variant="ghost" onClick={() => setKeys([])}>none</Button>
           </div>
