@@ -61,6 +61,12 @@ specificity (09-16/17: 0 % -> 100 %) and loses the still sitter there
 (recall 0.14-0.40), because on that link the sitter's slow signal is smaller
 than the link's own jitter. ``lag1_p20`` and ``step_norm`` are in the bank;
 the mechanism behind the noisy state is still unknown.
+
+*Display only -- features from K. J. Ray Liu's group* (``liu_features``):
+short-lag periodicity, steadiness, speed from the autocorrelation, frequency
+coherence width (all bands and the breathing band), the previous unit's
+P(occupied), and the maximal-ratio-combined lag-1 statistic. Appended to the
+bank as columns to read against the camera; no score, rule or model uses them.
 """
 
 from __future__ import annotations
@@ -72,7 +78,7 @@ from typing import Any
 
 import numpy as np
 
-from backend import hybrid, hybrid2
+from backend import hybrid, hybrid2, liu_features
 
 # One unit per one-minute capture.
 UNIT_SECONDS = 60.0
@@ -769,6 +775,7 @@ def compute_features(
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
             "lam_share_median": l_med, "ev_drift_p90": d_p90, "delay_spread": spread,
             "revisit": revisit, "revisit_tau": revisit_tau,
+            **liu_features.unit_features(ratio[fsel], times[fsel], psi_amp[wsel], level[ssel]),
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })
@@ -777,6 +784,7 @@ def compute_features(
     # rule's floor is the smallest jitter seen so far in the range -- occupancy
     # can only push the jitter up, so the minimum reads the link through it.
     floor = float("inf")
+    prev_p = float("nan")
     for u in units:
         if np.isfinite(u["lag1_p20"]) and u["lag1_p20"] > 0:
             floor = min(floor, u["lag1_p20"])
@@ -806,6 +814,9 @@ def compute_features(
             u["verdict3"] = 0
         else:
             u["verdict3"] = 2 if (np.isfinite(u["p_human"]) and u["p_human"] > P_HUMAN_REFERENCE) else 1
+        # Liu 6, display only: the state the previous unit left behind.
+        u["liu_prev_p"] = prev_p
+        prev_p = u["p_occupied"]
 
     return {
         "acf": {
@@ -903,6 +914,9 @@ FEATURE_NOTES: dict[str, dict[str, str]] = {
 }
 for _f in FEATURES:
     _f.update(FEATURE_NOTES.get(_f["key"], {"role": "context", "separates": "--", "not_separates": "--"}))
+# Display-only columns, appended last so they sit after the bank on the tab;
+# each carries its own role and answers.
+FEATURES.extend(liu_features.FEATURES)
 
 # The verdict, step by step, with the numbers the tab should print beside it.
 DECISION: list[dict[str, Any]] = [
