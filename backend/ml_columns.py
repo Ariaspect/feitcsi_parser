@@ -40,9 +40,9 @@ _DESC = {
     "F_pkmed": ("F peak med", [0.0, 1.0], 3, "Median FarSense breathing peak over the sweep. Weight +1.25."),
     "F_run": ("F run", [0.0, 60.0], 0, "Longest run of FarSense windows with peak >= 0.25."),
     "F_rpm_sd": ("F rpm sd", [0.0, 10.0], 2, "Spread of the breathing rates over those windows, rpm."),
-    "C3_revisit": ("C3 revisit", [0.0, 1.0], 3, "How far D(tau) falls back below its running maximum at lags of 10-30 s: a rotating fan returning to the same angle. Weight -3.00."),
-    "C3xRun_diff": ("C3 x run diff", [0.0, 30.0], 2, "C3 times the FarSense run on r(t) - r(t - T), T the swing period: breathing left after the fan's repetition is cancelled."),
-    "X_gate_dc": ("X gate dc", [0.0, 30.0], 2, "The stationary-fan switch (-log10 eigenvector drift x (1 - C3)) times the residual FarSense run after projecting out the fan's top 2 directions. Weight +2.94."),
+    "C3_revisit": ("C3 revisit", [0.0, 1.0], 3, "How far D(tau) falls back below its running maximum at lags of 10-30 s: a rotating object returning to the same angle. Weight -3.00."),
+    "C3xRun_diff": ("C3 x run diff", [0.0, 30.0], 2, "C3 times the FarSense run on r(t) - r(t - T), T the swing period: breathing left after the object's repetition is cancelled."),
+    "X_gate_dc": ("X gate dc", [0.0, 30.0], 2, "The stationary-object switch (-log10 eigenvector drift x (1 - C3)) times the residual FarSense run after projecting out the object's top 2 directions. Weight +2.94."),
 }
 
 FEATURES: list[dict] = [

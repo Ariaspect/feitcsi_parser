@@ -89,17 +89,17 @@ NOTES: dict[str, dict[str, str]] = {
         "weakness": "Still person under the rotating fan only 0.47-0.69.",
     },
     "ml_X_gate_dc": {
-        "explain": "Stationary-fan switch times the breathing left after removing the fan's two strongest directions.",
+        "explain": "Stationary-object switch times the breathing left after removing the object's two strongest directions.",
         "strength": "Presence 1.00 in every room; a still person under the static fan 1.00 / 0.51 / 1.00.",
-        "weakness": "Under the rotating fan it points the wrong way (0.33 / 0.42 / 0.00) -- built for the static fan.",
+        "weakness": "Under the rotating fan it points the wrong way (0.33 / 0.42 / 0.00) -- built for a stationary object.",
     },
     "ml_C3xRun_diff": {
-        "explain": "C3 times the breathing run after cancelling the fan's repeat period.",
+        "explain": "C3 times the breathing run after cancelling the object's repeat period.",
         "strength": "Besides the model's verdict, the only column that leans the right way in every room for a still person under the rotating fan (0.67 / 0.89 / 0.92).",
         "weakness": "Weakest room 0.67; little for small movement under fans (0.42-0.68).",
     },
     "ml_C3_revisit": {
-        "explain": "How far the channel returns to an earlier state at 10-30 s lags: the rotating fan's tell.",
+        "explain": "How far the channel returns to an earlier state at 10-30 s lags: the rotating object's tell.",
         "strength": "A person moving under the rotating fan breaks the fan's return (0.06 / 0.00 / 0.08, lower).",
         "weakness": "A still person under the rotating fan is not reliably different (0.33 / 0.06 / 0.69), and the ceiling fan keeps it high with people present -- the scenario C misses.",
     },
