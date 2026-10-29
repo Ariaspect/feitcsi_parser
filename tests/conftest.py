@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import os
+
+# The suite is many small numpy problems, where OpenBLAS's thread pool costs more than it saves:
+# tests/test_classifier.py takes 161 s with the default 12 threads and 105 s with one. Set before
+# numpy is first imported (the imports below load it).
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import struct
 from pathlib import Path
 
 import pytest
 
 from backend.index import HEADER_BYTES
+from tests.parts import PART_OF, PARTS
 
 CAPTURE = Path(__file__).resolve().parent.parent / "captures" / "capture.dat"
 
@@ -67,3 +76,33 @@ def _allow_tmp_capture_root(tmp_path_factory: pytest.TempPathFactory):
             os.environ.pop(ROOTS_ENV_VAR, None)
         else:
             os.environ[ROOTS_ENV_VAR] = previous
+
+
+@pytest.fixture(scope="session")
+def bank_capture(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """tests.test_hybrid2's 200 s capture (still, a mover from 80 to 140 s), built once for the tests that only read it."""
+    from tests.test_hybrid2 import _capture
+
+    return _capture(tmp_path_factory.mktemp("bank"))
+
+
+@pytest.fixture(scope="session")
+def bank_units(bank_capture: Path) -> dict:
+    """``classifier.compute_features(bank_capture, 0, 200)`` -- the whole bank, ~10 s -- computed once and
+    shared read-only by the classifier, Liu and 11F-column tests. Do not mutate it."""
+    from backend import classifier
+
+    return classifier.compute_features(bank_capture, 0.0, 200.0)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    for part in PARTS:
+        config.addinivalue_line("markers", f"{part}: the {part} part of the suite (tests/parts.py)")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Mark every test with its file's part, so ``pytest -m classifier`` runs one part."""
+    for item in items:
+        part = PART_OF.get(Path(str(item.fspath)).stem)
+        if part:
+            item.add_marker(getattr(pytest.mark, part))

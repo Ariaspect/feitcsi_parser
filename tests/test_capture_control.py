@@ -25,6 +25,8 @@ while [ $# -gt 0 ]; do case $1 in --duration) DUR=$2; shift 2;; *) shift;; esac;
 LOG=$CAPTURE_DIR/mtk_capture.log
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
 mkdir -p "$CAPTURE_DIR"
+# runs of 10 s or less sleep FAKE_SLEEP instead (the tests that stop a run mid-way ask for 60 s)
+SLEEP=$DUR; if [ "$DUR" -le 10 ] && [ -n "${FAKE_SLEEP:-}" ]; then SLEEP=$FAKE_SLEEP; fi
 echo "retain=$RETAIN_DAYS upload=$UPLOAD cv=$CV ping=$PING_INTERVAL" >"$CAPTURE_DIR/env.seen"
 if [ "${FAKE_MODE:-ok}" = skip ]; then log "SKIP  previous capture still running"; exit 0; fi
 if [ "${FAKE_MODE:-ok}" = abort ]; then log "ABORT board 192.0.2.1 unreachable and serial wake failed"; exit 1; fi
@@ -36,7 +38,7 @@ if [ "${FAKE_MODE:-ok}" = wifi ]; then
 fi
 log "START $STAMP.bin  ${DUR}s via enp1s0  (99999MB free)"
 : >"$CAPTURE_DIR/$STAMP.bin"
-sleep "$DUR"
+sleep "$SLEEP"
 echo data >>"$CAPTURE_DIR/$STAMP.bin"
 log "DONE  $STAMP.bin  4.0K  ${DUR}s  rc=0  10 frames, ${DUR}s span"
 exit 0
@@ -44,7 +46,9 @@ exit 0
 
 
 @pytest.fixture
-def fake(tmp_path: Path):
+def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # 10 s is the manager's floor; the stand-in only has to look like a run, not take as long as one
+    monkeypatch.setenv("FAKE_SLEEP", "0.3")
     script = tmp_path / "scripts" / "capture_mtk_hourly.sh"
     script.parent.mkdir()
     script.write_text(FAKE)
@@ -305,6 +309,7 @@ def test_proxy_mode_forwards_to_the_capture_laptop(monkeypatch):
         assert client.post("/api/capture/stop").json()["state"] == "idle"
     finally:
         srv.shutdown()
+        srv.server_close()          # the port refuses, as it does when the tunnel is down
     # tunnel down -> 503, not a hang
     monkeypatch.setattr(capture_control, "PROXY_URL", f"http://127.0.0.1:{srv.server_port}")
     from backend.app import app as app2

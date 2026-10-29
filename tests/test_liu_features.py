@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from backend import classifier, liu_features as L
-from tests.test_hybrid2 import _capture
 
 FS = 42.0
 
@@ -107,8 +105,8 @@ def test_the_columns_are_appended_display_only_and_feed_nothing() -> None:
     assert not set(liu) & set(classifier.HUMAN_FEATURES)
 
 
-def test_every_unit_carries_the_columns_and_the_previous_units_score(tmp_path: Path) -> None:
-    units = classifier.compute_features(_capture(tmp_path), 0.0, 200.0)["units"]
+def test_every_unit_carries_the_columns_and_the_previous_units_score(bank_units: dict) -> None:
+    units = bank_units["units"]
     assert len(units) == 3
     for u in units:
         for f in L.FEATURES:

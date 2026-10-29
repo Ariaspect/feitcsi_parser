@@ -86,9 +86,8 @@ def test_units_divide_the_range_equally_nearest_the_requested_length() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_every_feature_in_the_bank_is_a_field_of_every_unit(tmp_path: Path) -> None:
-    p = _capture(tmp_path)
-    out = classifier.compute_features(p, 0.0, 200.0)
+def test_every_feature_in_the_bank_is_a_field_of_every_unit(bank_units: dict) -> None:
+    out = bank_units
     assert len(out["units"]) == 3                 # 200 s nearest 60 s units
     for u in out["units"]:
         for f in classifier.FEATURES:
@@ -119,58 +118,72 @@ def _slow_capture(tmp_path: Path, n: int = 4000) -> Path:
     return write(tmp_path, b"".join(blob), "slow.bin")
 
 
-def test_the_moving_unit_scores_above_the_still_ones(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def slow_bank(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The bank over ``_slow_capture``, computed once for the tests that only read it."""
+    return classifier.compute_features(_slow_capture(tmp_path_factory.mktemp("slow")), 0.0, 200.0)
+
+
+@pytest.fixture(scope="module")
+def whole_bank(bank_capture: Path) -> dict:
+    """The bank over the shared capture as one 200 s unit."""
+    return classifier.compute_features(bank_capture, 0.0, 200.0, unit_seconds=200.0)
+
+
+@pytest.fixture(scope="module")
+def range_rule(bank_capture: Path) -> dict:
+    """hybrid2's range rule over the same 200 s, at the bank's lag."""
+    return hybrid2.compute_hybrid2(bank_capture, 0.0, 200.0, lag_seconds=hybrid2.RANGE_LAG_SECONDS)
+
+
+def test_the_moving_unit_scores_above_the_still_ones(bank_units: dict, slow_bank: dict) -> None:
     """Both fixtures move from 80 s to 140 s; with three 66.7 s units that is
     the middle one. The step sees hybrid2's white per-frame modulation, the
     autocorrelation sees the slow swing -- each channel on the motion it is
     built for."""
-    units = classifier.compute_features(_capture(tmp_path), 0.0, 200.0)["units"]
+    units = bank_units["units"]
     assert units[1]["step_p90"] > max(units[0]["step_p90"], units[2]["step_p90"])
 
-    slow = classifier.compute_features(_slow_capture(tmp_path), 0.0, 200.0)["units"]
+    slow = slow_bank["units"]
     assert slow[1]["acf_amp_p90"] > max(slow[0]["acf_amp_p90"], slow[2]["acf_amp_p90"])
     assert slow[1]["acf_amp_median"] > 0.5
 
 
-def test_white_per_frame_modulation_is_noise_to_the_autocorrelation(tmp_path: Path) -> None:
+def test_white_per_frame_modulation_is_noise_to_the_autocorrelation(bank_units: dict) -> None:
     """The flip side, and the reason ψ̂ is a feature beside the step rather
     than in place of it: a fresh random factor every frame moves the step a
     lot and ψ̂ not upward at all."""
-    units = classifier.compute_features(_capture(tmp_path), 0.0, 200.0)["units"]
+    units = bank_units["units"]
     assert units[1]["acf_amp_median"] <= max(units[0]["acf_amp_median"], units[2]["acf_amp_median"]) + 0.05
 
 
-def test_the_link_jitter_is_the_one_frame_step_and_the_norm_is_the_ratio(tmp_path: Path) -> None:
+def test_the_link_jitter_is_the_one_frame_step_and_the_norm_is_the_ratio(bank_units: dict) -> None:
     """Test 2's columns: lag1_p20 is the 20th percentile of the adjacent-frame
     step, step_norm the lag step over it. On the white-modulation fixture the
     moving unit's one-frame step is inflated too, so its norm is NOT larger
     than the still units' -- which is the caveat the bank records."""
-    p = _capture(tmp_path)
-    units = classifier.compute_features(p, 0.0, 200.0)["units"]
+    units = bank_units["units"]
     for u in units:
         assert np.isfinite(u["lag1_p20"]) and u["lag1_p20"] > 0
         assert u["step_norm"] == pytest.approx(u["step_p90"] / u["lag1_p20"])
     assert units[1]["lag1_p20"] > max(units[0]["lag1_p20"], units[2]["lag1_p20"])
 
 
-def test_the_breath_run_is_the_range_rules_run(tmp_path: Path) -> None:
+def test_the_breath_run_is_the_range_rules_run(whole_bank: dict, range_rule: dict) -> None:
     """Test 3's columns ride on hybrid2's own FarSense sweep: over a whole-range
     unit the 10 s run is range_verdict's breath_run to the second, and the
     20 s run with the rate floor is an integer that never exceeds the seconds."""
-    p = _capture(tmp_path)
-    out = classifier.compute_features(p, 0.0, 200.0, unit_seconds=200.0)
-    u = out["units"][0]
-    r = hybrid2.compute_hybrid2(p, 0.0, 200.0, lag_seconds=hybrid2.RANGE_LAG_SECONDS)
-    assert u["breath_run"] == r["range_verdict"]["breath_run"]
+    u = whole_bank["units"][0]
+    assert u["breath_run"] == range_rule["range_verdict"]["breath_run"]
     assert isinstance(u["breath_run20"], int) and 0 <= u["breath_run20"] <= u["n_seconds"]
     assert u["breath_rpm"] != u["breath_rpm"] or u["breath_rpm"] >= classifier.BREATH_RATE_FLOOR_RPM
 
 
-def test_the_learned_score_and_the_rule_follow_the_slow_swing(tmp_path: Path) -> None:
+def test_the_learned_score_and_the_rule_follow_the_slow_swing(slow_bank: dict) -> None:
     """Test 4's columns. The slow fixture's middle unit breathes at 18 rpm, so
     both the logistic score and rule B should call it and not the still ones;
     the score is a probability and the rule a 0/1."""
-    units = classifier.compute_features(_slow_capture(tmp_path), 0.0, 200.0)["units"]
+    units = slow_bank["units"]
     for u in units:
         assert u["p_occupied"] != u["p_occupied"] or 0.0 <= u["p_occupied"] <= 1.0
         assert u["rule_b"] in (0, 1)
@@ -235,8 +248,8 @@ def test_revisit_reads_a_cycle_and_ignores_a_wander() -> None:
     assert np.isnan(classifier.revisit_statistic(cycle[:5], times[:5])[0])
 
 
-def test_the_test6_columns_are_well_formed(tmp_path: Path) -> None:
-    units = classifier.compute_features(_slow_capture(tmp_path), 0.0, 200.0)["units"]
+def test_the_test6_columns_are_well_formed(slow_bank: dict) -> None:
+    units = slow_bank["units"]
     for u in units:
         assert u["machine_like"] in (0, 1, None)
         assert u["verdict3"] in (0, 1, 2)
@@ -299,13 +312,10 @@ def test_units_span_the_frames_not_the_request(tmp_path: Path) -> None:
     assert all(u["n_windows"] > 0 for u in out["units"])
 
 
-def test_the_step_is_the_range_rules_step(tmp_path: Path) -> None:
+def test_the_step_is_the_range_rules_step(whole_bank: dict, range_rule: dict) -> None:
     """Same frames, same lag: a unit's step P90 here is what range_verdict
     would compute over the same seconds, so the tab and the rule agree."""
-    p = _capture(tmp_path)
-    out = classifier.compute_features(p, 0.0, 200.0, unit_seconds=200.0)
-    r = hybrid2.compute_hybrid2(p, 0.0, 200.0, lag_seconds=hybrid2.RANGE_LAG_SECONDS)
-    assert out["units"][0]["step_p90"] == pytest.approx(r["range_verdict"]["motion_p90"], rel=0.05)
+    assert whole_bank["units"][0]["step_p90"] == pytest.approx(range_rule["range_verdict"]["motion_p90"], rel=0.05)
 
 
 # --------------------------------------------------------------------------- #
