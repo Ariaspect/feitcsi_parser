@@ -1784,3 +1784,99 @@ export async function syncCaptures(): Promise<CaptureStatus> {
   if (!res.ok) throw await captureError(res, "capture sync");
   return (await res.json()) as CaptureStatus;
 }
+
+// --- ML tab: human-presence and anomaly-presence models (backend/ml_heads.py) ---------------
+
+export type MlHeadName = "human" | "anomaly";
+export type MlKind = "lr" | "mlp";
+
+export interface MlHeadOut {
+  p: number;
+  label: number;
+  logit: number;
+  /** Scaled inputs, in `features` order. */
+  z: number[];
+  /** Per input: LR -> coef x z; hidden layer -> logit minus the logit with that input at its training mean. */
+  effect: number[];
+}
+
+export interface MlLoeoEnv {
+  n: number;
+  correct: number;
+  accuracy: number | null;
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+  kpi1?: number | null;
+  kpi2?: number | null;
+  nonhuman?: number | null;
+  personOnly?: number | null;
+  empty?: number | null;
+  byCondition: Record<string, [number, number]>;
+}
+
+export interface MlLoeo {
+  envs: Record<string, MlLoeoEnv>;
+  pooled: { n: number; correct: number; accuracy: number };
+  meanOfEnvs: number;
+}
+
+export interface MlHeads {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  windowS: [number, number];
+  features: string[];
+  value: number[];
+  imputed: boolean[];
+  labels: Record<string, { label: string | null; test: string | null; description: string | null }>;
+  heads: Record<MlHeadName, Record<MlKind, MlHeadOut>>;
+  threshold: number;
+  truth: { human: string | null; humanSource: string | null; condition: string | null; anomaly: number | null; camera: number | null };
+  trainedOn: Record<string, { n: number; human: number; anomaly: number }>;
+  fitted: string;
+  /** Per head: "lr", "mlp", and the reference rows ("lr_11F_reference", "lr_marked_reference", "mlp_marked_reference"). */
+  loeo: Record<MlHeadName, Record<string, MlLoeo>>;
+}
+
+export function parseMlHeads(b: any): MlHeads {
+  const nums = (xs: (number | null)[]) => xs.map((v) => (v == null ? NaN : v));
+  const head = (h: any): MlHeadOut => ({ p: h.p, label: h.label, logit: h.logit, z: nums(h.z), effect: nums(h.effect) });
+  const loeo = (t: any): MlLoeo => {
+    const envs: Record<string, MlLoeoEnv> = {};
+    for (const [k, v] of Object.entries<any>(t)) {
+      if (k === "pooled" || k === "mean_of_envs") continue;
+      envs[k] = {
+        n: v.n, correct: v.correct, accuracy: v.accuracy, precision: v.precision, recall: v.recall, f1: v.f1,
+        kpi1: v.kpi1, kpi2: v.kpi2, nonhuman: v.nonhuman, personOnly: v.person_only, empty: v.empty,
+        byCondition: v.by_condition ?? {},
+      };
+    }
+    return { envs, pooled: t.pooled, meanOfEnvs: t.mean_of_envs };
+  };
+  const heads = {} as Record<MlHeadName, Record<MlKind, MlHeadOut>>;
+  const lo = {} as Record<MlHeadName, Record<string, MlLoeo>>;
+  for (const h of ["human", "anomaly"] as MlHeadName[]) {
+    heads[h] = { lr: head(b.heads[h].lr), mlp: head(b.heads[h].mlp) };
+    lo[h] = Object.fromEntries(Object.entries<any>(b.loeo[h]).map(([k, v]) => [k, loeo(v)]));
+  }
+  return {
+    file: b.file, window: b.window, windows: b.windows, windowS: b.window_s,
+    features: b.features, value: nums(b.value), imputed: b.imputed, labels: b.labels,
+    heads, threshold: b.threshold,
+    truth: {
+      human: b.truth.human ?? null, humanSource: b.truth.human_source ?? null, condition: b.truth.condition ?? null,
+      anomaly: b.truth.anomaly ?? null, camera: b.truth.camera ?? null,
+    },
+    trainedOn: b.trained_on, fitted: b.fitted, loeo: lo,
+  };
+}
+
+export async function fetchMlHeads(path: string, window: number, signal?: AbortSignal): Promise<MlHeads> {
+  const res = await fetch(`/api/ml/heads?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `ml heads: ${res.status}`);
+  }
+  return parseMlHeads(await res.json());
+}

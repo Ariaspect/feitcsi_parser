@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 import subprocess
 
-from . import af8_explain, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
+from . import af8_explain, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, ml_heads, motionsig, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1695,6 +1695,64 @@ def af8_classifier(
         }
     out["camera"] = camera
     return out
+
+
+@app.get("/api/ml/heads")
+def ml_heads_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The human-presence and anomaly-presence models (11F + aux + Liu; LR and one hidden layer each) on one window.
+
+    See ``backend.ml_heads``. With the capture's labels where it has them -- human from the GT table,
+    else the operator's presence; anomaly from whether the recorded condition names a fan, vacuum
+    or robot (both capture-level) -- and the models' leave-one-environment-out accuracy.
+    """
+    p = resolve_capture_path(path)
+    try:
+        out = ml_heads.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    labels = {f["key"]: {"label": f.get("label"), "test": f.get("test"), "description": f.get("description")}
+              for f in classifier.FEATURES if f.get("key") in ml_heads.FEATURES}
+    labels = {**ml_heads.LABEL_FALLBACK, **labels}
+    heads = {
+        h: {
+            k: {
+                "p": _json_num(m["p"]),
+                "label": int(m["label"]),
+                "logit": _json_num(m["logit"]),
+                "z": [_json_num(v) for v in m["z"]],
+                "effect": [_json_num(v) for v in m["effect"]],
+            }
+            for k, m in out[h].items()
+        }
+        for h in ml_heads.HEADS
+    }
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "features": out["features"],
+        "value": [_json_num(v) for v in out["value"]],
+        "imputed": [bool(v) for v in out["imputed"]],
+        "labels": labels,
+        "heads": heads,
+        "threshold": ml_heads.THRESHOLD,
+        "truth": {
+            "human": truth.get("gt"),
+            "human_source": truth.get("gt_source"),
+            "condition": truth.get("condition"),
+            "anomaly": ml_heads.anomaly_truth(truth.get("condition")),
+            "camera": truth.get("camera"),
+        },
+        "trained_on": ml_heads.TRAINED_ON,
+        "fitted": ml_heads.FITTED,
+        "loeo": ml_heads.LOEO,
+    }
 
 
 @app.get("/api/motion-signal")

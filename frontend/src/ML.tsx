@@ -4,6 +4,7 @@ import { ChartBusy } from "@/components/ChartBusy";
 import { Button } from "@/components/ui/button";
 import { fetchAf8, type Af8, type Af8Feature } from "./api";
 import { Chart } from "./Chart";
+import { MLHeads } from "./MLHeads";
 import { ticks } from "./series";
 
 // The 11-feature model (backend/af8_env1.py: AF8's ten features plus X_gate_dc,
@@ -126,6 +127,8 @@ export function ML({ path, dark }: MLProps) {
 
   return (
     <div className="space-y-4" ref={holder}>
+      <MLHeads path={path} win={win} dark={dark} />
+      <div className="text-sm font-semibold">11-feature screen model (deployed)</div>
       {error ? (
         <div className="text-muted-foreground p-8 text-sm">No AF8 verdict for this capture — {error}</div>
       ) : !data ? (

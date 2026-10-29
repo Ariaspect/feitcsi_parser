@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { defaultCapture, fetchClassifier, fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, truncateCaptureName } from "./api";
+import { defaultCapture, fetchClassifier, fetchDoppler, fetchFrameDiff, fetchMeta, fetchTile, parseMlHeads, truncateCaptureName } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -571,5 +571,27 @@ describe("defaultCapture", () => {
   it("falls back to the newest when every capture is long", () => {
     const list = [f("x.bin", 1700), f("y.bin", 1600)];
     expect(defaultCapture(list).filename).toBe("x.bin");
+  });
+});
+
+describe("parseMlHeads", () => {
+  it("keeps the environments apart from the pooled line and turns nulls into NaN", () => {
+    const env = { n: 2, correct: 1, accuracy: 50, precision: null, recall: null, f1: null, person_only: 100, by_condition: { a: [1, 2] } };
+    const t = { env1: env, pooled: { n: 2, correct: 1, accuracy: 50 }, mean_of_envs: 50 };
+    const head = { p: 0.7, label: 1, logit: 0.85, z: [0.1, null], effect: [0.2, null] };
+    const m = parseMlHeads({
+      file: "x.bin", window: 0, windows: [[0, 61]], window_s: [0, 60], features: ["a", "b"], value: [1, null],
+      imputed: [false, true], labels: {}, heads: { human: { lr: head, mlp: head }, anomaly: { lr: head, mlp: head } },
+      threshold: 0.5, truth: { human: "person", gt_source: "x", condition: "rot fan", anomaly: 1 },
+      trained_on: { env1: { n: 2, human: 1, anomaly: 1 } }, fitted: "2026-10-29",
+      loeo: { human: { lr: t }, anomaly: { lr: t } },
+    });
+    expect(Object.keys(m.loeo.human.lr.envs)).toEqual(["env1"]);
+    expect(m.loeo.human.lr.pooled.accuracy).toBe(50);
+    expect(m.loeo.anomaly.lr.envs.env1.personOnly).toBe(100);
+    expect(Number.isNaN(m.value[1])).toBe(true);
+    expect(Number.isNaN(m.heads.human.mlp.effect[1])).toBe(true);
+    expect(m.truth.anomaly).toBe(1);
+    expect(m.windowS).toEqual([0, 60]);
   });
 });
