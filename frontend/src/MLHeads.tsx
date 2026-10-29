@@ -272,8 +272,8 @@ function Loeo({ data }: { data: MlHeads }) {
                   {e} <span className="opacity-70">({data.trainedOn[e]?.n ?? "?"})</span>
                 </th>
               ))}
-              <th className="pr-3 text-right font-normal">pooled</th>
-              <th className="text-right font-normal">mean</th>
+              <th className="pr-3 text-right font-normal">pooled (4)</th>
+              <th className="text-right font-normal">mean (4)</th>
             </tr>
           </thead>
           <tbody>
@@ -302,8 +302,10 @@ function Loeo({ data }: { data: MlHeads }) {
         </table>
       </div>
       <p className="text-[11px] text-muted-foreground leading-relaxed">
-        Each dataset held out in turn, the model trained on the other four (column header: minutes in it); pooled =
-        every held-out minute together. Hover a cell for precision, recall, F1 and the KPI split. The models on this
+        env1, env2, env3 and env3-1 each held out in turn, the model trained on the other three; scenario C is never
+        in their training (recorded on 10/23 with env3-1, training on it lifted held-out env3-1 by ~9 points). scnC: tested on
+        a model trained on all four. Pooled and mean are over the four rooms (column header: minutes in it). Hover a cell
+        for precision, recall, F1 and the KPI split. The models on this
         tab are trained on all five ({Object.values(data.trainedOn).reduce((a, b) => a + b.n, 0)} minutes,
         fitted {data.fitted}), without augmentation. Human label: the binary GT. Anomaly label: the recorded condition
         names a fan, vacuum or robot, with or without a person; env3-1 has none, so there it only counts false alarms.

@@ -71,12 +71,13 @@ def test_the_anomaly_label_is_a_named_mover() -> None:
     assert ml_heads.anomaly_truth(None) is None
 
 
-def test_loeo_holds_every_environment_for_both_labels_and_models() -> None:
+def test_loeo_holds_every_room_out_and_tests_scenario_c_for_both_labels_and_models() -> None:
     envs = {"env1", "env2", "env3", "env3-1", "scnC"}
     for h in ml_heads.HEADS:
         for k in ("lr", "mlp", "lr_11F_reference", "lr_marked_reference", "mlp_marked_reference"):
             t = ml_heads.LOEO[h][k]
-            assert envs <= set(t) and t["pooled"]["n"] == sum(t[e]["n"] for e in envs) == 1246
+            rooms = envs - {"scnC"}
+            assert envs <= set(t) and t["pooled"]["n"] == sum(t[e]["n"] for e in rooms) == 1246 - 149
             assert 0 <= t["pooled"]["accuracy"] <= 100
 
 

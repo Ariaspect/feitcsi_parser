@@ -21,9 +21,13 @@ and one hidden layer (the same scaling, 16 tanh units, L2 alpha = 3, L-BFGS, bal
 weights, seed 0). Both are fitted on every row and written as plain numbers to
 ``backend/ml_heads.json``; ``backend/ml_heads.py`` evaluates them with numpy alone.
 
-LOEO: each of the five datasets held out in turn, trained on the other four. Also given, for
-reference only: the 11 features alone with the same LR, and the 11 plus the classifier tab's
-starred columns (``MARKED``) with both models. No augmentation anywhere.
+LOEO over the four environments: env1, env2, env3 and env3-1 each held out in turn, trained on the
+other three; scenario C is never in their training -- it was recorded on 10/23 with env3-1, and
+training on it lifted held-out env3-1 by ~9 points (human LR 84.5 -> 93.6), so it is not an unseen
+environment for env3-1. Scenario C itself is tested on a model trained on all four. Pooled and
+mean are over the four. Also given, for reference only: the 11 features alone with the same LR,
+and the 11 plus the classifier tab's starred columns (``MARKED``) with both models. No
+augmentation anywhere.
 
 Run: ``.venv/bin/python scripts/fit_ml_heads.py`` (about a minute).
 """
@@ -51,6 +55,7 @@ OUT = ROOT / "backend" / "ml_heads.json"
 
 META = ["key", "ds", "cond", "y", "obj"]
 ENVS = ["env1", "env2", "env3", "env3-1", "scnC"]
+ROOMS = ["env1", "env2", "env3", "env3-1"]          # the LOEO environments; scnC is tested, never trained on
 TARGETS = {"human": "y", "anomaly": "obj"}
 HIDDEN = 16
 ALPHA = 3.0
@@ -128,16 +133,19 @@ def scores(S: pd.DataFrame, target: str, pred: np.ndarray) -> dict:
 
 
 def loeo(D: pd.DataFrame, cols: list[str], target: str, kind: str) -> dict:
+    """Each room held out, trained on the other three (scnC unused); scnC on a model of all four."""
     res, pooled_ok, pooled_n = {}, 0, 0
     for env in ENVS:
-        tr, te = D[D.ds != env], D[D.ds == env]
+        tr = D[D.ds.isin(ROOMS) & (D.ds != env)]
+        te = D[D.ds == env]
         m = fit(kind, tr[cols].to_numpy(float), tr[target].to_numpy(int))
         pred = (m.predict_proba(te[cols].to_numpy(float))[:, 1] > 0.5).astype(int)
         res[env] = scores(te, target, pred)
-        pooled_ok += res[env]["correct"]
-        pooled_n += res[env]["n"]
+        if env in ROOMS:
+            pooled_ok += res[env]["correct"]
+            pooled_n += res[env]["n"]
     res["pooled"] = {"n": pooled_n, "correct": pooled_ok, "accuracy": round(100 * pooled_ok / pooled_n, 1)}
-    res["mean_of_envs"] = round(float(np.mean([res[e]["accuracy"] for e in ENVS])), 1)
+    res["mean_of_envs"] = round(float(np.mean([res[e]["accuracy"] for e in ROOMS])), 1)
     return res
 
 

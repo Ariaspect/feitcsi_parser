@@ -2353,14 +2353,14 @@
    "lr": {
     "env1": {
      "n": 270,
-     "correct": 205,
-     "accuracy": 75.9,
-     "precision": 89.9,
-     "recall": 66.9,
-     "f1": 76.7,
+     "correct": 216,
+     "accuracy": 80.0,
+     "precision": 94.2,
+     "recall": 70.6,
+     "f1": 80.7,
      "kpi1": 95.5,
-     "kpi2": 62.5,
-     "nonhuman": 80.0,
+     "kpi2": 69.4,
+     "nonhuman": 88.3,
      "by_condition": {
       "empty": [
        50,
@@ -2371,7 +2371,7 @@
        20
       ],
       "rot fan": [
-       14,
+       16,
        20
       ],
       "rot fan + small": [
@@ -2379,7 +2379,7 @@
        20
       ],
       "rot fan + still": [
-       11,
+       12,
        20
       ],
       "small move": [
@@ -2387,11 +2387,11 @@
        20
       ],
       "static fan": [
-       17,
+       20,
        20
       ],
       "static fan + small": [
-       11,
+       13,
        20
       ],
       "static fan + still": [
@@ -2407,28 +2407,28 @@
        20
       ],
       "vacuum + still": [
-       10,
+       13,
        20
       ]
      }
     },
     "env2": {
      "n": 442,
-     "correct": 399,
-     "accuracy": 90.3,
-     "precision": 94.6,
-     "recall": 80.0,
-     "f1": 86.7,
-     "kpi1": 87.6,
-     "kpi2": 92.2,
-     "nonhuman": 96.1,
+     "correct": 403,
+     "accuracy": 91.2,
+     "precision": 88.6,
+     "recall": 89.1,
+     "f1": 88.9,
+     "kpi1": 85.9,
+     "kpi2": 94.9,
+     "nonhuman": 96.6,
      "by_condition": {
       "empty": [
-       60,
+       47,
        60
       ],
       "large move": [
-       13,
+       19,
        20
       ],
       "rot fan": [
@@ -2436,23 +2436,23 @@
        89
       ],
       "rot fan + small": [
-       16,
+       18,
        20
       ],
       "rot fan + still": [
-       7,
+       9,
        10
       ],
       "small move": [
-       20,
+       23,
        24
       ],
       "standing/walking": [
-       5,
+       7,
        14
       ],
       "static fan": [
-       37,
+       38,
        40
       ],
       "static fan + small": [
@@ -2460,11 +2460,11 @@
        5
       ],
       "static fan + still": [
-       10,
+       12,
        15
       ],
       "still": [
-       64,
+       63,
        67
       ],
       "vacuum": [
@@ -2475,33 +2475,33 @@
     },
     "env3": {
      "n": 275,
-     "correct": 256,
-     "accuracy": 93.1,
-     "precision": 92.8,
-     "recall": 95.7,
-     "f1": 94.2,
-     "kpi1": 98.3,
-     "kpi2": 89.4,
-     "nonhuman": 83.3,
+     "correct": 255,
+     "accuracy": 92.7,
+     "precision": 95.5,
+     "recall": 91.9,
+     "f1": 93.7,
+     "kpi1": 100.0,
+     "kpi2": 87.5,
+     "nonhuman": 88.3,
      "by_condition": {
       "Big mov": [
        20,
        20
       ],
       "Empty": [
-       52,
+       54,
        54
       ],
       "Fan rot (empty)": [
-       12,
+       15,
        20
       ],
       "Fan rot + small mov": [
-       16,
+       11,
        20
       ],
       "Fan rot + static occ": [
-       17,
+       16,
        20
       ],
       "Fan still (empty)": [
@@ -2536,12 +2536,12 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 103,
-     "accuracy": 93.6,
+     "correct": 93,
+     "accuracy": 84.5,
      "precision": 100.0,
-     "recall": 88.3,
-     "f1": 93.8,
-     "kpi1": 93.6,
+     "recall": 71.7,
+     "f1": 83.5,
+     "kpi1": 84.5,
      "kpi2": null,
      "nonhuman": null,
      "by_condition": {
@@ -2554,11 +2554,11 @@
        50
       ],
       "Small mov": [
-       16,
+       11,
        20
       ],
       "Static occupancy": [
-       17,
+       12,
        20
       ]
      }
@@ -2601,42 +2601,42 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 1051,
-     "accuracy": 84.3
+     "n": 1097,
+     "correct": 967,
+     "accuracy": 88.1
     },
-    "mean_of_envs": 82.4
+    "mean_of_envs": 87.1
    },
    "mlp": {
     "env1": {
      "n": 270,
-     "correct": 226,
-     "accuracy": 83.7,
-     "precision": 88.2,
-     "recall": 83.8,
-     "f1": 85.9,
-     "kpi1": 97.3,
-     "kpi2": 74.4,
-     "nonhuman": 70.0,
+     "correct": 215,
+     "accuracy": 79.6,
+     "precision": 90.7,
+     "recall": 73.1,
+     "f1": 81.0,
+     "kpi1": 94.5,
+     "kpi2": 69.4,
+     "nonhuman": 80.0,
      "by_condition": {
       "empty": [
        50,
        50
       ],
       "large move": [
-       18,
+       16,
        20
       ],
       "rot fan": [
-       7,
+       11,
        20
       ],
       "rot fan + small": [
-       19,
+       16,
        20
       ],
       "rot fan + still": [
-       20,
+       18,
        20
       ],
       "small move": [
@@ -2644,19 +2644,19 @@
        20
       ],
       "static fan": [
-       18,
+       20,
        20
       ],
       "static fan + small": [
-       15,
-       20
-      ],
-      "static fan + still": [
        9,
        20
       ],
+      "static fan + still": [
+       7,
+       20
+      ],
       "still": [
-       19,
+       18,
        20
       ],
       "vacuum": [
@@ -2664,44 +2664,44 @@
        20
       ],
       "vacuum + still": [
-       14,
+       13,
        20
       ]
      }
     },
     "env2": {
      "n": 442,
-     "correct": 399,
-     "accuracy": 90.3,
-     "precision": 95.8,
-     "recall": 78.9,
-     "f1": 86.5,
-     "kpi1": 89.7,
-     "kpi2": 90.7,
-     "nonhuman": 97.1,
+     "correct": 408,
+     "accuracy": 92.3,
+     "precision": 93.3,
+     "recall": 86.9,
+     "f1": 89.9,
+     "kpi1": 90.8,
+     "kpi2": 93.4,
+     "nonhuman": 96.1,
      "by_condition": {
       "empty": [
-       60,
+       57,
        60
       ],
       "large move": [
-       18,
+       19,
        20
       ],
       "rot fan": [
-       87,
+       85,
        89
       ],
       "rot fan + small": [
-       13,
+       16,
        20
       ],
       "rot fan + still": [
-       5,
+       8,
        10
       ],
       "small move": [
-       21,
+       23,
        24
       ],
       "standing/walking": [
@@ -2717,11 +2717,11 @@
        5
       ],
       "static fan + still": [
-       9,
+       12,
        15
       ],
       "still": [
-       62,
+       64,
        67
       ],
       "vacuum": [
@@ -2732,29 +2732,29 @@
     },
     "env3": {
      "n": 275,
-     "correct": 257,
-     "accuracy": 93.5,
-     "precision": 96.7,
-     "recall": 91.9,
-     "f1": 94.3,
-     "kpi1": 98.3,
-     "kpi2": 90.0,
-     "nonhuman": 95.0,
+     "correct": 254,
+     "accuracy": 92.4,
+     "precision": 96.1,
+     "recall": 90.7,
+     "f1": 93.3,
+     "kpi1": 99.1,
+     "kpi2": 87.5,
+     "nonhuman": 91.7,
      "by_condition": {
       "Big mov": [
        20,
        20
       ],
       "Empty": [
-       52,
+       53,
        54
       ],
       "Fan rot (empty)": [
-       19,
+       18,
        20
       ],
       "Fan rot + small mov": [
-       12,
+       10,
        20
       ],
       "Fan rot + static occ": [
@@ -2774,7 +2774,7 @@
        20
       ],
       "Robot (empty)": [
-       18,
+       17,
        20
       ],
       "Robot + static occ / small mov": [
@@ -2793,17 +2793,17 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 107,
-     "accuracy": 97.3,
+     "correct": 94,
+     "accuracy": 85.5,
      "precision": 100.0,
-     "recall": 95.0,
-     "f1": 97.4,
-     "kpi1": 97.3,
+     "recall": 73.3,
+     "f1": 84.6,
+     "kpi1": 85.5,
      "kpi2": null,
      "nonhuman": null,
      "by_condition": {
       "Big mov": [
-       19,
+       14,
        20
       ],
       "Empty": [
@@ -2811,11 +2811,11 @@
        50
       ],
       "Small mov": [
-       18,
+       15,
        20
       ],
       "Static occupancy": [
-       20,
+       15,
        20
       ]
      }
@@ -2858,23 +2858,23 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 1101,
-     "accuracy": 88.4
+     "n": 1097,
+     "correct": 971,
+     "accuracy": 88.5
     },
-    "mean_of_envs": 88.0
+    "mean_of_envs": 87.4
    },
    "lr_11F_reference": {
     "env1": {
      "n": 270,
-     "correct": 220,
-     "accuracy": 81.5,
-     "precision": 78.9,
-     "recall": 93.8,
-     "f1": 85.7,
+     "correct": 230,
+     "accuracy": 85.2,
+     "precision": 82.3,
+     "recall": 95.6,
+     "f1": 88.4,
      "kpi1": 97.3,
-     "kpi2": 70.6,
-     "nonhuman": 33.3,
+     "kpi2": 76.9,
+     "nonhuman": 45.0,
      "by_condition": {
       "empty": [
        50,
@@ -2885,15 +2885,15 @@
        20
       ],
       "rot fan": [
-       2,
+       7,
        20
       ],
       "rot fan + small": [
-       20,
+       19,
        20
       ],
       "rot fan + still": [
-       20,
+       19,
        20
       ],
       "small move": [
@@ -2901,7 +2901,7 @@
        20
       ],
       "static fan": [
-       4,
+       6,
        20
       ],
       "static fan + small": [
@@ -2909,7 +2909,7 @@
        20
       ],
       "static fan + still": [
-       14,
+       19,
        20
       ],
       "still": [
@@ -2928,14 +2928,14 @@
     },
     "env2": {
      "n": 442,
-     "correct": 394,
-     "accuracy": 89.1,
-     "precision": 81.0,
-     "recall": 94.9,
-     "f1": 87.4,
-     "kpi1": 98.9,
-     "kpi2": 82.1,
-     "nonhuman": 81.2,
+     "correct": 398,
+     "accuracy": 90.0,
+     "precision": 82.9,
+     "recall": 94.3,
+     "f1": 88.2,
+     "kpi1": 98.4,
+     "kpi2": 84.0,
+     "nonhuman": 83.6,
      "by_condition": {
       "empty": [
        60,
@@ -2950,11 +2950,11 @@
        89
       ],
       "rot fan + small": [
-       16,
+       15,
        20
       ],
       "rot fan + still": [
-       7,
+       8,
        10
       ],
       "small move": [
@@ -2966,7 +2966,7 @@
        14
       ],
       "static fan": [
-       38,
+       39,
        40
       ],
       "static fan + small": [
@@ -2978,28 +2978,28 @@
        15
       ],
       "still": [
-       67,
+       66,
        67
       ],
       "vacuum": [
-       41,
+       45,
        78
       ]
      }
     },
     "env3": {
      "n": 275,
-     "correct": 248,
-     "accuracy": 90.2,
-     "precision": 96.5,
-     "recall": 86.3,
-     "f1": 91.1,
-     "kpi1": 98.3,
-     "kpi2": 84.4,
-     "nonhuman": 91.7,
+     "correct": 258,
+     "accuracy": 93.8,
+     "precision": 95.6,
+     "recall": 93.8,
+     "f1": 94.7,
+     "kpi1": 100.0,
+     "kpi2": 89.4,
+     "nonhuman": 88.3,
      "by_condition": {
       "Big mov": [
-       18,
+       20,
        20
       ],
       "Empty": [
@@ -3007,15 +3007,15 @@
        54
       ],
       "Fan rot (empty)": [
-       19,
+       16,
        20
       ],
       "Fan rot + small mov": [
-       7,
+       14,
        20
       ],
       "Fan rot + static occ": [
-       13,
+       17,
        20
       ],
       "Fan still (empty)": [
@@ -3023,7 +3023,7 @@
        20
       ],
       "Fan still + small mov": [
-       20,
+       19,
        20
       ],
       "Fan still + static occ": [
@@ -3031,7 +3031,7 @@
        20
       ],
       "Robot (empty)": [
-       16,
+       17,
        20
       ],
       "Robot + static occ / small mov": [
@@ -3050,17 +3050,17 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 93,
-     "accuracy": 84.5,
+     "correct": 85,
+     "accuracy": 77.3,
      "precision": 100.0,
-     "recall": 71.7,
-     "f1": 83.5,
-     "kpi1": 84.5,
+     "recall": 58.3,
+     "f1": 73.7,
+     "kpi1": 77.3,
      "kpi2": null,
      "nonhuman": null,
      "by_condition": {
       "Big mov": [
-       15,
+       13,
        20
       ],
       "Empty": [
@@ -3068,7 +3068,7 @@
        50
       ],
       "Small mov": [
-       15,
+       9,
        20
       ],
       "Static occupancy": [
@@ -3115,23 +3115,23 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 1031,
-     "accuracy": 82.7
+     "n": 1097,
+     "correct": 971,
+     "accuracy": 88.5
     },
-    "mean_of_envs": 79.3
+    "mean_of_envs": 86.6
    },
    "lr_marked_reference": {
     "env1": {
      "n": 270,
-     "correct": 218,
-     "accuracy": 80.7,
-     "precision": 82.5,
-     "recall": 85.6,
-     "f1": 84.0,
+     "correct": 231,
+     "accuracy": 85.6,
+     "precision": 88.1,
+     "recall": 87.5,
+     "f1": 87.8,
      "kpi1": 96.4,
-     "kpi2": 70.0,
-     "nonhuman": 51.7,
+     "kpi2": 78.1,
+     "nonhuman": 68.3,
      "by_condition": {
       "empty": [
        50,
@@ -3142,15 +3142,15 @@
        20
       ],
       "rot fan": [
-       2,
+       9,
        20
       ],
       "rot fan + small": [
-       20,
+       18,
        20
       ],
       "rot fan + still": [
-       20,
+       18,
        20
       ],
       "small move": [
@@ -3158,15 +3158,15 @@
        20
       ],
       "static fan": [
-       17,
+       18,
        20
       ],
       "static fan + small": [
-       16,
+       17,
        20
       ],
       "static fan + still": [
-       8,
+       12,
        20
       ],
       "still": [
@@ -3174,32 +3174,32 @@
        20
       ],
       "vacuum": [
-       12,
+       14,
        20
       ],
       "vacuum + still": [
-       17,
+       19,
        20
       ]
      }
     },
     "env2": {
      "n": 442,
-     "correct": 360,
-     "accuracy": 81.4,
-     "precision": 71.2,
-     "recall": 89.1,
-     "f1": 79.2,
-     "kpi1": 91.4,
-     "kpi2": 74.3,
-     "nonhuman": 71.0,
+     "correct": 394,
+     "accuracy": 89.1,
+     "precision": 82.9,
+     "recall": 91.4,
+     "f1": 87.0,
+     "kpi1": 92.4,
+     "kpi2": 86.8,
+     "nonhuman": 87.0,
      "by_condition": {
       "empty": [
-       57,
+       54,
        60
       ],
       "large move": [
-       17,
+       20,
        20
       ],
       "rot fan": [
@@ -3207,23 +3207,23 @@
        89
       ],
       "rot fan + small": [
-       17,
+       15,
        20
       ],
       "rot fan + still": [
-       7,
+       8,
        10
       ],
       "small move": [
-       23,
+       24,
        24
       ],
       "standing/walking": [
-       5,
+       7,
        14
       ],
       "static fan": [
-       32,
+       38,
        40
       ],
       "static fan + small": [
@@ -3235,28 +3235,28 @@
        15
       ],
       "still": [
-       67,
+       66,
        67
       ],
       "vacuum": [
-       26,
+       53,
        78
       ]
      }
     },
     "env3": {
      "n": 275,
-     "correct": 245,
-     "accuracy": 89.1,
-     "precision": 89.2,
-     "recall": 92.5,
-     "f1": 90.9,
-     "kpi1": 99.1,
-     "kpi2": 81.9,
+     "correct": 254,
+     "accuracy": 92.4,
+     "precision": 89.8,
+     "recall": 98.1,
+     "f1": 93.8,
+     "kpi1": 100.0,
+     "kpi2": 86.9,
      "nonhuman": 70.0,
      "by_condition": {
       "Big mov": [
-       19,
+       20,
        20
       ],
       "Empty": [
@@ -3264,15 +3264,15 @@
        54
       ],
       "Fan rot (empty)": [
-       15,
+       6,
        20
       ],
       "Fan rot + small mov": [
-       12,
+       18,
        20
       ],
       "Fan rot + static occ": [
-       17,
+       19,
        20
       ],
       "Fan still (empty)": [
@@ -3288,7 +3288,7 @@
        20
       ],
       "Robot (empty)": [
-       7,
+       16,
        20
       ],
       "Robot + static occ / small mov": [
@@ -3307,17 +3307,17 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 93,
-     "accuracy": 84.5,
+     "correct": 86,
+     "accuracy": 78.2,
      "precision": 100.0,
-     "recall": 71.7,
-     "f1": 83.5,
-     "kpi1": 84.5,
+     "recall": 60.0,
+     "f1": 75.0,
+     "kpi1": 78.2,
      "kpi2": null,
      "nonhuman": null,
      "by_condition": {
       "Big mov": [
-       12,
+       13,
        20
       ],
       "Empty": [
@@ -3325,11 +3325,11 @@
        50
       ],
       "Small mov": [
-       16,
+       11,
        20
       ],
       "Static occupancy": [
-       15,
+       12,
        20
       ]
      }
@@ -3372,30 +3372,30 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 992,
-     "accuracy": 79.6
+     "n": 1097,
+     "correct": 965,
+     "accuracy": 88.0
     },
-    "mean_of_envs": 77.3
+    "mean_of_envs": 86.3
    },
    "mlp_marked_reference": {
     "env1": {
      "n": 270,
      "correct": 225,
      "accuracy": 83.3,
-     "precision": 83.2,
-     "recall": 90.0,
-     "f1": 86.5,
-     "kpi1": 96.4,
-     "kpi2": 74.4,
-     "nonhuman": 51.7,
+     "precision": 81.4,
+     "recall": 93.1,
+     "f1": 86.9,
+     "kpi1": 97.3,
+     "kpi2": 73.8,
+     "nonhuman": 43.3,
      "by_condition": {
       "empty": [
        50,
        50
       ],
       "large move": [
-       17,
+       18,
        20
       ],
       "rot fan": [
@@ -3407,7 +3407,7 @@
        20
       ],
       "rot fan + still": [
-       19,
+       20,
        20
       ],
       "small move": [
@@ -3415,7 +3415,7 @@
        20
       ],
       "static fan": [
-       14,
+       9,
        20
       ],
       "static fan + small": [
@@ -3423,7 +3423,7 @@
        20
       ],
       "static fan + still": [
-       13,
+       16,
        20
       ],
       "still": [
@@ -3442,21 +3442,21 @@
     },
     "env2": {
      "n": 442,
-     "correct": 351,
-     "accuracy": 79.4,
-     "precision": 71.9,
-     "recall": 78.9,
-     "f1": 75.2,
-     "kpi1": 71.9,
-     "kpi2": 84.8,
-     "nonhuman": 87.9,
+     "correct": 363,
+     "accuracy": 82.1,
+     "precision": 74.0,
+     "recall": 84.6,
+     "f1": 78.9,
+     "kpi1": 75.1,
+     "kpi2": 87.2,
+     "nonhuman": 89.4,
      "by_condition": {
       "empty": [
-       31,
+       30,
        60
       ],
       "large move": [
-       9,
+       16,
        20
       ],
       "rot fan": [
@@ -3464,15 +3464,15 @@
        89
       ],
       "rot fan + small": [
-       12,
+       14,
        20
       ],
       "rot fan + still": [
-       5,
+       6,
        10
       ],
       "small move": [
-       23,
+       24,
        24
       ],
       "standing/walking": [
@@ -3480,7 +3480,7 @@
        14
       ],
       "static fan": [
-       33,
+       36,
        40
       ],
       "static fan + small": [
@@ -3492,7 +3492,7 @@
        15
       ],
       "still": [
-       67,
+       66,
        67
       ],
       "vacuum": [
@@ -3503,33 +3503,33 @@
     },
     "env3": {
      "n": 275,
-     "correct": 241,
-     "accuracy": 87.6,
-     "precision": 92.1,
-     "recall": 86.3,
-     "f1": 89.1,
-     "kpi1": 98.3,
-     "kpi2": 80.0,
-     "nonhuman": 83.3,
+     "correct": 257,
+     "accuracy": 93.5,
+     "precision": 97.4,
+     "recall": 91.3,
+     "f1": 94.2,
+     "kpi1": 100.0,
+     "kpi2": 88.8,
+     "nonhuman": 93.3,
      "by_condition": {
       "Big mov": [
        20,
        20
       ],
       "Empty": [
-       52,
+       54,
        54
       ],
       "Fan rot (empty)": [
-       20,
+       19,
        20
       ],
       "Fan rot + small mov": [
-       5,
+       11,
        20
       ],
       "Fan rot + static occ": [
-       13,
+       15,
        20
       ],
       "Fan still (empty)": [
@@ -3545,7 +3545,7 @@
        20
       ],
       "Robot (empty)": [
-       10,
+       17,
        20
       ],
       "Robot + static occ / small mov": [
@@ -3564,17 +3564,17 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 103,
-     "accuracy": 93.6,
+     "correct": 92,
+     "accuracy": 83.6,
      "precision": 100.0,
-     "recall": 88.3,
-     "f1": 93.8,
-     "kpi1": 93.6,
+     "recall": 70.0,
+     "f1": 82.4,
+     "kpi1": 83.6,
      "kpi2": null,
      "nonhuman": null,
      "by_condition": {
       "Big mov": [
-       15,
+       14,
        20
       ],
       "Empty": [
@@ -3582,11 +3582,11 @@
        50
       ],
       "Small mov": [
-       18,
+       13,
        20
       ],
       "Static occupancy": [
-       20,
+       15,
        20
       ]
      }
@@ -3629,23 +3629,23 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 1014,
-     "accuracy": 81.4
+     "n": 1097,
+     "correct": 937,
+     "accuracy": 85.4
     },
-    "mean_of_envs": 81.4
+    "mean_of_envs": 85.6
    }
   },
   "anomaly": {
    "lr": {
     "env1": {
      "n": 270,
-     "correct": 211,
-     "accuracy": 78.1,
-     "precision": 77.0,
-     "recall": 90.0,
-     "f1": 83.0,
-     "person_only": 28.3,
+     "correct": 210,
+     "accuracy": 77.8,
+     "precision": 78.1,
+     "recall": 86.9,
+     "f1": 82.2,
+     "person_only": 35.0,
      "empty": 100.0,
      "by_condition": {
       "empty": [
@@ -3669,7 +3669,7 @@
        20
       ],
       "small move": [
-       1,
+       3,
        20
       ],
       "static fan": [
@@ -3681,19 +3681,19 @@
        20
       ],
       "static fan + still": [
-       20,
+       17,
        20
       ],
       "still": [
-       12,
+       14,
        20
       ],
       "vacuum": [
-       7,
+       6,
        20
       ],
       "vacuum + still": [
-       17,
+       16,
        20
       ]
      }
@@ -3702,10 +3702,10 @@
      "n": 442,
      "correct": 338,
      "accuracy": 76.5,
-     "precision": 76.1,
-     "recall": 86.8,
-     "f1": 81.1,
-     "person_only": 46.4,
+     "precision": 76.5,
+     "recall": 86.0,
+     "f1": 81.0,
+     "person_only": 48.0,
      "empty": 95.0,
      "by_condition": {
       "empty": [
@@ -3729,7 +3729,7 @@
        10
       ],
       "small move": [
-       20,
+       21,
        24
       ],
       "standing/walking": [
@@ -3741,15 +3741,15 @@
        40
       ],
       "static fan + small": [
-       5,
+       4,
        5
       ],
       "static fan + still": [
-       7,
+       6,
        15
       ],
       "still": [
-       8,
+       9,
        67
       ],
       "vacuum": [
@@ -3793,7 +3793,7 @@
        20
       ],
       "Fan still + small mov": [
-       7,
+       8,
        20
       ],
       "Fan still + static occ": [
@@ -3805,7 +3805,7 @@
        20
       ],
       "Robot + static occ / small mov": [
-       3,
+       2,
        20
       ],
       "Small mov": [
@@ -3820,28 +3820,28 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 102,
-     "accuracy": 92.7,
+     "correct": 84,
+     "accuracy": 76.4,
      "precision": 0.0,
      "recall": null,
      "f1": null,
-     "person_only": 86.7,
-     "empty": 100.0,
+     "person_only": 58.3,
+     "empty": 98.0,
      "by_condition": {
       "Big mov": [
-       12,
+       9,
        20
       ],
       "Empty": [
-       50,
+       49,
        50
       ],
       "Small mov": [
-       20,
+       12,
        20
       ],
       "Static occupancy": [
-       20,
+       14,
        20
       ]
      }
@@ -3883,21 +3883,21 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 994,
-     "accuracy": 79.8
+     "n": 1097,
+     "correct": 839,
+     "accuracy": 76.5
     },
-    "mean_of_envs": 82.8
+    "mean_of_envs": 76.5
    },
    "mlp": {
     "env1": {
      "n": 270,
-     "correct": 235,
-     "accuracy": 87.0,
-     "precision": 89.8,
-     "recall": 88.1,
-     "f1": 89.0,
-     "person_only": 73.3,
+     "correct": 223,
+     "accuracy": 82.6,
+     "precision": 87.4,
+     "recall": 82.5,
+     "f1": 84.9,
+     "person_only": 68.3,
      "empty": 100.0,
      "by_condition": {
       "empty": [
@@ -3905,7 +3905,7 @@
        50
       ],
       "large move": [
-       9,
+       10,
        20
       ],
       "rot fan": [
@@ -3913,7 +3913,7 @@
        20
       ],
       "rot fan + small": [
-       20,
+       14,
        20
       ],
       "rot fan + still": [
@@ -3921,15 +3921,15 @@
        20
       ],
       "small move": [
-       18,
+       17,
        20
       ],
       "static fan": [
-       20,
+       19,
        20
       ],
       "static fan + small": [
-       20,
+       18,
        20
       ],
       "static fan + still": [
@@ -3937,7 +3937,7 @@
        20
       ],
       "still": [
-       17,
+       14,
        20
       ],
       "vacuum": [
@@ -3952,40 +3952,40 @@
     },
     "env2": {
      "n": 442,
-     "correct": 342,
-     "accuracy": 77.4,
-     "precision": 74.9,
-     "recall": 91.8,
-     "f1": 82.5,
-     "person_only": 40.8,
-     "empty": 91.7,
+     "correct": 337,
+     "accuracy": 76.2,
+     "precision": 74.8,
+     "recall": 89.1,
+     "f1": 81.3,
+     "person_only": 43.2,
+     "empty": 90.0,
      "by_condition": {
       "empty": [
-       55,
+       54,
        60
       ],
       "large move": [
-       20,
+       19,
        20
       ],
       "rot fan": [
-       85,
+       82,
        89
       ],
       "rot fan + small": [
-       11,
+       10,
        20
       ],
       "rot fan + still": [
-       6,
+       5,
        10
       ],
       "small move": [
-       16,
+       18,
        24
       ],
       "standing/walking": [
-       8,
+       10,
        14
       ],
       "static fan": [
@@ -3997,7 +3997,7 @@
        5
       ],
       "static fan + still": [
-       11,
+       9,
        15
       ],
       "still": [
@@ -4012,11 +4012,11 @@
     },
     "env3": {
      "n": 275,
-     "correct": 219,
-     "accuracy": 79.6,
+     "correct": 222,
+     "accuracy": 80.7,
      "precision": 99.1,
-     "recall": 65.6,
-     "f1": 78.9,
+     "recall": 67.5,
+     "f1": 80.3,
      "person_only": 98.4,
      "empty": 100.0,
      "by_condition": {
@@ -4045,11 +4045,11 @@
        20
       ],
       "Fan still + small mov": [
-       12,
+       13,
        20
       ],
       "Fan still + static occ": [
-       1,
+       3,
        20
       ],
       "Robot (empty)": [
@@ -4072,28 +4072,28 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 102,
-     "accuracy": 92.7,
+     "correct": 81,
+     "accuracy": 73.6,
      "precision": 0.0,
      "recall": null,
      "f1": null,
-     "person_only": 86.7,
-     "empty": 100.0,
+     "person_only": 58.3,
+     "empty": 92.0,
      "by_condition": {
       "Big mov": [
-       12,
+       0,
        20
       ],
       "Empty": [
-       50,
+       46,
        50
       ],
       "Small mov": [
-       20,
+       18,
        20
       ],
       "Static occupancy": [
-       20,
+       17,
        20
       ]
      }
@@ -4135,21 +4135,21 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 1046,
-     "accuracy": 83.9
+     "n": 1097,
+     "correct": 863,
+     "accuracy": 78.7
     },
-    "mean_of_envs": 87.2
+    "mean_of_envs": 78.3
    },
    "lr_11F_reference": {
     "env1": {
      "n": 270,
      "correct": 192,
      "accuracy": 71.1,
-     "precision": 88.0,
-     "recall": 59.4,
-     "f1": 70.9,
-     "person_only": 78.3,
+     "precision": 88.7,
+     "recall": 58.8,
+     "f1": 70.7,
+     "person_only": 80.0,
      "empty": 100.0,
      "by_condition": {
       "empty": [
@@ -4173,19 +4173,19 @@
        20
       ],
       "small move": [
-       9,
+       10,
        20
       ],
       "static fan": [
-       14,
+       15,
        20
       ],
       "static fan + small": [
-       6,
+       5,
        20
       ],
       "static fan + still": [
-       12,
+       10,
        20
       ],
       "still": [
@@ -4197,19 +4197,19 @@
        20
       ],
       "vacuum + still": [
-       4,
+       5,
        20
       ]
      }
     },
     "env2": {
      "n": 442,
-     "correct": 250,
-     "accuracy": 56.6,
-     "precision": 64.7,
-     "recall": 55.6,
-     "f1": 59.8,
-     "person_only": 38.4,
+     "correct": 249,
+     "accuracy": 56.3,
+     "precision": 65.8,
+     "recall": 51.8,
+     "f1": 58.0,
+     "person_only": 45.6,
      "empty": 98.3,
      "by_condition": {
       "empty": [
@@ -4217,7 +4217,7 @@
        60
       ],
       "large move": [
-       17,
+       19,
        20
       ],
       "rot fan": [
@@ -4225,7 +4225,7 @@
        89
       ],
       "rot fan + small": [
-       17,
+       18,
        20
       ],
       "rot fan + still": [
@@ -4233,7 +4233,7 @@
        10
       ],
       "small move": [
-       8,
+       12,
        24
       ],
       "standing/walking": [
@@ -4241,23 +4241,23 @@
        14
       ],
       "static fan": [
-       7,
+       3,
        40
       ],
       "static fan + small": [
-       2,
+       3,
        5
       ],
       "static fan + still": [
-       6,
+       5,
        15
       ],
       "still": [
-       9,
+       12,
        67
       ],
       "vacuum": [
-       12,
+       5,
        78
       ]
      }
@@ -4266,14 +4266,14 @@
      "n": 275,
      "correct": 185,
      "accuracy": 67.3,
-     "precision": 89.8,
-     "recall": 49.4,
-     "f1": 63.7,
-     "person_only": 85.2,
+     "precision": 92.7,
+     "recall": 47.5,
+     "f1": 62.8,
+     "person_only": 90.2,
      "empty": 100.0,
      "by_condition": {
       "Big mov": [
-       16,
+       15,
        20
       ],
       "Empty": [
@@ -4293,7 +4293,7 @@
        20
       ],
       "Fan still (empty)": [
-       6,
+       2,
        20
       ],
       "Fan still + small mov": [
@@ -4309,11 +4309,11 @@
        20
       ],
       "Robot + static occ / small mov": [
-       2,
+       3,
        20
       ],
       "Small mov": [
-       15,
+       19,
        20
       ],
       "Static occupancy": [
@@ -4329,15 +4329,15 @@
      "precision": 0.0,
      "recall": null,
      "f1": null,
-     "person_only": 81.7,
-     "empty": 100.0,
+     "person_only": 83.3,
+     "empty": 98.0,
      "by_condition": {
       "Big mov": [
-       10,
+       11,
        20
       ],
       "Empty": [
-       50,
+       49,
        50
       ],
       "Small mov": [
@@ -4387,21 +4387,21 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 855,
-     "accuracy": 68.6
+     "n": 1097,
+     "correct": 725,
+     "accuracy": 66.1
     },
-    "mean_of_envs": 74.3
+    "mean_of_envs": 71.2
    },
    "lr_marked_reference": {
     "env1": {
      "n": 270,
-     "correct": 199,
-     "accuracy": 73.7,
-     "precision": 78.7,
-     "recall": 76.2,
-     "f1": 77.5,
-     "person_only": 45.0,
+     "correct": 201,
+     "accuracy": 74.4,
+     "precision": 77.9,
+     "recall": 79.4,
+     "f1": 78.6,
+     "person_only": 40.0,
      "empty": 100.0,
      "by_condition": {
       "empty": [
@@ -4409,7 +4409,7 @@
        50
       ],
       "large move": [
-       9,
+       8,
        20
       ],
       "rot fan": [
@@ -4441,27 +4441,27 @@
        20
       ],
       "still": [
-       16,
+       14,
        20
       ],
       "vacuum": [
-       3,
+       4,
        20
       ],
       "vacuum + still": [
-       11,
+       15,
        20
       ]
      }
     },
     "env2": {
      "n": 442,
-     "correct": 331,
-     "accuracy": 74.9,
-     "precision": 77.2,
-     "recall": 80.5,
-     "f1": 78.9,
-     "person_only": 51.2,
+     "correct": 336,
+     "accuracy": 76.0,
+     "precision": 77.9,
+     "recall": 82.1,
+     "f1": 79.9,
+     "person_only": 52.0,
      "empty": 100.0,
      "by_condition": {
       "empty": [
@@ -4489,7 +4489,7 @@
        24
       ],
       "standing/walking": [
-       7,
+       8,
        14
       ],
       "static fan": [
@@ -4497,7 +4497,7 @@
        40
       ],
       "static fan + small": [
-       2,
+       1,
        5
       ],
       "static fan + still": [
@@ -4509,18 +4509,18 @@
        67
       ],
       "vacuum": [
-       62,
+       67,
        78
       ]
      }
     },
     "env3": {
      "n": 275,
-     "correct": 195,
-     "accuracy": 70.9,
+     "correct": 196,
+     "accuracy": 71.3,
      "precision": 92.6,
-     "recall": 54.4,
-     "f1": 68.5,
+     "recall": 55.0,
+     "f1": 69.0,
      "person_only": 88.5,
      "empty": 100.0,
      "by_condition": {
@@ -4549,7 +4549,7 @@
        20
       ],
       "Fan still + small mov": [
-       9,
+       7,
        20
       ],
       "Fan still + static occ": [
@@ -4557,11 +4557,11 @@
        20
       ],
       "Robot (empty)": [
-       12,
+       14,
        20
       ],
       "Robot + static occ / small mov": [
-       4,
+       5,
        20
       ],
       "Small mov": [
@@ -4576,24 +4576,24 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 92,
-     "accuracy": 83.6,
+     "correct": 86,
+     "accuracy": 78.2,
      "precision": 0.0,
      "recall": null,
      "f1": null,
-     "person_only": 70.0,
-     "empty": 100.0,
+     "person_only": 61.7,
+     "empty": 98.0,
      "by_condition": {
       "Big mov": [
-       3,
+       0,
        20
       ],
       "Empty": [
-       50,
+       49,
        50
       ],
       "Small mov": [
-       19,
+       17,
        20
       ],
       "Static occupancy": [
@@ -4639,21 +4639,21 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 959,
-     "accuracy": 77.0
+     "n": 1097,
+     "correct": 819,
+     "accuracy": 74.7
     },
-    "mean_of_envs": 79.7
+    "mean_of_envs": 75.0
    },
    "mlp_marked_reference": {
     "env1": {
      "n": 270,
-     "correct": 201,
-     "accuracy": 74.4,
-     "precision": 87.0,
+     "correct": 197,
+     "accuracy": 73.0,
+     "precision": 84.3,
      "recall": 66.9,
-     "f1": 75.6,
-     "person_only": 73.3,
+     "f1": 74.6,
+     "person_only": 66.7,
      "empty": 100.0,
      "by_condition": {
       "empty": [
@@ -4661,11 +4661,11 @@
        50
       ],
       "large move": [
-       15,
+       14,
        20
       ],
       "rot fan": [
-       20,
+       19,
        20
       ],
       "rot fan + small": [
@@ -4677,15 +4677,15 @@
        20
       ],
       "small move": [
-       11,
+       9,
        20
       ],
       "static fan": [
-       14,
+       15,
        20
       ],
       "static fan + small": [
-       12,
+       11,
        20
       ],
       "static fan + still": [
@@ -4693,7 +4693,7 @@
        20
       ],
       "still": [
-       18,
+       17,
        20
       ],
       "vacuum": [
@@ -4701,27 +4701,27 @@
        20
       ],
       "vacuum + still": [
-       14,
+       15,
        20
       ]
      }
     },
     "env2": {
      "n": 442,
-     "correct": 342,
-     "accuracy": 77.4,
-     "precision": 75.1,
-     "recall": 91.4,
+     "correct": 343,
+     "accuracy": 77.6,
+     "precision": 75.5,
+     "recall": 91.1,
      "f1": 82.5,
-     "person_only": 39.2,
-     "empty": 96.7,
+     "person_only": 40.0,
+     "empty": 98.3,
      "by_condition": {
       "empty": [
-       58,
+       59,
        60
       ],
       "large move": [
-       8,
+       7,
        20
       ],
       "rot fan": [
@@ -4729,7 +4729,7 @@
        89
       ],
       "rot fan + small": [
-       20,
+       19,
        20
       ],
       "rot fan + still": [
@@ -4737,7 +4737,7 @@
        10
       ],
       "small move": [
-       18,
+       20,
        24
       ],
       "standing/walking": [
@@ -4749,11 +4749,11 @@
        40
       ],
       "static fan + small": [
-       2,
+       3,
        5
       ],
       "static fan + still": [
-       6,
+       5,
        15
       ],
       "still": [
@@ -4768,16 +4768,16 @@
     },
     "env3": {
      "n": 275,
-     "correct": 206,
-     "accuracy": 74.9,
+     "correct": 205,
+     "accuracy": 74.5,
      "precision": 93.3,
-     "recall": 61.3,
-     "f1": 74.0,
+     "recall": 60.6,
+     "f1": 73.5,
      "person_only": 88.5,
      "empty": 100.0,
      "by_condition": {
       "Big mov": [
-       16,
+       15,
        20
       ],
       "Empty": [
@@ -4793,31 +4793,31 @@
        20
       ],
       "Fan rot + static occ": [
-       19,
+       20,
        20
       ],
       "Fan still (empty)": [
-       4,
+       5,
        20
       ],
       "Fan still + small mov": [
-       4,
+       3,
        20
       ],
       "Fan still + static occ": [
-       2,
+       3,
        20
       ],
       "Robot (empty)": [
-       18,
+       17,
        20
       ],
       "Robot + static occ / small mov": [
-       11,
+       9,
        20
       ],
       "Small mov": [
-       17,
+       18,
        20
       ],
       "Static occupancy": [
@@ -4828,24 +4828,24 @@
     },
     "env3-1": {
      "n": 110,
-     "correct": 95,
-     "accuracy": 86.4,
+     "correct": 82,
+     "accuracy": 74.5,
      "precision": 0.0,
      "recall": null,
      "f1": null,
-     "person_only": 75.0,
-     "empty": 100.0,
+     "person_only": 55.0,
+     "empty": 98.0,
      "by_condition": {
       "Big mov": [
-       6,
+       0,
        20
       ],
       "Empty": [
-       50,
+       49,
        50
       ],
       "Small mov": [
-       19,
+       13,
        20
       ],
       "Static occupancy": [
@@ -4891,11 +4891,11 @@
      }
     },
     "pooled": {
-     "n": 1246,
-     "correct": 981,
-     "accuracy": 78.7
+     "n": 1097,
+     "correct": 827,
+     "accuracy": 75.4
     },
-    "mean_of_envs": 81.0
+    "mean_of_envs": 74.9
    }
   }
  },
