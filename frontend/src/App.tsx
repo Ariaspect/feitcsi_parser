@@ -7,7 +7,7 @@ import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
 import { ML } from "./ML";
-import { CaptureBar, CaptureDetails, CaptureProvider } from "./Capture";
+import { CaptureBar, CaptureDetails, CaptureFollow, CaptureProvider } from "./Capture";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -360,6 +360,14 @@ export function App() {
     };
   }, []);
 
+  // Live moving to another capture: the list is reread to find it, so the picker
+  // gets the new list too, and shows the day that capture is in.
+  const openFollowed = useCallback((capture: CaptureFile, all: CaptureFile[]) => {
+    setCaptures(all);
+    setPath(capture.path);
+    setGroupBy((day) => (day === "all" ? day : captureDay(capture)));
+  }, []);
+
   const toggleDark = () => {
     setDark((d) => {
       const next = !d;
@@ -420,6 +428,7 @@ export function App() {
 
   return (
     <CaptureProvider>
+    <CaptureFollow live={running} path={path} failing={error !== null} onOpen={openFollowed} />
     <div className={`${dark ? "dark " : ""}font-sans bg-background text-foreground min-h-screen`}>
       <div className="sticky top-0 z-50 bg-background/80 backdrop-blur-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap gap-3 items-center">
@@ -518,6 +527,7 @@ export function App() {
             onClick={() => setRunning((r) => !r)}
             variant={running ? "destructive" : "default"}
             size="sm"
+            title="Keep reading the capture as it grows. While the capture controls are recording, move to each new capture as it starts."
           >
             {running ? (
               <>
