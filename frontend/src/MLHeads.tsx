@@ -4,9 +4,10 @@ import { ChartBusy } from "@/components/ChartBusy";
 import { Button } from "@/components/ui/button";
 import { fetchMlHeads, type MlHeadName, type MlHeads, type MlKind, type MlLoeo } from "./api";
 
-// The human-presence and anomaly-presence models (backend/ml_heads.py): 11F + aux + Liu, 43
-// columns, each label as logistic regression and as one hidden layer of 16 units. Display only --
-// the 11-feature screen model below is still the deployed verdict.
+// The human-presence and anomaly-presence models (backend/ml_heads.py): 11F + aux + Liu (41 columns),
+// plus the nine object-agnostic breathing columns (bs) for the human label -- 50 -- each label as
+// logistic regression and as one hidden layer of 16 units. Display only -- the 11-feature screen
+// model below is still the deployed verdict.
 
 const PERSON = "#2f6fed";
 const ANOMALY = "#b45309";
@@ -19,9 +20,12 @@ const HEAD_NO: Record<MlHeadName, string> = { human: "NO PERSON", anomaly: "NO A
 const HEAD_COLOR: Record<MlHeadName, string> = { human: PERSON, anomaly: ANOMALY };
 const KIND_NAME: Record<MlKind, string> = { lr: "LR", mlp: "hidden layer (16)" };
 const COLUMNS: [MlHeadName, MlKind][] = [["human", "lr"], ["human", "mlp"], ["anomaly", "lr"], ["anomaly", "mlp"]];
-const LOEO_ROWS: [string, string, boolean][] = [
-  ["lr", "11F + aux + Liu · LR", false],
-  ["mlp", "11F + aux + Liu · hidden layer", false],
+const INPUTS: Record<MlHeadName, string> = { human: "11F + aux + Liu + bs (50)", anomaly: "11F + aux + Liu (41)" };
+const LOEO_ROWS: [string, string | null, boolean][] = [
+  ["lr", null, false],
+  ["mlp", null, false],
+  ["lr_41_reference", "11F + aux + Liu (41, no bs) · LR", true],
+  ["mlp_41_reference", "11F + aux + Liu (41, no bs) · hidden layer", true],
   ["lr_marked_reference", "11F + ★ marked · LR", true],
   ["mlp_marked_reference", "11F + ★ marked · hidden layer", true],
   ["lr_11F_reference", "11F alone · LR", true],
@@ -62,14 +66,14 @@ export function MLHeads({ path, win, dark }: { path: string; win: number; dark: 
       <div className="flex flex-wrap items-baseline gap-2">
         <span className="text-sm font-semibold">Human &amp; anomaly models</span>
         <span className="text-[11px] text-muted-foreground">
-          11F + aux + Liu (43 columns) · logistic regression and one hidden layer, for each label · display only
+          human: 11F + aux + Liu + bs (50 columns) · anomaly: 11F + aux + Liu (41) · logistic regression and one hidden layer, for each label · display only
         </span>
         {busy && data && <span className="text-[11px] text-muted-foreground">updating…</span>}
       </div>
       {error ? (
         <div className="text-muted-foreground text-sm">No verdict from these models for this window — {error}</div>
       ) : !data ? (
-        <ChartBusy busy empty height={90} label="computing the 43 columns" />
+        <ChartBusy busy empty height={90} label="computing the 50 columns" />
       ) : (
         <>
           <Verdicts data={data} />
@@ -178,7 +182,7 @@ function Inputs({ data, dark }: { data: MlHeads; dark: boolean }) {
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-        <span className="text-xs font-medium text-foreground">The 43 inputs and how each model weighed them</span>
+        <span className="text-xs font-medium text-foreground">The {n} inputs and how each model weighed them (— where a model does not read the column)</span>
         <span>sort by</span>
         <select
           className="rounded border bg-background px-1 py-0.5 text-[11px]"
@@ -287,7 +291,7 @@ function Loeo({ data }: { data: MlHeads }) {
                   if (!t) return null;
                   return (
                     <tr key={`${h}-${key}`} className={ref ? "text-muted-foreground" : ""}>
-                      <td className="pr-4">{name}{ref ? " (reference)" : ""}</td>
+                      <td className="pr-4">{name ?? `${INPUTS[h]} · ${key === "lr" ? "LR" : "hidden layer"}`}{ref ? " (reference)" : ""}</td>
                       {ENVS.map((e) => (
                         <td key={e} className="pr-3 text-right" title={loeoTitle(h, t, e)}>{pct(t.envs[e]?.accuracy)}</td>
                       ))}

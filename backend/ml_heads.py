@@ -1,16 +1,19 @@
-"""The ML tab's human-presence and anomaly-presence models: 11F + aux + Liu, each as LR and as one hidden layer.
+"""The ML tab's human-presence and anomaly-presence models: 11F + aux + Liu (+ bs), each as LR and as one hidden layer.
 
-Two labels, two models each, all reading the same 43 columns of one 60 s window:
+Two labels, two models each, on one 60 s window -- the human models on 50 columns, the anomaly
+models on 41 of them:
 
 * ``human``: is a person in the window (the binary GT);
 * ``anomaly``: is a non-human mover in it -- a fan, a vacuum / robot, a ceiling fan -- with or
   without a person.
 
 The columns are the 11-feature screen model's inputs (``ml_*``, ``backend.ml_columns``), the
-classifier bank's measurements (the aux bank: step, jitter, breathing, ACF, eigen, delay,
-revisit) and the Liu columns (``backend.liu_features``), all computed by
+classifier bank's measurements (the aux bank: step, jitter, breathing, ACF, eigen, delay) and the Liu columns (``backend.liu_features``), all computed by
 ``backend.classifier.item_values`` -- the classifier tab's own code, so the tab and the models
-can never disagree about a number.
+can never disagree about a number. The human models also read the nine object-agnostic breathing
+columns ``bs_*`` (``backend.breath_components``: is there a breathing line in any subcarrier-pattern
+component, with or without the strongest mover), computed here on the same window (user, 2026-11-03);
+the anomaly models do not -- the ``bs_*`` columns cost them held out.
 
 Models (``scripts/fit_ml_heads.py``, weights in ``ml_heads.json``): median imputer and standard
 scaler, then either a logistic regression or 16 tanh units and a logistic output; both trained
@@ -30,9 +33,12 @@ from typing import Any
 
 import numpy as np
 
+from backend import breath_components
+
 _W = json.loads(Path(__file__).with_name("ml_heads.json").read_text())
 
-FEATURES: tuple[str, ...] = tuple(_W["features"])
+FEATURES: tuple[str, ...] = tuple(_W["features"])                     # every column either model reads
+HEAD_FEATURES: dict[str, tuple[str, ...]] = {h: tuple(c) for h, c in _W["head_features"].items()}
 HEADS = ("human", "anomaly")
 KINDS = ("lr", "mlp")
 THRESHOLD: float = float(_W["threshold"])
@@ -44,6 +50,8 @@ FITTED: str = _W["fitted"]
 LABEL_FALLBACK = {
     "log_step_norm_own": {"label": "ln step / jitter", "test": "bank",
                           "description": "Natural log of step / jitter (step P90 over the unit's own link jitter); an input of the bank's own logistic."},
+    **{k: {"label": lab, "test": "bs (human only)", "description": desc}
+       for k, (lab, desc) in breath_components.LABELS.items()},
 }
 
 # A recorded condition that names a non-human mover -- the anomaly label the models were trained on.
@@ -56,6 +64,8 @@ def _arr(m: dict, k: str) -> np.ndarray:
 
 _M = {h: {k: {key: (_arr(m, key) if isinstance(m[key], list) else float(m[key])) for key in m}
               for k, m in _W["heads"][h].items()} for h in HEADS}
+_IDX = {h: np.array([FEATURES.index(f) for f in HEAD_FEATURES[h]]) for h in HEADS}
+assert set(HEAD_FEATURES) == set(HEADS) and all(set(c) <= set(FEATURES) for c in HEAD_FEATURES.values())
 
 
 def _sigmoid(v: float) -> float:
@@ -72,8 +82,9 @@ def predict(values: dict[str, float]) -> dict[str, Any]:
 
     Returns, per head and model, ``p``, ``label`` (p > 0.5) and ``logit``, with ``z`` (the scaled
     inputs) and ``effect`` (per feature): for LR its exact push ``coef * z``; for the hidden layer
-    how much the logit falls when that one input is set to its training mean (z = 0). ``imputed``
-    marks the inputs that were missing and took the training median.
+    how much the logit falls when that one input is set to its training mean (z = 0). ``z`` and
+    ``effect`` run over ``FEATURES``, NaN on a column the head does not read. ``imputed`` marks the
+    inputs that were missing and took the training median.
     """
     x = np.array([values.get(f, np.nan) for f in FEATURES], dtype=float)
     x = np.where(np.isfinite(x), x, np.nan)
@@ -81,9 +92,10 @@ def predict(values: dict[str, float]) -> dict[str, Any]:
     out: dict[str, Any] = {"value": x, "imputed": imputed}
     for h in HEADS:
         out[h] = {}
+        idx = _IDX[h]
         for k in KINDS:
             m = _M[h][k]
-            xi = np.where(imputed, m["median"], x)
+            xi = np.where(imputed[idx], m["median"], x[idx])
             z = (xi - m["mean"]) / m["scale"]
             if k == "lr":
                 effect = m["coef"] * z
@@ -94,7 +106,10 @@ def predict(values: dict[str, float]) -> dict[str, Any]:
                 np.fill_diagonal(zs, 0.0)
                 effect = logit - _mlp_logit(m, zs)
             p = _sigmoid(logit)
-            out[h][k] = {"p": p, "label": int(p > THRESHOLD), "logit": logit, "z": z, "effect": effect}
+            z_all = np.full(len(FEATURES), np.nan)
+            e_all = np.full(len(FEATURES), np.nan)
+            z_all[idx], e_all[idx] = z, effect
+            out[h][k] = {"p": p, "label": int(p > THRESHOLD), "logit": logit, "z": z_all, "effect": e_all}
     return out
 
 
@@ -118,10 +133,13 @@ def evaluate(path: str | Path, window: int = 0) -> dict[str, Any]:
         raise ValueError(f"window {window} out of range: this capture has {len(wins)}")
     if len(wins) == 1:
         res = classifier.item_values(path)
+        b0, b1 = 0.0, float(times[-1] - origin) + 1e-6        # the whole capture, last frame kept
     else:
         t0, t1 = wins[window]
         res = classifier.item_values(path, origin + t0, origin + t1)
+        b0, b1 = float(t0), float(t1)
     values = {f: res["values"].get(f) for f in FEATURES}
+    values.update(breath_components.unit_features(path, b0, b1))
     values = {f: (float(v) if isinstance(v, (int, float)) and v is not None else float("nan")) for f, v in values.items()}
     pr = predict(values)
     return {

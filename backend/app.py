@@ -1702,7 +1702,7 @@ def ml_heads_endpoint(
     path: str = Query(..., description="Path to capture file"),
     window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
 ) -> dict:
-    """The human-presence and anomaly-presence models (11F + aux + Liu; LR and one hidden layer each) on one window.
+    """The human-presence and anomaly-presence models (11F + aux + Liu, + bs for human; LR and one hidden layer each) on one window.
 
     See ``backend.ml_heads``. With the capture's labels where it has them -- human from the GT table,
     else the operator's presence; anomaly from whether the recorded condition names a fan, vacuum

@@ -14,7 +14,12 @@ Labels:
   vacuum or robot, with or without a person (scnC: the ceiling fan's timeline).
 
 Features: the 11-feature screen model's inputs (``ml_*``), the classifier bank's measurements
-(the aux bank) and the Liu columns -- 43 in all, the same for both labels.
+(the aux bank) and the Liu columns -- 41 -- for both labels; the human model also reads the nine
+object-agnostic breathing columns ``bs_*`` (``backend.breath_components``, added to the CSV by
+``scripts/add_bs_columns.py``): 50 (user, 2026-11-03). The anomaly model keeps the 41: the ``bs_*``
+columns cost its hidden layer KPI#2 held out (81.6 -> 78.2). ``revisit`` and ``revisit_tau`` stay in
+the CSV and on the classifier tab but are not inputs: ``ml_C3_revisit`` reads the same return, and
+leaving them out cost nothing held out (user, 2026-11-02).
 
 Models, per label: logistic regression (median imputer, standard scaler, C = 1, balanced classes)
 and one hidden layer (the same scaling, 16 tanh units, L2 alpha = 3, L-BFGS, balanced sample
@@ -26,7 +31,8 @@ other three; scenario C is never in their training -- it was recorded on 10/23 w
 training on it lifted held-out env3-1 by ~9 points (human LR 84.5 -> 93.6), so it is not an unseen
 environment for env3-1. Scenario C itself is tested on a model trained on all four. Pooled and
 mean are over the four. Also given, for reference only: the 11 features alone with the same LR,
-and the 11 plus the classifier tab's starred columns (``MARKED``) with both models. No
+the 11 plus the classifier tab's starred columns (``MARKED``) with both models, and, for the human
+label, the 41 without the ``bs_*`` columns with both models. No
 augmentation anywhere.
 
 Run: ``.venv/bin/python scripts/fit_ml_heads.py`` (about a minute).
@@ -42,6 +48,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.breath_components import KEYS as BS  # noqa: E402
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
@@ -54,13 +63,14 @@ TRAIN = ROOT / "data" / "ml_heads_train.csv"
 OUT = ROOT / "backend" / "ml_heads.json"
 
 META = ["key", "ds", "cond", "y", "obj"]
+NOT_INPUTS = ["revisit", "revisit_tau"]
 ENVS = ["env1", "env2", "env3", "env3-1", "scnC"]
 ROOMS = ["env1", "env2", "env3", "env3-1"]          # the LOEO environments; scnC is tested, never trained on
 TARGETS = {"human": "y", "anomaly": "obj"}
 HIDDEN = 16
 ALPHA = 3.0
 # The classifier tab's starred columns outside the 11 (backend/feature_marks.py; p_occupied left out:
-# it is a fitted output, not a measurement). LOEO reference only -- the models read all 43.
+# it is a fitted output, not a measurement). LOEO reference only -- the models read their 41 / 50.
 MARKED = ["breath_run20", "breath_peak10", "liu_ms_spread", "liu_step_spread", "liu_coh1", "liu_coh1_breath",
           "delay_spread", "step_norm", "acf_amp_p90"]
 
@@ -151,21 +161,30 @@ def loeo(D: pd.DataFrame, cols: list[str], target: str, kind: str) -> dict:
 
 def main() -> int:
     D = pd.read_csv(TRAIN)
-    cols = [c for c in D.columns if c not in META]
-    f11 = [c for c in cols if c.startswith("ml_")]
-    assert len(cols) == 43 and len(f11) == 11, (len(cols), len(f11))
+    base = [c for c in D.columns if c not in META + NOT_INPUTS + list(BS)]
+    f11 = [c for c in base if c.startswith("ml_")]
+    assert len(base) == 41 and len(f11) == 11 and set(BS) <= set(D.columns), (len(base), len(f11))
+    cols = base + list(BS)                                   # every column either model reads, in this order
+    head_cols = {"human": cols, "anomaly": base}
     heads, table, check = {}, {}, []
     X = D[cols].to_numpy(float)
     for head, target in TARGETS.items():
         y = D[target].to_numpy(int)
+        hc = head_cols[head]
+        Xh = D[hc].to_numpy(float)
         heads[head] = {}
         table[head] = {}
         for kind in ("lr", "mlp"):
-            m = fit(kind, X, y)
+            m = fit(kind, Xh, y)
             heads[head][kind] = export(kind, m)
-            table[head][kind] = loeo(D, cols, target, kind)
+            table[head][kind] = loeo(D, hc, target, kind)
             print(head, kind, "LOEO", {e: table[head][kind][e]["accuracy"] for e in ENVS},
                   "pooled", table[head][kind]["pooled"]["accuracy"], flush=True)
+        if head == "human":                                  # what the nine bs columns add, held out
+            for kind in ("lr", "mlp"):
+                table[head][f"{kind}_41_reference"] = loeo(D, base, target, kind)
+                print(head, f"41 without bs {kind} (reference)",
+                      {e: table[head][f"{kind}_41_reference"][e]["accuracy"] for e in ENVS}, flush=True)
         table[head]["lr_11F_reference"] = loeo(D, f11, target, "lr")
         print(head, "11F LR (reference)", {e: table[head]["lr_11F_reference"][e]["accuracy"] for e in ENVS}, flush=True)
         for kind in ("lr", "mlp"):
@@ -178,14 +197,16 @@ def main() -> int:
         row = {"key": D.key.iloc[i], "x": [None if not np.isfinite(v) else float(v) for v in X[i]], "p": {}}
         for head, target in TARGETS.items():
             y = D[target].to_numpy(int)
+            Xh = D[head_cols[head]].to_numpy(float)
             for kind in ("lr", "mlp"):
-                row["p"][f"{head}_{kind}"] = float(fit(kind, X, y).predict_proba(X[i:i + 1])[0, 1])
+                row["p"][f"{head}_{kind}"] = float(fit(kind, Xh, y).predict_proba(Xh[i:i + 1])[0, 1])
         check.append(row)
     out = {
         "fitted": date.today().isoformat(),
         "script": "scripts/fit_ml_heads.py",
         "train": "data/ml_heads_train.csv",
         "features": cols,
+        "head_features": head_cols,
         "threshold": 0.5,
         "hidden": HIDDEN,
         "trained_on": {e: {"n": int((D.ds == e).sum()), "human": int(D[D.ds == e].y.sum()),

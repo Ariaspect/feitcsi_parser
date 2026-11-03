@@ -22,7 +22,7 @@ PARTS: dict[str, tuple[str, ...]] = {
     # the classifier tab: the feature bank, Liu columns, the 11F columns, feature marks
     "classifier": ("test_classifier", "test_liu_features", "test_feature_marks", "test_ml_columns"),
     # the ML tab: AF8 / 11F screen model, the human and anomaly models, ground truth
-    "ml": ("test_af8", "test_af8_explain", "test_ml_heads", "test_build_ground_truth"),
+    "ml": ("test_af8", "test_af8_explain", "test_ml_heads", "test_breath_components", "test_build_ground_truth"),
     # the app shell: capture listing, capture controls, labels; and this map itself
     "app": ("test_capture_listing", "test_capture_control", "test_labels_api", "test_parts"),
 }
