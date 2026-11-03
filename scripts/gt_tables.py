@@ -53,6 +53,21 @@ SPEC = {
 }
 HUMAN = lambda c: c not in ("empty", "vacuum", "static fan", "rot fan")
 
+# Sessions the user tabled after the models were fitted: GT for the web and for tests, never in a
+# balanced pick, so adding one cannot change any earlier row's `train`. (spec, the user's note)
+LATER = {
+ "env2": {
+  "small move": [(R("1030", "17:13", "17:18"), ""), (R("1030", "17:27", "17:32"), ""),
+                 (R("1030", "17:40", "17:44"), "typing"), (R("1030", "17:48", "17:52"), "typing")],
+  "still": [(R("1030", "18:00", "18:05"), ""), (R("1030", "18:06", "18:11"), "prone"),
+            (R("1030", "18:17", "18:21"), ""), (R("1030", "18:26", "18:31"), "other seat facing back"),
+            (R("1030", "18:43", "18:47"), "other seat"), (R("1030", "19:08", "19:12"), "")],
+  "static fan + still": [(R("1102", "20:30", "20:32"), ""), (R("1102", "20:47", "20:49"), ""),
+                         (R("1102", "20:58", "21:03"), "")],
+  "rot fan + still": [(R("1102", "21:09", "21:14"), ""), (R("1102", "21:16", "21:20"), "")],
+ },
+}
+
 _cache = {}
 def day_stems(d):
     day = "2026" + d
@@ -105,6 +120,11 @@ for env, conds in SPEC.items():
                 pick = set(spread(st, kk))
                 for x in st:
                     rows.append(dict(env=env, cond=cond, y=int(HUMAN(cond)), stem=x, date=d, session=name, train=x in pick))
+for env, conds in LATER.items():
+    for cond, specs in conds.items():
+        for s, note in specs:
+            st, name = resolve(s)
+            rows += [dict(env=env, cond=cond, y=int(HUMAN(cond)), stem=x, date=s[1], session=f"{name} {note}".strip(), train=False) for x in st]
 D = pd.DataFrame(rows)
 dup = D[D.duplicated(["env", "stem"], keep=False)]
 if len(dup): print("DUPLICATE stems across conditions:\n", dup.sort_values("stem").to_string(), file=sys.stderr)
