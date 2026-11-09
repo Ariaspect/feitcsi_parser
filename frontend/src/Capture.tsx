@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { fetchCaptureStatus, startCapture, stopCapture, syncCaptures, type CapturePreflight, type CaptureRun, type CaptureStatus } from "./api";
+import { fetchCaptures, fetchCaptureStatus, startCapture, stopCapture, syncCaptures, type CaptureFile, type CapturePreflight, type CaptureRun, type CaptureStatus } from "./api";
+import { createCaptureFollower } from "./followcapture";
 
 // The capture controls live in the toolbar, next to MIMO, always visible
 // (user, 2026-10-12: not a tab). <CaptureBar /> is that compact row;
@@ -179,6 +180,26 @@ function boardText(pf: CapturePreflight): string {
 }
 
 /** The always-visible row in the toolbar: three numbers, three buttons, one status chip. */
+/** While Live is on, keeps the view on the capture the controller is writing
+ *  (see followcapture.ts). Renders nothing; it sits here for the status. */
+export function CaptureFollow({ live, path, failing, onOpen }: {
+  live: boolean;
+  path: string;
+  failing: boolean;
+  onOpen: (capture: CaptureFile, all: CaptureFile[]) => void;
+}) {
+  const { status } = useCapture();
+  const stamp = status?.current?.stamp ?? null;
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+  const [follower] = useState(() => createCaptureFollower(() => fetchCaptures(), (c, all) => onOpenRef.current(c, all)));
+  useEffect(() => {
+    follower.update({ live, stamp, path, failing });
+  }, [follower, live, stamp, path, failing]);
+  useEffect(() => () => follower.stop(), [follower]);
+  return null;
+}
+
 export function CaptureBar() {
   const { status, busy, pending, form, setForm, begin, stop, open, setOpen, fetchError } = useCapture();
   const pf = status?.preflight;

@@ -224,6 +224,30 @@ export function ticks(min: number, max: number, count = 5): number[] {
   return out;
 }
 
+const CLOCK_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600];
+
+/** Ticks for an axis of epoch seconds, on round local clock times (whole 1/2/5/10/15/30 s, minutes or hours), about
+ *  `count` of them. `ticks` would put them on round epoch numbers, which are not round on the clock. */
+export function clockTicks(min: number, max: number, count = 6): number[] {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return [];
+  const rough = (max - min) / Math.max(1, count);
+  const step = CLOCK_STEPS.find((s) => s >= rough) ?? CLOCK_STEPS[CLOCK_STEPS.length - 1];
+  // local = epoch - offset, the offset in seconds (getTimezoneOffset is UTC minus local, in minutes)
+  const offset = new Date(min * 1000).getTimezoneOffset() * 60;
+  const out: number[] = [];
+  for (let v = Math.ceil((min - offset) / step) * step + offset; v <= max; v += step) out.push(v);
+  return out;
+}
+
+/** Epoch seconds as a local clock reading: HH:MM:SS on spans up to 20 minutes, HH:MM above. */
+export function formatClock(epochSeconds: number, span: number): string {
+  if (!Number.isFinite(epochSeconds)) return "";
+  const d = new Date(epochSeconds * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  const hm = `${two(d.getHours())}:${two(d.getMinutes())}`;
+  return span <= 1200 ? `${hm}:${two(d.getSeconds())}` : hm;
+}
+
 /** Seconds formatted for a time axis, adapting to the span on screen.
  *
  * A four-hour capture labelled in bare seconds is unreadable, and a

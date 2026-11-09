@@ -1,6 +1,6 @@
 import { useRef } from "react";
 
-import { formatTime, linePath, linearScale, ticks } from "./series";
+import { clockTicks, formatClock, formatTime, linePath, linearScale, ticks } from "./series";
 
 /** A line on the chart. `null` values break the line rather than drawing
  *  through the gap -- see `series.linePath`. */
@@ -45,8 +45,9 @@ export interface ChartProps {
   height?: number;
   yLabel: string;
   /** Label the x axis in seconds within a window (`"offset"`) rather than
-   *  as capture time; used for the per-window detail panels. */
-  xMode?: "time" | "offset";
+   *  as capture time; used for the per-window detail panels. `"clock"`:
+   *  the times are epoch seconds, labelled as local clock time (Realtime). */
+  xMode?: "time" | "offset" | "clock";
   /** A vertical line at this time -- the window a detail panel is showing. */
   marker?: number | null;
   /** Called with the time under a click, so a chart can pick a window. */
@@ -117,9 +118,9 @@ export function Chart({
             </text>
           </g>
         ))}
-        {ticks(domain[0], domain[1], 6).map((v) => (
+        {(xMode === "clock" ? clockTicks(domain[0], domain[1], 6) : ticks(domain[0], domain[1], 6)).map((v) => (
           <text key={v} x={x(v)} y={inner.h + 12} textAnchor="middle" fontSize={9} fill={text}>
-            {xMode === "time" ? formatTime(v, span) : `${v}s`}
+            {xMode === "clock" ? formatClock(v, span) : xMode === "time" ? formatTime(v, span) : `${v}s`}
           </text>
         ))}
         {bands.map((b, i) => {

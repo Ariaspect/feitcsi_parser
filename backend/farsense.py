@@ -59,7 +59,6 @@ from threading import Lock
 from typing import Any
 
 import numpy as np
-from scipy.signal import butter, filtfilt, savgol_filter
 
 from backend.presence import autocorr_columns, fractional_motion, live_subcarriers
 
@@ -95,6 +94,48 @@ MAX_GAP_FRACTION = 0.5
 MIN_WINDOW_SAMPLES = 16
 
 
+def savgol(x: np.ndarray, window: int, order: int) -> np.ndarray:
+    """Savitzky-Golay smoothing along axis 0, ``scipy.signal.savgol_filter``'s
+    ``mode="interp"`` in NumPy alone.
+
+    Here so the FarSense sweep runs where scipy does not -- the LG board, for
+    ``backend.hybrid2_calc`` -- and it reproduces scipy's construction rather
+    than approximating it. Inside, each sample is the least-squares fit of an
+    ``order`` polynomial to the ``window`` samples centred on it, evaluated at
+    the centre: one fixed weight vector, applied as a sliding dot product. The
+    ``window // 2`` samples at each end have no centred window, and there,
+    exactly as scipy does, one polynomial is fitted to the first (last)
+    ``window`` samples with ``np.polyfit`` and evaluated at their positions.
+    Measured against scipy: 4e-14 relative at the windows this module uses
+    (order 3, 21-43 samples); an order-5, 101-sample window drifts to 1e-9,
+    both sides being least squares on the same ill-conditioned Vandermonde.
+
+    ``x`` is real, ``(n, ...)``, with ``window`` odd, ``order < window`` and
+    ``window <= n``.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.shape[0]
+    if window % 2 == 0 or not order < window <= n:
+        raise ValueError(f"need an odd window in ({order}, {n}], got {window}")
+    half = window // 2
+    flat = x.reshape(n, -1)
+    # Weights: row 0 of the pseudo-inverse of the Vandermonde matrix on the
+    # centred positions -- the fitted polynomial's value at the centre.
+    pos = np.arange(-half, half + 1, dtype=float)
+    vander = pos[:, None] ** np.arange(order + 1)[None, :]
+    weights = np.linalg.lstsq(vander, np.eye(window), rcond=None)[0][0]
+    out = np.empty_like(flat)
+    windows = np.lib.stride_tricks.sliding_window_view(flat, window, axis=0)
+    out[half : n - half] = windows @ weights
+    span = np.arange(window)
+    for rows, fit in ((slice(0, half), slice(0, window)),
+                      (slice(n - half, n), slice(n - window, n))):
+        coeffs = np.polyfit(span, flat[fit], order)
+        at = np.arange(n)[rows] - (fit.start or 0)
+        out[rows] = np.polyval(coeffs, at[:, None])
+    return out.reshape(x.shape)
+
+
 def smooth_ratio(
     ratio: np.ndarray,
     fs: float,
@@ -122,9 +163,7 @@ def smooth_ratio(
     win = max(win, floor)
     if win > ratio.shape[0]:
         return ratio
-    real = savgol_filter(ratio.real, win, order, axis=0, mode="interp")
-    imag = savgol_filter(ratio.imag, win, order, axis=0, mode="interp")
-    return real + 1j * imag
+    return savgol(ratio.real, win, order) + 1j * savgol(ratio.imag, win, order)
 
 
 def highpass(ratio: np.ndarray, fs: float, cutoff_hz: float) -> np.ndarray:
@@ -142,6 +181,10 @@ def highpass(ratio: np.ndarray, fs: float, cutoff_hz: float) -> np.ndarray:
     nyq = fs / 2.0
     if cutoff_hz >= 0.95 * nyq:
         raise ValueError(f"a {cutoff_hz:g} Hz high-pass is at Nyquist for {fs:.2f} Hz")
+    # scipy only here, and only when the high-pass is asked for: it is off by
+    # default, and the board calculator runs without scipy.
+    from scipy.signal import butter, filtfilt
+
     b, a = butter(2, cutoff_hz / nyq, btype="high")
     if ratio.shape[0] <= 3 * max(len(a), len(b)):
         return ratio
@@ -168,6 +211,26 @@ def band_bins(
     freqs = np.arange(fft_size // 2 + 1, dtype=float) * fs / fft_size
     lo, hi = band_rpm[0] / 60.0, band_rpm[1] / 60.0
     return np.flatnonzero((freqs >= lo) & (freqs <= hi))
+
+
+# The in-band DFT rows depend only on the bins, the window length and the FFT
+# size -- the same for every window of a sweep -- yet building them was a third
+# of the sweep's time (0.62 ms of complex exponentials a window on the host,
+# ~10x that on the board). Cached by value, so the matrix used is the one the
+# expression would have produced: results do not change by a bit.
+_DFT_CACHE: dict[tuple[bytes, int, int], np.ndarray] = {}
+
+
+def _band_dft(k: np.ndarray, win: int, fft_size: int) -> np.ndarray:
+    key = (np.asarray(k, dtype=np.int64).tobytes(), int(win), int(fft_size))
+    dft = _DFT_CACHE.get(key)
+    if dft is None:
+        n = np.arange(win)
+        dft = np.exp(-2j * np.pi * np.outer(k, n) / fft_size)
+        if len(_DFT_CACHE) >= 16:     # a handful of (fs, window) shapes in practice
+            _DFT_CACHE.clear()
+        _DFT_CACHE[key] = dft
+    return dft
 
 
 def extract_patterns(
@@ -217,8 +280,7 @@ def extract_patterns(
     x = np.nan_to_num(seg.real)
     y = np.nan_to_num(seg.imag)
 
-    n = np.arange(win)
-    dft = np.exp(-2j * np.pi * np.outer(k, n) / fft_size)   # (n_f, win)
+    dft = _band_dft(k, win, fft_size)                        # (n_f, win)
     a = dft @ x                                              # (n_f, n_sc)
     b = dft @ y
     aa = np.abs(a) ** 2

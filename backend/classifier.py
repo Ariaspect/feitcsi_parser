@@ -61,6 +61,14 @@ specificity (09-16/17: 0 % -> 100 %) and loses the still sitter there
 (recall 0.14-0.40), because on that link the sitter's slow signal is smaller
 than the link's own jitter. ``lag1_p20`` and ``step_norm`` are in the bank;
 the mechanism behind the noisy state is still unknown.
+
+*Display only -- features from K. J. Ray Liu's group* (``liu_features``):
+short-lag periodicity, steadiness, speed from the autocorrelation, frequency
+coherence width (all bands and the breathing band), the previous unit's
+P(occupied), and the maximal-ratio-combined lag-1 statistic. Then the ML tab's
+11-feature model inputs and its P(person) on each unit (``ml_columns``).
+Appended to the bank as columns to read against the camera; no score or rule
+on this tab uses them.
 """
 
 from __future__ import annotations
@@ -72,7 +80,7 @@ from typing import Any
 
 import numpy as np
 
-from backend import hybrid, hybrid2
+from backend import feature_marks, hybrid, hybrid2, liu_features, ml_columns
 
 # One unit per one-minute capture.
 UNIT_SECONDS = 60.0
@@ -398,6 +406,7 @@ _cache_lock = Lock()
 def reset_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _item_cache.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -692,8 +701,13 @@ def compute_features(
     _, psi_phase = acf_windows(phase, times, acf_frames)
     lam_share, ev_drift = coherence_windows(ratio, times, acf_frames)
 
-    # The step the range rule reads, on whole seconds of the capture clock.
-    seconds = np.arange(np.floor(float(t0)), float(t1), 1.0)
+    # The step the range rule reads, on whole seconds of the capture clock --
+    # over the frames, not the request: a range asked far wider than the
+    # capture (an open-ended t1) would otherwise allocate a second per second
+    # of the request.
+    s_lo = max(float(t0), float(times[0])) if times.size else float(t0)
+    s_hi = min(float(t1), float(times[-1])) if times.size else float(t1)
+    seconds = np.arange(np.floor(s_lo), max(s_hi, s_lo + 1e-9), 1.0)
     level, steps = hybrid2.motion_per_second(
         path, t0, t1, seconds, mimo=mimo, source_mac=source_mac,
         interpolate=interpolate, gate_gain=False, lag_seconds=lag_seconds,
@@ -733,6 +747,9 @@ def compute_features(
         return int(run), med, peak
 
     gain = lvl["gain_state"]
+    # The ML model's window clock: seconds from the capture's first frame.
+    from backend.tiles import get_index
+    t_first = float(np.asarray(get_index(path).times, dtype=float)[0])
     # Units span the frames, not the request: a range asked wider than the
     # capture would otherwise put its last units over nothing and cut the
     # capture's own minute short of its end.
@@ -769,6 +786,9 @@ def compute_features(
             "acf_phase_median": p_med, "acf_phase_p90": p_p90,
             "lam_share_median": l_med, "ev_drift_p90": d_p90, "delay_spread": spread,
             "revisit": revisit, "revisit_tau": revisit_tau,
+            **liu_features.unit_features(ratio[fsel], times[fsel], psi_amp[wsel], level[ssel]),
+            # half-open on the model's side; the last unit keeps its last frame
+            **ml_columns.unit_features(Path(path), a - t_first, b - t_first + (1e-6 if last else 0.0)),
             "gain_crossings": int(np.sum(g[1:] != g[:-1])) if g is not None and g.size > 1 else None,
             "rssi_median": float(np.median(g)) if g is not None and g.size else None,
         })
@@ -777,6 +797,7 @@ def compute_features(
     # rule's floor is the smallest jitter seen so far in the range -- occupancy
     # can only push the jitter up, so the minimum reads the link through it.
     floor = float("inf")
+    prev_p = float("nan")
     for u in units:
         if np.isfinite(u["lag1_p20"]) and u["lag1_p20"] > 0:
             floor = min(floor, u["lag1_p20"])
@@ -806,6 +827,9 @@ def compute_features(
             u["verdict3"] = 0
         else:
             u["verdict3"] = 2 if (np.isfinite(u["p_human"]) and u["p_human"] > P_HUMAN_REFERENCE) else 1
+        # Liu 6, display only: the state the previous unit left behind.
+        u["liu_prev_p"] = prev_p
+        prev_p = u["p_occupied"]
 
     return {
         "acf": {
@@ -829,6 +853,82 @@ def compute_features(
         "mimo": lvl["mimo"],
         "features": FEATURES,
     }
+
+
+# --------------------------------------------------------------------------- #
+#  One item of the compare table                                             #
+# --------------------------------------------------------------------------- #
+
+# The compare table asks for one range at a time -- a whole one-minute capture
+# or one unit of a longer one -- and asks again whenever it is redrawn, so the
+# answers are kept. Keyed on the file's size and mtime: a capture still being
+# written is a new key every time it grows.
+ITEM_MAX_SECONDS = 600.0
+_ITEM_CACHE_SIZE = 4096
+_item_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+# One computation at a time: the table asks for several rows at once, and
+# three concurrent banks make the numeric library's threads fight -- measured
+# 2.3 s for one row alone, over a minute each with three at once. Cache hits
+# do not wait for it.
+_item_compute_lock = Lock()
+
+
+def item_values(
+    path,
+    t0: float | None = None,
+    t1: float | None = None,
+    *,
+    acf_frames: int = ACF_WINDOW_FRAMES,
+    lag_seconds: float = STEP_LAG_SECONDS,
+    mimo: tuple[int, int] | None = None,
+    source_mac: str | None = None,
+    interpolate: bool = True,
+) -> dict[str, Any]:
+    """Every column of the bank for one range, as a single unit.
+
+    ``t0`` / ``t1`` default to the capture's first and last frame, so a
+    one-minute capture is one call. A range longer than ITEM_MAX_SECONDS is
+    refused: it should be added unit by unit. Returns ``{"t0", "t1",
+    "values", "fs_hz"}``; ``values`` is the unit dict of ``compute_features``.
+    """
+    from backend.tiles import get_index
+
+    path = Path(path)
+    st = path.stat()
+    if t0 is None or t1 is None:
+        ta = np.asarray(get_index(path).times, dtype=float)
+        if ta.size < 2:
+            raise ValueError("the capture has fewer than 2 frames")
+        t0 = float(ta[0]) if t0 is None else float(t0)
+        t1 = float(ta[-1]) if t1 is None else float(t1)
+    t0, t1 = float(t0), float(t1)
+    span = t1 - t0
+    if span <= 0:
+        raise ValueError("the range must be positive")
+    if span > ITEM_MAX_SECONDS:
+        raise ValueError(f"{span:.0f} s is longer than {ITEM_MAX_SECONDS:.0f} s -- open the capture and add its units")
+    key = (str(path.resolve()), st.st_size, st.st_mtime_ns, round(t0, 3), round(t1, 3),
+           int(acf_frames), float(lag_seconds), mimo, source_mac, bool(interpolate))
+    with _cache_lock:
+        hit = _item_cache.get(key)
+        if hit is not None:
+            _item_cache.move_to_end(key)
+            return hit
+    with _item_compute_lock:
+        with _cache_lock:
+            hit = _item_cache.get(key)          # computed while this call waited
+        if hit is not None:
+            return hit
+        out = compute_features(path, t0, t1, unit_seconds=span, acf_frames=acf_frames,
+                               lag_seconds=lag_seconds, mimo=mimo, source_mac=source_mac,
+                               interpolate=interpolate)
+    u = out["units"][0]
+    res = {"t0": float(u["t0"]), "t1": float(u["t1"]), "values": u, "fs_hz": out["fs_hz"]}
+    with _cache_lock:
+        _item_cache[key] = res
+        while len(_item_cache) > _ITEM_CACHE_SIZE:
+            _item_cache.popitem(last=False)
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -903,6 +1003,13 @@ FEATURE_NOTES: dict[str, dict[str, str]] = {
 }
 for _f in FEATURES:
     _f.update(FEATURE_NOTES.get(_f["key"], {"role": "context", "separates": "--", "not_separates": "--"}))
+# Display-only columns, appended last so they sit after the bank on the tab;
+# each carries its own role and answers: the Liu candidates, then the ML
+# tab's 11 model inputs and its P(person).
+FEATURES.extend(liu_features.FEATURES)
+FEATURES.extend(ml_columns.FEATURES)
+# Which columns do real work, and what for (stars, note, per-room evidence).
+feature_marks.apply(FEATURES)
 
 # The verdict, step by step, with the numbers the tab should print beside it.
 DECISION: list[dict[str, Any]] = [

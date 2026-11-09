@@ -1,0 +1,156 @@
+"""Tests for backend.af8 -- the A+F presence classifier: eight features, the revisit C3 and C3 x run_diff."""
+
+from __future__ import annotations
+
+import json
+import math
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from backend import af8
+from tests.test_hybrid2 import _capture
+
+REPO = Path(__file__).resolve().parent.parent
+CAPTURES = Path("/home/cyphy/feitcsi_parser/captures")
+
+NAN = float("nan")
+# The implementation guide's §8-1: stem -> (window end, the ten features, p(person)).
+# The four inventory windows end at the reference inventory's t1 (the camera's
+# span); the 10/7 vacuum was scored on [0, 61). The eight A/F features are the
+# guide's; C3_revisit is the reference implementation's (2026-10-09, lg
+# /tmp/kpi_c3.py); C3xRun_diff and p are the 10-feature refit's (2026-10-15,
+# sklearn's predict_proba on these ten numbers).
+GUIDE = {
+    "20261002_200002": (58.01800012588501, [0.139047, 0.715367, 1.070326, 0.039499, 0.588157, 0.474106, 25, 0.865930, 0.203071, 0.609214], 1.0000),
+    "20261001_190002": (58.00699996948242, [0.110295, 0.788755, 1.094998, 0.164787, 0.231604, 0.079279, 0, NAN, 0.034949, 0.034949], 0.8743),
+    "20261006_134123": (58.00399994850159, [0.114377, 0.796932, 1.126240, 0.041756, 0.304580, 0.102428, 2, 0.974911, 0.074938, 0.0], 0.3311),
+    "20261002_030003": (59.01599979400635, [0.017029, 0.970799, 1.023366, 0.013313, 0.221556, 0.055651, 0, NAN, 0.028781, 0.0], 0.0070),
+    "20261007_142632": (61.0, [0.016134, 0.958254, 1.002992, 0.045931, 0.380780, 0.080732, 1, 0.943273, 0.047044, 0.0], 0.0826),
+}
+
+
+# --------------------------------------------------------------------------- #
+#  The model                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("stem", sorted(GUIDE))
+def test_the_model_gives_the_guides_probability(stem: str) -> None:
+    """Pure arithmetic: the guide's features in, its p(person) out, NaN imputed."""
+    _, feats, p = GUIDE[stem]
+    assert af8.probability(dict(zip(af8.FEATURES, feats))) == pytest.approx(p, abs=5e-5)
+
+
+def test_the_model_has_the_guides_shape() -> None:
+    for arr in (af8.IMPUTER_MEDIAN, af8.SCALER_MEAN, af8.SCALER_SCALE, af8.COEF):
+        assert arr.shape == (len(af8.FEATURES),)
+    assert (af8.SCALER_SCALE > 0).all()
+
+
+# --------------------------------------------------------------------------- #
+#  The features, on the guide's own captures                                   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("stem", sorted(GUIDE))
+def test_the_features_are_the_guides(stem: str) -> None:
+    path = CAPTURES / f"{stem}.bin"
+    if not path.is_file():
+        pytest.skip(f"{stem} is not on this machine (captures are kept 7 days)")
+    t1, feats, p = GUIDE[stem]
+    out = af8.evaluate(path, 0.0, t1)
+    assert out["subcarriers"] == 31
+    for name, want in zip(af8.FEATURES, feats):
+        got = out["features"][name]
+        if math.isnan(want):
+            assert got is None, name
+        else:
+            assert got == pytest.approx(want, abs=1e-6), name     # the guide prints 6 places
+    assert out["p_person"] == pytest.approx(p, abs=5e-5)
+
+
+def test_the_revisit_finds_a_periodic_return_and_not_a_drift() -> None:
+    """C3: a channel that comes back every 20 s dips; one that only drifts away does not."""
+    fs, n = 40.0, 2400                                        # 60 s
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(0)
+    base = 1.0 + 0.05 * rng.standard_normal((1, 31))
+    swing = np.exp(1j * 3.0 * np.sin(2 * np.pi * t / 20.0))[:, None]       # head swings, period 20 s
+    walk = np.exp(1j * np.cumsum(rng.standard_normal((n, 31)), axis=0) * 0.05)   # paths never retraced
+    fan = af8.revisit_feature(base + 0.5 * swing * base, fs)["C3_revisit"]
+    person = af8.revisit_feature(base + 0.5 * walk * base, fs)["C3_revisit"]
+    assert fan > 0.5
+    assert person < 0.2
+    lags, D = af8.revisit_curve(base + 0.5 * swing * base, fs)
+    assert lags[int(np.argmin(D))] == 20.0
+
+
+def test_the_difference_cancels_the_fan_and_keeps_breathing() -> None:
+    """r(t) - r(t - T) at the swing period: the fan cancels to the sample, breathing remains."""
+    fs, n = 40.0, 2400
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(1)
+    base = 1.0 + 0.05 * rng.standard_normal((1, 31))
+    swing = 0.5 * base * np.exp(1j * 3.0 * np.sin(2 * np.pi * t / 20.0))[:, None]
+    breath = 0.05 * base * np.sin(2 * np.pi * t * 14 / 60.0)[:, None]          # 14 a minute: not a divisor of 20 s
+    fab = np.zeros(n, bool)
+    assert af8.swing_period(base + swing, fs) == 800                          # 20 s, to the sample
+    d, fd, L = af8.diff_signal(base + swing, fab, fs)
+    assert L == 800 and len(d) == n - 800 and not fd.any()
+    assert np.abs(d).max() < 1e-12                                            # the fan alone: nothing left
+    noise = 0.002 * (rng.standard_normal((n, 31)) + 1j * rng.standard_normal((n, 31)))
+    fan = af8.diff_feature(base + swing + noise, fab, fs, 0.7)
+    both = af8.diff_feature(base + swing + breath + noise, fab, fs, 0.7)
+    assert fan["run_diff"] <= 2                                               # no breathing under it
+    assert both["run_diff"] >= 20 and both["C3xRun_diff"] == pytest.approx(0.7 * both["run_diff"])
+    assert af8.diff_feature(base + swing + breath + noise, fab, fs, 0.0)["C3xRun_diff"] == 0.0   # no fan: off
+
+
+# --------------------------------------------------------------------------- #
+#  Where it runs                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_it_judges_a_synthetic_capture(tmp_path: Path) -> None:
+    out = af8.evaluate(_capture(tmp_path))
+    assert out["label"] in (0, 1)
+    assert 0.0 <= out["p_person"] <= 1.0
+    assert out["window_s"] == [0.0, af8.WINDOW_SECONDS]
+
+
+def test_it_runs_without_scipy_or_csikit(tmp_path: Path) -> None:
+    p = _capture(tmp_path)
+    code = (
+        "import sys; sys.modules['scipy'] = None; sys.modules['CSIKit'] = None\n"
+        "from backend import af8\n"
+        "sys.exit(af8.main(sys.argv[1:]))\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code, str(p), "--json"],
+                         cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["p_person"] == pytest.approx(af8.evaluate(p)["p_person"], abs=0)
+
+
+def test_a_window_too_short_is_not_judged(tmp_path: Path) -> None:
+    """Under 30 s of usable grid the guide says do not judge -- exit 2, not a 0."""
+    p = _capture(tmp_path)
+    with pytest.raises(ValueError, match="usable grid"):
+        af8.evaluate(p, 0.0, 20.0)
+    assert af8.main([str(p), "--t1", "20"]) == 2
+
+
+def test_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                        capsys: pytest.CaptureFixture) -> None:
+    p = _capture(tmp_path)
+    assert af8.main([str(p)]) == 0
+    assert capsys.readouterr().out.strip() in ("0", "1")
+    junk = tmp_path / "junk.bin"
+    junk.write_bytes(b"\x00" * 64)
+    assert af8.main([str(junk)]) == 2
+    assert af8.main([str(tmp_path / "missing.bin")]) == 2
+    monkeypatch.setattr(np, "__version__", "1.25.2")
+    assert af8.main([str(p)]) == 3

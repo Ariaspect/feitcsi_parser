@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchCaptureConditions, fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
+import { defaultCapture, fetchCaptureConditions, fetchCaptures, fetchDoppler, fetchFilters, fetchMeta, formatBytes, truncateCaptureName, type CaptureFile, type DopplerMetric, type Filters, type Meta } from "./api";
 import { TWILIGHT } from "./colormap";
 import { FarSense } from "./FarSense";
 import { Heatmap } from "./Heatmap";
 import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
-import { CaptureBar, CaptureDetails, CaptureProvider } from "./Capture";
+import { ML } from "./ML";
+import { Transformer } from "./Transformer";
+import { Realtime } from "./Realtime";
+import { CaptureBar, CaptureDetails, CaptureFollow, CaptureProvider } from "./Capture";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
 import { createTimeLink } from "./timelink";
@@ -34,6 +37,7 @@ import {
 import { PlayIcon, PauseIcon, SunIcon, MoonIcon, SplineIcon, ArrowLeftRightIcon, ChevronRightIcon, SlidersHorizontalIcon } from "lucide-react";
 
 const DEFAULT_PATH = "captures/capture.dat";
+
 const DEFAULT_REFRESH_MS = 300;
 // Characters the capture trigger can show at w-72 / text-sm. Every capture
 // name in the repo fits whole; longer nested ones lose their middle.
@@ -348,7 +352,7 @@ export function App() {
         // (or a real default file) is left alone.
         setPath((current) =>
           current === DEFAULT_PATH && c.length > 0 && !c.some((f) => f.path === DEFAULT_PATH || f.filename === DEFAULT_PATH)
-            ? c[0].path
+            ? defaultCapture(c).path
             : current,
         );
       })
@@ -356,6 +360,14 @@ export function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Live moving to another capture: the list is reread to find it, so the picker
+  // gets the new list too, and shows the day that capture is in.
+  const openFollowed = useCallback((capture: CaptureFile, all: CaptureFile[]) => {
+    setCaptures(all);
+    setPath(capture.path);
+    setGroupBy((day) => (day === "all" ? day : captureDay(capture)));
   }, []);
 
   const toggleDark = () => {
@@ -418,6 +430,7 @@ export function App() {
 
   return (
     <CaptureProvider>
+    <CaptureFollow live={running} path={path} failing={error !== null} onOpen={openFollowed} />
     <div className={`${dark ? "dark " : ""}font-sans bg-background text-foreground min-h-screen`}>
       <div className="sticky top-0 z-50 bg-background/80 backdrop-blur-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap gap-3 items-center">
@@ -516,6 +529,7 @@ export function App() {
             onClick={() => setRunning((r) => !r)}
             variant={running ? "destructive" : "default"}
             size="sm"
+            title="Keep reading the capture as it grows. While the capture controls are recording, move to each new capture as it starts."
           >
             {running ? (
               <>
@@ -655,6 +669,11 @@ export function App() {
                       GT: {cap.presence === "occupied" ? "person" : "empty"}
                     </Badge>
                   )}
+                  {cap.recorded && (
+                    <Badge variant="outline" title={`what was captured -- ${cap.recorded_source ?? ""}`}>
+                      {cap.recorded}
+                    </Badge>
+                  )}
                   {cap.camera_occupancy !== undefined && (
                     <Badge variant="outline" title="fraction of webcam frames with a person">
                       camera: {Math.round(cap.camera_occupancy * 100)}% occupied
@@ -698,6 +717,9 @@ export function App() {
               <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
               <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
               <TabsTrigger value="classifier">Classifier</TabsTrigger>
+              <TabsTrigger value="ml">ML</TabsTrigger>
+              <TabsTrigger value="transformer">Transformer</TabsTrigger>
+              <TabsTrigger value="realtime">Realtime</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -1015,7 +1037,20 @@ export function App() {
                 sourceMac={sourceMac}
                 interpolate={interpolate}
                 dark={dark}
+                captures={captures}
               />
+            </TabsContent>
+
+            <TabsContent value="ml">
+              <ML path={path} dark={dark} />
+            </TabsContent>
+
+            <TabsContent value="transformer">
+              <Transformer path={path} dark={dark} />
+            </TabsContent>
+
+            <TabsContent value="realtime">
+              <Realtime dark={dark} />
             </TabsContent>
           </Tabs>
         ) : (

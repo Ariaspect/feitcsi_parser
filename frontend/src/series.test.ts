@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   bandPath,
   clampWindow,
+  clockTicks,
+  formatClock,
   formatTime,
   linePath,
   linearScale,
@@ -202,5 +204,35 @@ describe("formatTime", () => {
 
   it("keeps sub-second precision when zoomed in", () => {
     expect(formatTime(1.234, 1)).toBe("1.23s");
+  });
+});
+
+describe("clockTicks", () => {
+  it("puts ticks on whole local minutes for a five-minute span", () => {
+    const t0 = Date.UTC(2026, 10, 9, 3, 7, 41) / 1000;
+    const out = clockTicks(t0, t0 + 300, 6);
+    expect(out.length).toBeGreaterThanOrEqual(4);
+    for (const v of out) {
+      expect(new Date(v * 1000).getSeconds()).toBe(0);
+      expect(v).toBeGreaterThanOrEqual(t0);
+      expect(v).toBeLessThanOrEqual(t0 + 300);
+    }
+    expect(out[1] - out[0]).toBe(60);
+  });
+
+  it("uses seconds on short spans and nothing on an empty one", () => {
+    const t0 = 1_793_000_000.4;
+    const out = clockTicks(t0, t0 + 30, 6);
+    expect(out[1] - out[0]).toBe(5);
+    expect(clockTicks(t0, t0)).toEqual([]);
+  });
+});
+
+describe("formatClock", () => {
+  it("shows seconds on short spans only", () => {
+    const t = new Date(2026, 10, 9, 14, 5, 9).getTime() / 1000;
+    expect(formatClock(t, 300)).toBe("14:05:09");
+    expect(formatClock(t, 3600)).toBe("14:05");
+    expect(formatClock(NaN, 60)).toBe("");
   });
 });

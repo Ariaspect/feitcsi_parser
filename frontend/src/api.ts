@@ -40,6 +40,14 @@ export interface CaptureFile {
   presence_source?: string;
   /** Fraction of camera frames with a person, whenever a camera sidecar exists. */
   camera_occupancy?: number;
+  /** What the capture was taken of, in a few words ("small move + rotating
+   *  fan"): the user's GT table, else the scenario typed at capture time.
+   *  `recorded_source` says which. */
+  recorded?: string;
+  recorded_source?: string;
+  /** Binary ground truth: the user's GT table, else the operator's presence. */
+  gt?: "person" | "empty";
+  gt_source?: string;
 }
 
 export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]> {
@@ -49,6 +57,18 @@ export async function fetchCaptures(signal?: AbortSignal): Promise<CaptureFile[]
     throw new Error(`HTTP ${res.status}: ${text}`);
   }
   return (await res.json()) as CaptureFile[];
+}
+
+/** The capture to open when none was asked for: the newest one of ordinary
+ *  length. The tabs are read on one-minute captures; a multi-hour session
+ *  (20261023_132301, 1.7 GB) is newest by mtime but costs minutes and GBs to
+ *  open, so "ordinary" is at most twice the listing's median size -- a
+ *  one-minute capture is ~11 MB at 43 Hz, and the median follows the rate if
+ *  it changes. Falls back to the newest of all. *captures* is newest first. */
+export function defaultCapture(captures: CaptureFile[]): CaptureFile {
+  const sizes = captures.map((f) => f.size_bytes).sort((a, b) => a - b);
+  const median = sizes[Math.floor(sizes.length / 2)] ?? 0;
+  return captures.find((f) => f.size_bytes <= 2 * median) ?? captures[0];
 }
 
 export function formatBytes(bytes: number): string {
@@ -1235,6 +1255,8 @@ export interface ClassifierFeature {
   role: string;
   /** The one-line answers the test gave: what this column separates, and what it does not. */
   separates: string;
+  /** Set on the columns that do real work (feature_marks); null otherwise. */
+  mark?: FeatureMark | null;
   notSeparates: string;
 }
 
@@ -1304,6 +1326,107 @@ export interface ClassifierOptions {
   interpolate?: boolean;
 }
 
+/** Which pair a marked column separates, how well (stars from the sweep), and its per-room AUCs. */
+export interface FeatureMarkTag {
+  pair: string;
+  label: string;
+  stars: number;
+  direction: "higher" | "lower";
+  auc: (number | null)[];
+}
+
+/** A column marked as doing real work: best stars, the tags behind them, and a short note. */
+export interface FeatureMark {
+  stars: number;
+  tags: FeatureMarkTag[];
+  explain: string;
+  strength: string;
+  weakness: string;
+  source: string;
+  rooms: string[];
+}
+
+function parseClassifierFeature(f: Record<string, unknown>): ClassifierFeature {
+  return {
+    mark: (f.mark as FeatureMark | null) ?? null,
+    key: f.key as string,
+    label: f.label as string,
+    test: String(f.test),
+    status: f.status as string,
+    reference: (f.reference as number | null) ?? null,
+    axis: (f.axis as [number, number] | null) ?? null,
+    decimals: (f.decimals as number) ?? 3,
+    description: (f.description as string) ?? "",
+    role: (f.role as string) ?? "",
+    separates: (f.separates as string) ?? "",
+    notSeparates: (f.not_separates as string) ?? "",
+  };
+}
+
+/** The bank's columns without computing anything -- the compare table's picker. */
+export async function fetchClassifierFeatures(signal?: AbortSignal): Promise<ClassifierFeature[]> {
+  const res = await fetch("/api/classifier/features", { signal });
+  if (!res.ok) throw new Error(`classifier features: ${res.status}`);
+  const body = await res.json();
+  return (body.features ?? []).map(parseClassifierFeature);
+}
+
+/** One row of the compare table: every column of the bank over one range,
+ *  and what is known to be true about it. */
+export interface ClassifierItem {
+  path: string;
+  t0: number;
+  t1: number;
+  fsHz: number | null;
+  values: Record<string, number | null>;
+  /** "person" | "empty" from the user's GT table, else the operator's sidecar label. */
+  gt: "person" | "empty" | null;
+  gtSource: string | null;
+  /** What the capture was taken of, in a few words. */
+  condition: string | null;
+  conditionSource: string | null;
+  room: string | null;
+  /** Camera's occupied fraction: inside the range ("range") or the capture's summary ("capture"). */
+  camera: number | null;
+  cameraScope: "range" | "capture" | null;
+}
+
+export async function fetchClassifierItem(
+  path: string,
+  t0: number | null,
+  t1: number | null,
+  options: ClassifierOptions = {},
+  signal?: AbortSignal,
+): Promise<ClassifierItem> {
+  const { acfFrames = 84, lagS = 2, mimo, sourceMac, interpolate } = options;
+  const url =
+    `/api/classifier/item?path=${encodeURIComponent(path)}` +
+    (t0 != null ? `&t0=${t0}` : "") + (t1 != null ? `&t1=${t1}` : "") +
+    `&acf_frames=${acfFrames}&lag_s=${lagS}` +
+    filterParams(mimo, sourceMac) +
+    (interpolate === false ? "&interpolate=false" : "");
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `classifier item: ${res.status}`);
+  }
+  const b = await res.json();
+  return {
+    path: b.path,
+    t0: b.t0,
+    t1: b.t1,
+    fsHz: b.fs_hz ?? null,
+    values: b.values ?? {},
+    gt: b.gt ?? null,
+    gtSource: b.gt_source ?? null,
+    condition: b.condition ?? null,
+    conditionSource: b.condition_source ?? null,
+    room: b.room ?? null,
+    camera: b.camera ?? null,
+    cameraScope: b.camera_scope ?? null,
+  };
+}
+
 export async function fetchClassifier(
   path: string,
   t0: number,
@@ -1324,19 +1447,7 @@ export async function fetchClassifier(
     throw new Error(body.detail ?? `classifier: ${res.status}`);
   }
   const body = await res.json();
-  const features: ClassifierFeature[] = (body.features ?? []).map((f: Record<string, unknown>) => ({
-    key: f.key as string,
-    label: f.label as string,
-    test: String(f.test),
-    status: f.status as string,
-    reference: (f.reference as number | null) ?? null,
-    axis: (f.axis as [number, number] | null) ?? null,
-    decimals: (f.decimals as number) ?? 3,
-    description: (f.description as string) ?? "",
-    role: (f.role as string) ?? "",
-    separates: (f.separates as string) ?? "",
-    notSeparates: (f.not_separates as string) ?? "",
-  }));
+  const features: ClassifierFeature[] = (body.features ?? []).map(parseClassifierFeature);
   const decision: ClassifierDecision[] = (body.decision ?? []).map((d: Record<string, unknown>) => ({
     step: String(d.step), test: String(d.test), key: String(d.key), text: String(d.text ?? ""), evidence: String(d.evidence ?? ""),
   }));
@@ -1380,6 +1491,164 @@ export async function fetchClassifier(
     steps,
     truth: body.truth ? { timeS: body.truth.time_s, present: body.truth.present } : null,
     truthExcluded: body.truth_excluded ?? null,
+  };
+}
+
+// --------------------------------------------------------------------------- //
+//  AF8 classifier (/api/af8) -- the ML tab                                    //
+// --------------------------------------------------------------------------- //
+
+/** The env1 model's features, in the order its weights expect (A_g15 is no longer one). */
+export type Af8Feature =
+  | "A_slope3" | "A_r025_2" | "A_r5_2" | "A_p90"
+  | "F_pkmax" | "F_pkmed" | "F_run" | "F_rpm_sd" | "C3_revisit" | "C3xRun_diff"
+  | "gate_dc" | "X_gate_dc" | "A_g15";
+
+/** The model's arithmetic for one window, one entry per feature. */
+export interface Af8Model {
+  name: string;               // what the weights were trained on
+  features: Af8Feature[];
+  value: number[];            // after imputation
+  imputed: boolean[];         // true where the feature was missing
+  mean: number[];
+  scale: number[];
+  coef: number[];
+  z: number[];
+  contribution: number[];     // coef * z
+  intercept: number;
+  logit: number;
+}
+
+export interface Af8 {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  windowS: [number, number];
+  fsHz: number;
+  subcarriers: number;
+  seconds: number;
+  pPerson: number;
+  label: 0 | 1;
+  threshold: number;
+  features: Record<Af8Feature, number | null>;
+  model: Af8Model;
+  motion: {
+    lags: number[];           // every gap D was measured at (s)
+    D: number[];              // median step at each gap
+    shapeLags: number[];      // the three the model reads
+    fitIntercept: number;     // log D = slope * log tau + fitIntercept
+    cells: number[];          // 1 s cell centres for the step lines
+    step: Record<string, (number | null)[]>;   // per-second median step, by gap
+    p90Time: number[];
+    p90Values: (number | null)[];
+  };
+  revisit: {
+    lags: number[];           // 10..30 s, 1 s apart
+    D: number[];              // median step at each lag, grid thinned to ~10 Hz
+    runningMax: number[];     // max of D up to each lag
+    drop: number[];           // (runningMax - D) / runningMax; C3 is the largest
+    at: number | null;        // the lag of the largest drop
+  };
+  breath: {
+    time: number[];           // FarSense window centres
+    peak: (number | null)[];
+    rpm: (number | null)[];
+    good: boolean[];          // peak >= threshold
+    threshold: number;
+    run: { windows: number; t0: number; t1: number } | null;
+    rpmMean: number | null;
+  };
+  diff: {
+    periodS: number;          // the swing period T (s): C3's lag refined to one sample
+    c3: number | null;        // C3 clipped to 0..1, the multiplier
+    runDiff: number;          // F_run of the sweep on d(t) = r(t) - r(t - T)
+    time: number[];           // window centres on d (start T into the window)
+    peak: (number | null)[];
+    good: boolean[];
+    run: { windows: number; t0: number; t1: number } | null;
+  };
+  fan: {
+    evDrift: number | null;   // median drift of the leading subcarrier direction, 2 s blocks
+    rFRun: number | null;     // FarSense run with the fan's two directions projected out
+    aP90: number | null;      // A_p90 before the direct path is removed, beside A_g15
+  };
+  camera: { time: number[]; present: boolean[]; fraction: number | null } | null;
+}
+
+export async function fetchAf8(path: string, window: number, signal?: AbortSignal): Promise<Af8> {
+  const res = await fetch(`/api/af8?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `af8: ${res.status}`);
+  }
+  const b = await res.json();
+  const nums = (xs: (number | null)[]) => xs.map((v) => (v == null ? NaN : v));
+  return {
+    file: b.file,
+    window: b.window,
+    windows: b.windows,
+    windowS: b.window_s,
+    fsHz: b.fs_hz,
+    subcarriers: b.subcarriers,
+    seconds: b.seconds,
+    pPerson: b.p_person,
+    label: b.label,
+    threshold: b.threshold,
+    features: b.features,
+    model: {
+      name: b.model.name,
+      features: b.model.features,
+      value: nums(b.model.value),
+      imputed: b.model.imputed,
+      mean: nums(b.model.mean),
+      scale: nums(b.model.scale),
+      coef: nums(b.model.coef),
+      z: nums(b.model.z),
+      contribution: nums(b.model.contribution),
+      intercept: b.model.intercept,
+      logit: b.model.logit,
+    },
+    motion: {
+      lags: b.motion.lags,
+      D: b.motion.D,
+      shapeLags: b.motion.shape_lags,
+      fitIntercept: b.motion.fit_intercept,
+      cells: b.motion.cells,
+      step: b.motion.step,
+      p90Time: nums(b.motion.p90_time),
+      p90Values: b.motion.p90_values,
+    },
+    revisit: {
+      lags: b.revisit.lags,
+      D: nums(b.revisit.D),
+      runningMax: nums(b.revisit.running_max),
+      drop: nums(b.revisit.drop),
+      at: b.revisit.at,
+    },
+    breath: {
+      time: nums(b.breath.time),
+      peak: b.breath.peak,
+      rpm: b.breath.rpm,
+      good: b.breath.good,
+      threshold: b.breath.threshold,
+      run: b.breath.run,
+      rpmMean: b.breath.rpm_mean,
+    },
+    diff: {
+      periodS: b.diff.period_s,
+      c3: b.diff.c3,
+      runDiff: b.diff.run_diff,
+      time: nums(b.diff.time),
+      peak: b.diff.peak,
+      good: b.diff.good,
+      run: b.diff.run,
+    },
+    fan: {
+      evDrift: b.fan.ev_drift,
+      rFRun: b.fan.r_f_run,
+      aP90: b.fan.a_p90,
+    },
+    camera: b.camera,
   };
 }
 
@@ -1514,4 +1783,250 @@ export async function syncCaptures(): Promise<CaptureStatus> {
   const res = await fetch("/api/capture/sync", { method: "POST" });
   if (!res.ok) throw await captureError(res, "capture sync");
   return (await res.json()) as CaptureStatus;
+}
+
+// --- ML tab: human-presence and anomaly-presence models (backend/ml_heads.py) ---------------
+
+export type MlHeadName = "human" | "anomaly";
+export type MlKind = "lr" | "mlp";
+
+export interface MlHeadOut {
+  p: number;
+  label: number;
+  logit: number;
+  /** Scaled inputs, in `features` order. */
+  z: number[];
+  /** Per input: LR -> coef x z; hidden layer -> logit minus the logit with that input at its training mean. */
+  effect: number[];
+}
+
+export interface MlLoeoEnv {
+  n: number;
+  correct: number;
+  accuracy: number | null;
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+  kpi1?: number | null;
+  kpi2?: number | null;
+  nonhuman?: number | null;
+  personOnly?: number | null;
+  empty?: number | null;
+  byCondition: Record<string, [number, number]>;
+}
+
+export interface MlLoeo {
+  envs: Record<string, MlLoeoEnv>;
+  pooled: { n: number; correct: number; accuracy: number };
+  meanOfEnvs: number;
+}
+
+export interface MlHeads {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  windowS: [number, number];
+  features: string[];
+  value: number[];
+  imputed: boolean[];
+  labels: Record<string, { label: string | null; test: string | null; description: string | null }>;
+  heads: Record<MlHeadName, Record<MlKind, MlHeadOut>>;
+  threshold: number;
+  truth: { human: string | null; humanSource: string | null; condition: string | null; anomaly: number | null; camera: number | null };
+  trainedOn: Record<string, { n: number; human: number; anomaly: number }>;
+  fitted: string;
+  /** Per head: "lr", "mlp", and the reference rows ("lr_11F_reference", "lr_marked_reference", "mlp_marked_reference"). */
+  loeo: Record<MlHeadName, Record<string, MlLoeo>>;
+}
+
+export function parseMlHeads(b: any): MlHeads {
+  const nums = (xs: (number | null)[]) => xs.map((v) => (v == null ? NaN : v));
+  const head = (h: any): MlHeadOut => ({ p: h.p, label: h.label, logit: h.logit, z: nums(h.z), effect: nums(h.effect) });
+  const loeo = (t: any): MlLoeo => {
+    const envs: Record<string, MlLoeoEnv> = {};
+    for (const [k, v] of Object.entries<any>(t)) {
+      if (k === "pooled" || k === "mean_of_envs") continue;
+      envs[k] = {
+        n: v.n, correct: v.correct, accuracy: v.accuracy, precision: v.precision, recall: v.recall, f1: v.f1,
+        kpi1: v.kpi1, kpi2: v.kpi2, nonhuman: v.nonhuman, personOnly: v.person_only, empty: v.empty,
+        byCondition: v.by_condition ?? {},
+      };
+    }
+    return { envs, pooled: t.pooled, meanOfEnvs: t.mean_of_envs };
+  };
+  const heads = {} as Record<MlHeadName, Record<MlKind, MlHeadOut>>;
+  const lo = {} as Record<MlHeadName, Record<string, MlLoeo>>;
+  for (const h of ["human", "anomaly"] as MlHeadName[]) {
+    heads[h] = { lr: head(b.heads[h].lr), mlp: head(b.heads[h].mlp) };
+    lo[h] = Object.fromEntries(Object.entries<any>(b.loeo[h]).map(([k, v]) => [k, loeo(v)]));
+  }
+  return {
+    file: b.file, window: b.window, windows: b.windows, windowS: b.window_s,
+    features: b.features, value: nums(b.value), imputed: b.imputed, labels: b.labels,
+    heads, threshold: b.threshold,
+    truth: {
+      human: b.truth.human ?? null, humanSource: b.truth.human_source ?? null, condition: b.truth.condition ?? null,
+      anomaly: b.truth.anomaly ?? null, camera: b.truth.camera ?? null,
+    },
+    trainedOn: b.trained_on, fitted: b.fitted, loeo: lo,
+  };
+}
+
+export async function fetchMlHeads(path: string, window: number, signal?: AbortSignal): Promise<MlHeads> {
+  const res = await fetch(`/api/ml/heads?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `ml heads: ${res.status}`);
+  }
+  return parseMlHeads(await res.json());
+}
+
+/** Room of a capture as the per-room models see it: which fold judges it and whose empties calibrate it. */
+export interface RoomFold {
+  room: string;
+  fold: string;
+  calibrated_with: string;
+  source: string;
+}
+
+/** Accuracy (%) of a model per room / scenario, overall and by KPI (null where the set has no such minutes). */
+export type AccuracyTable = Record<string, { all: number | null; kpi1: number | null; kpi2: number | null }>;
+
+export interface ModelTruth {
+  human: string | null;
+  human_source: string | null;
+  condition: string | null;
+  camera: number | null;
+}
+
+/** /api/ml/calib41: 41F hidden layer on empty-room-calibrated columns (backend/calib41.py). */
+export interface Calib41 {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  window_s: [number, number];
+  features: string[];
+  labels: Record<string, { label?: string; test?: string; description?: string }>;
+  value: (number | null)[] | null;
+  logged: boolean[] | null;
+  centre: (number | null)[] | null;
+  calibrated: (number | null)[] | null;
+  imputed: boolean[] | null;
+  z: (number | null)[] | null;
+  effect: (number | null)[] | null;
+  verdict: { p: number; label: number } | null;
+  room: RoomFold | null;
+  trained_on: string[] | null;
+  threshold: number;
+  accuracy: AccuracyTable;
+  truth: ModelTruth;
+}
+
+export async function fetchCalib41(path: string, window: number, signal?: AbortSignal): Promise<Calib41> {
+  const res = await fetch(`/api/ml/calib41?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `calib41: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** /api/tfm: the Transformer tab -- 17 per-second channels and the per-room transformer's verdict (backend/tfm_model.py). */
+export interface Tfm {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  window_s: [number, number];
+  channels: string[];
+  calibrated_channels: string[];
+  log_channels: string[];
+  raw: (number | null)[][];
+  calibrated: (number | null)[][] | null;
+  swing_period_s: number | null;
+  room: RoomFold | null;
+  trained_on: string[] | null;
+  verdict: { p: number; label: number; p_seeds: (number | null)[] } | null;
+  threshold: number;
+  accuracy: AccuracyTable;
+  truth: ModelTruth;
+}
+
+export async function fetchTfm(path: string, window: number, signal?: AbortSignal): Promise<Tfm> {
+  const res = await fetch(`/api/tfm?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `transformer: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** One row of the threshold-per-rate measurement (backend/realtime.py RATE_TABLE, offline 2026-11-02). */
+export interface RealtimeRateRow {
+  rate_hz: number;
+  window_s: number;
+  lag_s: number;
+  threshold: number;
+  empty_alarms_per_h: number;
+  big: number;
+  small: number;
+  still: number;
+  static_fan: number;
+  robot: number;
+  entries: string;
+  onset_s: number;
+}
+
+/** GET /api/realtime/status: the real-time movement channel (backend/realtime.py). Times are epoch seconds. */
+export interface RealtimeStatus {
+  enabled: boolean;
+  state: "stopped" | "waiting" | "starting" | "streaming" | "capture" | "error";
+  detail: string;
+  source: "stream" | "capture" | null;
+  source_file: string | null;
+  board: string | null;
+  now: number;
+  started_at: number | null;
+  threshold: number;
+  default_threshold: number;
+  ping_interval_s: number;
+  sampling_rate_hz: number | null;
+  frames: number;
+  signal: { lag_s: number; window_s: number; hop_s: number; refractory_s: number };
+  rate_table: RealtimeRateRow[];
+  /** the self ratio every hop; `src` 0 = own stream, 1 = a running capture's file */
+  t: number[];
+  x: (number | null)[];
+  src: number[];
+  /** frames the signal used per wall-clock second */
+  rate_t: number[];
+  rate: number[];
+  alarms: { t: number; x: number }[];
+  log: string[];
+  proxied_via?: string;
+}
+
+async function realtimeCall(url: string, what: string, init?: RequestInit): Promise<RealtimeStatus> {
+  const res = await fetch(url, init);
+  if (!res.ok) throw await captureError(res, what);
+  return (await res.json()) as RealtimeStatus;
+}
+
+export function fetchRealtimeStatus(since: number, windowS: number, signal?: AbortSignal): Promise<RealtimeStatus> {
+  return realtimeCall(`/api/realtime/status?since=${since}&window_s=${windowS}`, "realtime status", { signal });
+}
+
+export function startRealtime(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/start", "realtime start", { method: "POST" });
+}
+
+export function stopRealtime(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/stop", "realtime stop", { method: "POST" });
+}
+
+export function setRealtimeThreshold(threshold: number): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/threshold", "realtime threshold", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threshold }),
+  });
 }

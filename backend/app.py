@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from typing import NamedTuple
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import subprocess
 
-from . import capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, motionsig, truth as truthmod
+from . import af8_explain, calib41, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, ml_heads, motionsig, realtime, tfm_model, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -89,6 +92,9 @@ app.add_middleware(
         "X-Doppler-ScaleMax",
     ],
 )
+# The bundle (550 kB) and the capture listing (350 kB of JSON) shrink to a
+# fifth or less; the page is often opened over a slow remote link.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 ROOTS_ENV_VAR = "FEITCSI_CAPTURE_ROOTS"
@@ -1661,6 +1667,180 @@ def classifier_features(
     }
 
 
+@app.get("/api/af8")
+def af8_classifier(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window: a capture under 90 s has one, [0, 61) s; a longer one is cut into [60w, 60(w+1)) s"),
+) -> dict:
+    """The AF8 classifier on one window, with every feature and the series behind it.
+
+    See ``backend.af8_explain``. The verdict is ``backend.af8_env1``'s (AF8's ten
+    features plus X_gate_dc, trained on env1 + env2, SNR-augmented);
+    the camera, where a capture has one, is reported beside it, never used.
+    """
+    p = resolve_capture_path(path)
+    try:
+        out = af8_explain.explain(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    camera = None
+    cam = _camera_truth(p)
+    if cam is not None and cam.size:
+        t0, t1 = out["window_s"]
+        inside = (cam[:, 0] >= t0) & (cam[:, 0] < t1)
+        camera = {
+            "time": [float(v) for v in cam[inside, 0]],
+            "present": [bool(v > 0.5) for v in cam[inside, 1]],
+            "fraction": float(np.mean(cam[inside, 1] > 0.5)) if inside.any() else None,
+        }
+    out["camera"] = camera
+    return out
+
+
+@app.get("/api/ml/heads")
+def ml_heads_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The human-presence and anomaly-presence models (11F + aux + Liu, + bs for human; LR and one hidden layer each) on one window.
+
+    See ``backend.ml_heads``. With the capture's labels where it has them -- human from the GT table,
+    else the operator's presence; anomaly from whether the recorded condition names a fan, vacuum
+    or robot (both capture-level) -- and the models' leave-one-environment-out accuracy.
+    """
+    p = resolve_capture_path(path)
+    try:
+        out = ml_heads.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    labels = {f["key"]: {"label": f.get("label"), "test": f.get("test"), "description": f.get("description")}
+              for f in classifier.FEATURES if f.get("key") in ml_heads.FEATURES}
+    labels = {**ml_heads.LABEL_FALLBACK, **labels}
+    heads = {
+        h: {
+            k: {
+                "p": _json_num(m["p"]),
+                "label": int(m["label"]),
+                "logit": _json_num(m["logit"]),
+                "z": [_json_num(v) for v in m["z"]],
+                "effect": [_json_num(v) for v in m["effect"]],
+            }
+            for k, m in out[h].items()
+        }
+        for h in ml_heads.HEADS
+    }
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "features": out["features"],
+        "value": [_json_num(v) for v in out["value"]],
+        "imputed": [bool(v) for v in out["imputed"]],
+        "labels": labels,
+        "heads": heads,
+        "threshold": ml_heads.THRESHOLD,
+        "truth": {
+            "human": truth.get("gt"),
+            "human_source": truth.get("gt_source"),
+            "condition": truth.get("condition"),
+            "anomaly": ml_heads.anomaly_truth(truth.get("condition")),
+            "camera": truth.get("camera"),
+        },
+        "trained_on": ml_heads.TRAINED_ON,
+        "fitted": ml_heads.FITTED,
+        "loeo": ml_heads.LOEO,
+    }
+
+
+def _room_json(room: dict | None) -> dict | None:
+    return None if room is None else {k: str(v) for k, v in room.items()}
+
+
+@app.get("/api/ml/calib41")
+def ml_calib41_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The 41F hidden layer on the empty-room-calibrated columns, judged by the model that never saw the capture's room.
+
+    See ``backend.calib41``. ``room`` is null (and ``verdict`` too) when the capture's room is unknown: there is
+    no empty reference to calibrate against.
+    """
+    p = resolve_capture_path(path)
+    try:
+        out = calib41.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    labels = {f["key"]: {"label": f.get("label"), "test": f.get("test"), "description": f.get("description")}
+              for f in classifier.FEATURES if f.get("key") in calib41.FEATURES}
+    labels = {**ml_heads.LABEL_FALLBACK, **labels}
+    arr = lambda k: [_json_num(v) for v in out[k]] if k in out else None
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "features": out["features"],
+        "labels": labels,
+        "value": arr("value"),
+        "logged": [bool(v) for v in out["logged"]] if "logged" in out else None,
+        "centre": arr("centre"),
+        "calibrated": arr("calibrated"),
+        "imputed": [bool(v) for v in out["imputed"]] if "imputed" in out else None,
+        "z": arr("z"),
+        "effect": arr("effect"),
+        "verdict": None if out["verdict"] is None else {"p": _json_num(out["verdict"]["p"]), "label": int(out["verdict"]["label"])},
+        "room": _room_json(out["room"]),
+        "trained_on": out.get("trained_on"),
+        "threshold": calib41.THRESHOLD,
+        "accuracy": calib41.ACCURACY,
+        "truth": {"human": truth.get("gt"), "human_source": truth.get("gt_source"),
+                  "condition": truth.get("condition"), "camera": truth.get("camera")},
+    }
+
+
+@app.get("/api/tfm")
+def tfm_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The Transformer tab: 17 per-second channels (raw and calibrated) and the verdict of the model that never saw
+    the capture's room. See ``backend.tfm_model``."""
+    p = resolve_capture_path(path)
+    try:
+        out = tfm_model.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    grid = lambda a: None if a is None else [[_json_num(v) for v in row] for row in np.asarray(a, dtype=float)]
+    v = out["verdict"]
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "channels": out["channels"],
+        "calibrated_channels": out["calibrated_channels"],
+        "log_channels": out["log_channels"],
+        "raw": grid(out["raw"]),
+        "calibrated": grid(out["calibrated"]),
+        "swing_period_s": _json_num(out["swing_period_s"]),
+        "room": _room_json(out["room"]),
+        "trained_on": out.get("trained_on"),
+        "verdict": None if v is None else {"p": _json_num(v["p"]), "label": int(v["label"]), "p_seeds": [_json_num(x) for x in v["p_seeds"]]},
+        "threshold": tfm_model.THRESHOLD,
+        "accuracy": tfm_model.META["accuracy"],
+        "truth": {"human": truth.get("gt"), "human_source": truth.get("gt_source"),
+                  "condition": truth.get("condition"), "camera": truth.get("camera")},
+    }
+
+
 @app.get("/api/motion-signal")
 def motion_signal(
     path: str = Query(..., description="Path to capture file"),
@@ -1841,7 +2021,7 @@ class _Found(NamedTuple):
     path: Path                  # spelled under the root the walk started from
     stat: os.stat_result
     dir_fd: int                 # the capture's directory; valid only until the walk resumes
-    siblings: frozenset[str]    # every name in that directory
+    siblings: Mapping[str, os.DirEntry | None]  # every name in that directory
 
 
 def _scan_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[_Found]:
@@ -1879,7 +2059,21 @@ def _scan_dir(fd: int, path: Path, real: Path, depth: int,
             entries = sorted(os.scandir(fd), key=lambda e: e.name)
         except OSError:
             return
-        siblings = frozenset(e.name for e in entries)
+        siblings = {e.name: e for e in entries}
+        # A capture's own artifacts sit beside it in folders named after it
+        # (``<stem>_cv_annotated`` holds the camera frames). They never hold a
+        # capture, and on lg there are over a thousand of them: opening and
+        # listing each one was half of the 3.9 s the listing took.
+        stems = [PurePath(n).stem + "_" for n in siblings
+                 if PurePath(n).suffix in CAPTURE_SUFFIXES]
+        # Every stat the listing will need -- the captures' and their JSON
+        # sidecars' -- issued together. Each is a ~0.4 ms round trip on the 9p
+        # mount and they were the whole remaining cost done one by one; a
+        # DirEntry keeps its stat, so the later calls below are free.
+        wanted = [e for e in entries
+                  if PurePath(e.name).suffix in CAPTURE_SUFFIXES + (".json",)]
+        if len(wanted) > 8:
+            list(_STAT_POOL.map(_stat_quietly, wanted))
         for entry in entries:
             try:
                 is_dir = entry.is_dir()  # follows symlinks; False if broken
@@ -1887,6 +2081,8 @@ def _scan_dir(fd: int, path: Path, real: Path, depth: int,
             except OSError:
                 continue
             if is_dir:
+                if not is_link and any(entry.name.startswith(s) for s in stems):
+                    continue
                 # A plain subdirectory's real path is its parent's plus its
                 # name; only a symlink needs resolving.
                 sub_real = (real / entry.name).resolve() if is_link else real / entry.name
@@ -1910,6 +2106,16 @@ def _scan_dir(fd: int, path: Path, real: Path, depth: int,
         os.close(fd)
 
 
+_STAT_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="capture-stat")
+
+
+def _stat_quietly(entry: os.DirEntry) -> None:
+    try:
+        entry.stat()
+    except OSError:
+        pass
+
+
 def _walk_captures(root: Path, depth: int, seen: set[Path]) -> Iterator[Path]:
     """The paths :func:`_scan_captures` finds, for callers that need no more."""
     for found in _scan_captures(root, depth, seen):
@@ -1922,17 +2128,90 @@ def _sidecar_json(found: _Found, suffix: str) -> dict | None:
     Presence is read off the directory listing the walk already made and the
     file is opened through the walk's descriptor, so neither costs a path
     lookup.
+
+    Parsed sidecars are kept in memory keyed by their size and mtime: a stat
+    costs a third of an open + read + close on lg's 9p mount, and sidecars
+    rarely change, so a repeat listing re-reads only the ones that did.
     """
     name = f"{found.path.stem}{suffix}"
     if name not in found.siblings:
         return None
+    entry = found.siblings[name]
+    try:
+        st = entry.stat() if entry is not None else os.stat(name, dir_fd=found.dir_fd)
+    except OSError:
+        return None
+    key = (str(found.path.parent / name), st.st_size, st.st_mtime_ns)
+    hit = _SIDECAR_CACHE.get(key[0])
+    if hit is not None and hit[0] == key:
+        return hit[1]
     try:
         fd = os.open(name, os.O_RDONLY, dir_fd=found.dir_fd)
         with os.fdopen(fd, "rb") as fh:
             obj = json.loads(fh.read())
     except (OSError, ValueError):
         return None
-    return obj if isinstance(obj, dict) else None
+    obj = obj if isinstance(obj, dict) else None
+    _SIDECAR_CACHE[key[0]] = (key, obj)
+    return obj
+
+
+# path -> ((path, size, mtime_ns), parsed sidecar); see _sidecar_json.
+_SIDECAR_CACHE: dict[str, tuple[tuple[str, int, int], dict | None]] = {}
+
+
+GT_TABLES_CSV = Path(__file__).resolve().parent.parent / "data" / "gt_tables.csv"
+
+# The user's condition names in the GT tables, as a viewer reads them.
+_GT_WORDS = {
+    "empty": "empty room", "small move": "small move", "large move": "large move",
+    "still": "still (breathing)", "standing/walking": "standing / walking",
+    "static fan": "static fan only", "rot fan": "rotating fan only",
+    "vacuum": "robot vacuum only",
+}
+_GT_THINGS = {"static fan": "static fan", "rot fan": "rotating fan", "vacuum": "robot vacuum"}
+_GT_PEOPLE = {"still": "still (breathing)", "small": "small move"}
+
+
+def _gt_words(cond: str) -> str:
+    """'rot fan + small' -> 'small move + rotating fan': the person first."""
+    if " + " in cond:
+        thing, person = cond.split(" + ", 1)
+        return f"{_GT_PEOPLE.get(person, person)} + {_GT_THINGS.get(thing, thing)}"
+    return _GT_WORDS.get(cond, cond)
+
+
+_GT_TABLE: tuple[int, dict[str, dict]] | None = None
+
+
+def _gt_table() -> dict[str, dict]:
+    """stem -> its row of data/gt_tables.csv, re-read when the file changes."""
+    global _GT_TABLE
+    try:
+        mtime = GT_TABLES_CSV.stat().st_mtime_ns
+    except OSError:
+        return {}
+    if _GT_TABLE is None or _GT_TABLE[0] != mtime:
+        with GT_TABLES_CSV.open(newline="") as fh:
+            _GT_TABLE = (mtime, {r["stem"]: r for r in csv.DictReader(fh)})
+    return _GT_TABLE[1]
+
+
+def _recorded(stem: str, meta_scenario: object) -> dict:
+    """What the capture was taken of, in a few words, and who says so.
+
+    The user's GT tables first (data/gt_tables.csv, sessions by start time);
+    otherwise the scenario the operator typed when capturing. Never the
+    camera's guess -- that has its own badge.
+    """
+    row = _gt_table().get(stem)
+    if row:
+        return {"recorded": _gt_words(row["cond"]),
+                "recorded_source": f"GT table {row['env']}, session {row['session']}"}
+    if isinstance(meta_scenario, str) and meta_scenario.strip():
+        return {"recorded": meta_scenario.strip(),
+                "recorded_source": "operator, at capture time"}
+    return {}
 
 
 def _capture_conditions(found: _Found) -> dict:
@@ -1949,6 +2228,16 @@ def _capture_conditions(found: _Found) -> dict:
                 "activity", "facing", "distance_m"):
         if meta.get(key) not in (None, ""):
             out[key] = meta[key]
+    out.update(_recorded(found.path.stem, meta.get("scenario")))
+    # Binary ground truth for pickers: the user's GT table first, else the
+    # operator's presence below. Absent when neither says.
+    row = _gt_table().get(found.path.stem)
+    if row and str(row.get("y")) in ("0", "1"):
+        out["gt"] = "person" if str(row["y"]) == "1" else "empty"
+        out["gt_source"] = f"GT table {row.get('env', '')}".strip()
+    elif meta.get("presence") in ("occupied", "empty"):
+        out["gt"] = "person" if meta["presence"] == "occupied" else "empty"
+        out["gt_source"] = str(meta.get("presence_source") or "operator")
     # The operator's own ground truth from the capture bar (sessions without a
     # webcam): "occupied" / "empty", never guessed, with where it came from.
     if meta.get("presence") in ("occupied", "empty"):
@@ -2010,6 +2299,13 @@ def list_captures() -> list[dict]:
 
     files.sort(key=lambda f: f["mtime"], reverse=True)
     return files
+
+
+@app.on_event("startup")
+def _warm_capture_listing() -> None:
+    """Read every sidecar once in the background, so the first page load after
+    a restart gets the cached listing (0.4 s) instead of the cold one (2.5 s)."""
+    _STAT_POOL.submit(list_captures)
 
 
 class CaptureStart(BaseModel):
@@ -2102,6 +2398,178 @@ def capture_sync() -> dict:
     return m.status()
 
 
+# ---------------------------------------------------------------------- realtime
+@app.on_event("startup")
+def _start_realtime() -> None:
+    """The Realtime tab's channel runs all the time on the server that reaches the board (``REALTIME_AUTOSTART=0``
+    turns that off). A proxy-mode server has no board: it forwards the tab's calls like the capture calls."""
+    if not capture_control.PROXY_URL and os.environ.get("REALTIME_AUTOSTART", "1") != "0":
+        realtime.monitor().start()
+
+
+@app.on_event("shutdown")
+def _stop_realtime() -> None:
+    if not capture_control.PROXY_URL and realtime._monitor is not None:
+        realtime._monitor.stop()
+
+
+@app.get("/api/realtime/status")
+def realtime_status(since: float = 0.0, window_s: float = Query(900.0, ge=10.0, le=realtime.KEEP_S)) -> dict:
+    """The real-time movement channel: its state, the self ratio every 0.25 s since ``since`` (epoch s; at most the
+    last ``window_s``), frames per second, the threshold and the alarms. See ``backend/realtime.py``."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("GET", f"/api/realtime/status?since={since}&window_s={window_s}")
+    return realtime.monitor().status(since=since, window_s=window_s)
+
+
+@app.post("/api/realtime/start")
+def realtime_start() -> dict:
+    """Start the channel (it starts with the server; this undoes a stop)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/start")
+    m = realtime.monitor()
+    m.start()
+    return m.status(window_s=10.0)
+
+
+@app.post("/api/realtime/stop")
+def realtime_stop() -> dict:
+    """Stop the channel and end its stream on the board (frees the board, stops the stimulus)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/stop", timeout=30.0)
+    m = realtime.monitor()
+    m.stop()
+    return m.status(window_s=10.0)
+
+
+class RealtimeThreshold(BaseModel):
+    threshold: float
+
+
+@app.post("/api/realtime/threshold")
+def realtime_threshold(body: RealtimeThreshold) -> dict:
+    """Set the alarm threshold on the self ratio (2.14 by default: 43 Hz, measured 2026-11-02)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/threshold", body.model_dump())
+    m = realtime.monitor()
+    try:
+        m.set_threshold(body.threshold)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return m.status(window_s=10.0)
+
+
+def _json_num(v: object) -> float | int | None:
+    """A unit field as JSON: ints stay ints, non-finite floats become null."""
+    if v is None:
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return int(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    try:
+        f = float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
+
+
+def _item_truth(p: Path, t0: float, t1: float) -> dict:
+    """Ground truth for one compare item, with where each part comes from.
+
+    ``gt`` ("person" / "empty"): the user's GT table (data/gt_tables.csv)
+    first, else the operator's presence in the ``_meta.json`` sidecar; absent
+    when neither says. ``condition``: what the capture was taken of (the GT
+    table's words, else the scenario typed at capture). ``camera``: the
+    camera's occupied fraction inside [t0, t1] when the frames are there, else
+    the capture's own summary (``camera_scope`` says which).
+    """
+    out: dict = {}
+    row = _gt_table().get(p.stem)
+    try:
+        meta = json.loads(p.with_name(f"{p.stem}_meta.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if row and str(row.get("y")) in ("0", "1"):
+        out["gt"] = "person" if str(row["y"]) == "1" else "empty"
+        out["gt_source"] = f"GT table {row.get('env', '')}".strip()
+    elif meta.get("presence") in ("occupied", "empty"):
+        out["gt"] = "person" if meta["presence"] == "occupied" else "empty"
+        out["gt_source"] = str(meta.get("presence_source") or "operator")
+    rec = _recorded(p.stem, meta.get("scenario"))
+    if rec:
+        out["condition"] = rec["recorded"]
+        out["condition_source"] = rec["recorded_source"]
+    room = meta.get("room") or (row.get("env") if row else None)
+    if room:
+        out["room"] = str(room)
+    try:
+        cam = _camera_truth(p)
+    except (OSError, ValueError):
+        cam = None
+    if cam is not None and cam.size:
+        m = (cam[:, 0] >= t0) & (cam[:, 0] <= t1)
+        if m.any():
+            out["camera"] = float(np.mean(cam[m, 1] > 0.5))
+            out["camera_scope"] = "range"
+    if "camera" not in out:
+        try:
+            cv = json.loads(p.with_name(f"{p.stem}_cv.json").read_text())
+            frac = cv["summary"]["fraction_occupied"]
+            if frac is not None:
+                out["camera"] = float(frac)
+                out["camera_scope"] = "capture"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return out
+
+
+@app.get("/api/classifier/features")
+def classifier_feature_list() -> dict:
+    """The bank's columns -- key, label, test, status, description, role,
+    what each separates -- without computing anything, for the compare
+    table's column picker."""
+    return {"features": classifier.FEATURES}
+
+
+@app.get("/api/classifier/item")
+def classifier_item(
+    path: str = Query(..., description="Capture file"),
+    t0: float | None = Query(None, description="Start of the range, capture clock; default the first frame"),
+    t1: float | None = Query(None, description="End of the range, capture clock; default the last frame"),
+    acf_frames: int = Query(classifier.ACF_WINDOW_FRAMES, ge=8, le=4000, description="Frames per autocorrelation window"),
+    lag_s: float = Query(classifier.STEP_LAG_SECONDS, ge=0, le=10, description="Lag of the frame step, seconds"),
+    mimo: str | None = Query(None, description="MIMO filter: 'all' or 'NxM'"),
+    source_mac: str | None = Query(None, description="Source MAC filter"),
+    interpolate: bool = Query(True, description="Fill structural subcarrier nulls before transforming"),
+) -> dict:
+    """Every column of the bank for one range (default: the whole capture) as
+    one unit, with its ground truth -- one row of the classifier tab's
+    compare table. Cached; at most ``classifier.ITEM_MAX_SECONDS`` long."""
+    p = resolve_capture_path(path)
+    try:
+        mimo_filter = parse_mimo_filter(mimo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        res = classifier.item_values(
+            p, t0, t1, acf_frames=acf_frames, lag_seconds=lag_s, mimo=mimo_filter,
+            source_mac=parse_mac_filter(source_mac), interpolate=interpolate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "path": str(p),
+        "t0": res["t0"],
+        "t1": res["t1"],
+        "fs_hz": _json_num(res["fs_hz"]),
+        "values": {k: _json_num(v) for k, v in res["values"].items()},
+        **_item_truth(p, res["t0"], res["t1"]),
+    }
+
+
 @app.get("/api/capture_conditions")
 def capture_conditions(path: str = Query(..., description="Capture file (absolute, or as /api/captures lists it)")) -> dict:
     """The recorded conditions of one capture, read fresh from its sidecars.
@@ -2115,7 +2583,7 @@ def capture_conditions(path: str = Query(..., description="Capture file (absolut
         raise HTTPException(404, f"File not found: {path}")
     fd = os.open(str(p.parent), os.O_RDONLY)
     try:
-        found = _Found(path=p, stat=p.stat(), dir_fd=fd, siblings=frozenset(os.listdir(p.parent)))
+        found = _Found(path=p, stat=p.stat(), dir_fd=fd, siblings=dict.fromkeys(os.listdir(p.parent)))
         return _capture_conditions(found)
     finally:
         os.close(fd)

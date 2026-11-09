@@ -520,14 +520,17 @@ class MTKIndex:
         # rpi plane selection, tpi ascending — the same rule as _build.
         counts = run_end - run_start
         idx_all = _expand_ranges(run_start, counts)
-        owner = np.repeat(np.arange(n, dtype=np.int64), counts)
+        # repeat() wants its counts as intp: the same array on a 64-bit build,
+        # and a refused int64 -> int32 cast on the board's 32-bit Python.
+        counts_ip = counts.astype(np.intp)
+        owner = np.repeat(np.arange(n, dtype=np.int64), counts_ip)
         in_plane = rpi_r[idx_all] == self.plane
         # Order: plane first, then tpi ascending, stable within a group.
         order = np.lexsort((tpi_r[idx_all], ~in_plane, owner))
         idx_sorted = idx_all[order]
         owner_sorted = owner[order]
         rank = np.arange(idx_sorted.size, dtype=np.int64) - np.repeat(
-            np.cumsum(counts) - counts, counts
+            np.cumsum(counts) - counts, counts_ip
         )
 
         head_rec = idx_sorted[rank == 0]

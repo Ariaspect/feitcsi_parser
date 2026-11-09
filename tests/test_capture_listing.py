@@ -115,3 +115,67 @@ def test_conditions_of_one_capture_are_read_fresh(day: Path) -> None:
     again = client.get("/api/capture_conditions", params={"path": path}).json()
     assert again["presence"] == "occupied" and again["camera_occupancy"] == 0.0   # new sidecar seen without a reload
     assert client.get("/api/capture_conditions", params={"path": str(day / "nope.bin")}).status_code == 404
+
+
+def test_a_rewritten_sidecar_is_read_again_not_served_from_the_cache(day: Path) -> None:
+    import os
+    _capture(day, "a", meta={"scenario": "seated"})
+    assert _listing()["a"]["scenario"] == "seated"
+    meta = day / "a_meta.json"
+    meta.write_text(json.dumps({"scenario": "standing"}))
+    st = meta.stat()
+    os.utime(meta, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    assert _listing()["a"]["scenario"] == "standing"
+
+
+def test_a_capture_s_own_folders_are_not_walked_but_other_folders_are(day: Path) -> None:
+    _capture(day, "a")
+    frames = day / "a_cv_annotated"
+    frames.mkdir()
+    (frames / "stray.bin").write_bytes(b"\x01" * 16)   # never a capture in there
+    other = day / "batch2"
+    other.mkdir()
+    _capture(other, "b")
+    assert sorted(_listing()) == ["a", "b"]
+
+
+def test_what_was_captured_comes_from_the_gt_table_then_the_operator(
+        day: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import backend.app as app_mod
+    table = tmp_path / "gt_tables.csv"
+    table.write_text("env,cond,y,stem,date,session,train,dur\n"
+                     "env1,rot fan + small,1,a,1012,1012 21:16-21:47,True,\n"
+                     "env1,static fan,0,b,1012,1012 22:08-22:28,True,\n")
+    monkeypatch.setattr(app_mod, "GT_TABLES_CSV", table)
+    _capture(day, "a", meta={"scenario": "typed at capture"})
+    _capture(day, "b")
+    _capture(day, "c", meta={"scenario": "fan mov / small mov"})
+    _capture(day, "d", cv={"summary": {"fraction_occupied": 0.9}})
+    got = _listing()
+    assert got["a"]["recorded"] == "small move + rotating fan"      # table wins
+    assert "1012 21:16-21:47" in got["a"]["recorded_source"]
+    assert got["b"]["recorded"] == "static fan only"
+    assert got["c"]["recorded"] == "fan mov / small mov"
+    assert got["c"]["recorded_source"].startswith("operator")
+    assert "recorded" not in got["d"]                                # never the camera's guess
+
+
+def test_binary_gt_comes_from_the_gt_table_then_the_operators_presence(
+        day: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compare table's picker filters on one person / empty field: the
+    user's GT table first, else the operator's label; never the camera."""
+    import backend.app as app_mod
+    table = tmp_path / "gt_tables.csv"
+    table.write_text("env,cond,y,stem,date,session,train,dur\n"
+                     "env1,rot fan + small,1,a,1012,1012 21:16-21:47,True,\n"
+                     "env1,static fan,0,b,1012,1012 22:08-22:28,True,\n")
+    monkeypatch.setattr(app_mod, "GT_TABLES_CSV", table)
+    _capture(day, "a", meta={"presence": "empty"})                    # the table wins over the sidecar
+    _capture(day, "b")
+    _capture(day, "c", meta={"presence": "occupied", "presence_source": "operator_manual"})
+    _capture(day, "d", cv={"summary": {"fraction_occupied": 0.9}})
+    got = _listing()
+    assert got["a"]["gt"] == "person" and got["a"]["gt_source"] == "GT table env1"
+    assert got["b"]["gt"] == "empty"
+    assert got["c"]["gt"] == "person" and got["c"]["gt_source"] == "operator_manual"
+    assert "gt" not in got["d"]
