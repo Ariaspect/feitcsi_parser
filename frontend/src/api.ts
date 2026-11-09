@@ -1880,3 +1880,82 @@ export async function fetchMlHeads(path: string, window: number, signal?: AbortS
   }
   return parseMlHeads(await res.json());
 }
+
+/** Room of a capture as the per-room models see it: which fold judges it and whose empties calibrate it. */
+export interface RoomFold {
+  room: string;
+  fold: string;
+  calibrated_with: string;
+  source: string;
+}
+
+/** Accuracy (%) of a model per room / scenario, overall and by KPI (null where the set has no such minutes). */
+export type AccuracyTable = Record<string, { all: number | null; kpi1: number | null; kpi2: number | null }>;
+
+export interface ModelTruth {
+  human: string | null;
+  human_source: string | null;
+  condition: string | null;
+  camera: number | null;
+}
+
+/** /api/ml/calib41: 41F hidden layer on empty-room-calibrated columns (backend/calib41.py). */
+export interface Calib41 {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  window_s: [number, number];
+  features: string[];
+  labels: Record<string, { label?: string; test?: string; description?: string }>;
+  value: (number | null)[] | null;
+  logged: boolean[] | null;
+  centre: (number | null)[] | null;
+  calibrated: (number | null)[] | null;
+  imputed: boolean[] | null;
+  z: (number | null)[] | null;
+  effect: (number | null)[] | null;
+  verdict: { p: number; label: number } | null;
+  room: RoomFold | null;
+  trained_on: string[] | null;
+  threshold: number;
+  accuracy: AccuracyTable;
+  truth: ModelTruth;
+}
+
+export async function fetchCalib41(path: string, window: number, signal?: AbortSignal): Promise<Calib41> {
+  const res = await fetch(`/api/ml/calib41?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `calib41: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** /api/tfm: the Transformer tab -- 17 per-second channels and the per-room transformer's verdict (backend/tfm_model.py). */
+export interface Tfm {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  window_s: [number, number];
+  channels: string[];
+  calibrated_channels: string[];
+  log_channels: string[];
+  raw: (number | null)[][];
+  calibrated: (number | null)[][] | null;
+  swing_period_s: number | null;
+  room: RoomFold | null;
+  trained_on: string[] | null;
+  verdict: { p: number; label: number; p_seeds: (number | null)[] } | null;
+  threshold: number;
+  accuracy: AccuracyTable;
+  truth: ModelTruth;
+}
+
+export async function fetchTfm(path: string, window: number, signal?: AbortSignal): Promise<Tfm> {
+  const res = await fetch(`/api/tfm?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `transformer: ${res.status}`);
+  }
+  return res.json();
+}

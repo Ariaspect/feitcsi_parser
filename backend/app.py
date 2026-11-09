@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 import subprocess
 
-from . import af8_explain, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, ml_heads, motionsig, truth as truthmod
+from . import af8_explain, calib41, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, ml_heads, motionsig, tfm_model, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -1752,6 +1752,92 @@ def ml_heads_endpoint(
         "trained_on": ml_heads.TRAINED_ON,
         "fitted": ml_heads.FITTED,
         "loeo": ml_heads.LOEO,
+    }
+
+
+def _room_json(room: dict | None) -> dict | None:
+    return None if room is None else {k: str(v) for k, v in room.items()}
+
+
+@app.get("/api/ml/calib41")
+def ml_calib41_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The 41F hidden layer on the empty-room-calibrated columns, judged by the model that never saw the capture's room.
+
+    See ``backend.calib41``. ``room`` is null (and ``verdict`` too) when the capture's room is unknown: there is
+    no empty reference to calibrate against.
+    """
+    p = resolve_capture_path(path)
+    try:
+        out = calib41.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    labels = {f["key"]: {"label": f.get("label"), "test": f.get("test"), "description": f.get("description")}
+              for f in classifier.FEATURES if f.get("key") in calib41.FEATURES}
+    labels = {**ml_heads.LABEL_FALLBACK, **labels}
+    arr = lambda k: [_json_num(v) for v in out[k]] if k in out else None
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "features": out["features"],
+        "labels": labels,
+        "value": arr("value"),
+        "logged": [bool(v) for v in out["logged"]] if "logged" in out else None,
+        "centre": arr("centre"),
+        "calibrated": arr("calibrated"),
+        "imputed": [bool(v) for v in out["imputed"]] if "imputed" in out else None,
+        "z": arr("z"),
+        "effect": arr("effect"),
+        "verdict": None if out["verdict"] is None else {"p": _json_num(out["verdict"]["p"]), "label": int(out["verdict"]["label"])},
+        "room": _room_json(out["room"]),
+        "trained_on": out.get("trained_on"),
+        "threshold": calib41.THRESHOLD,
+        "accuracy": calib41.ACCURACY,
+        "truth": {"human": truth.get("gt"), "human_source": truth.get("gt_source"),
+                  "condition": truth.get("condition"), "camera": truth.get("camera")},
+    }
+
+
+@app.get("/api/tfm")
+def tfm_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The Transformer tab: 17 per-second channels (raw and calibrated) and the verdict of the model that never saw
+    the capture's room. See ``backend.tfm_model``."""
+    p = resolve_capture_path(path)
+    try:
+        out = tfm_model.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    grid = lambda a: None if a is None else [[_json_num(v) for v in row] for row in np.asarray(a, dtype=float)]
+    v = out["verdict"]
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "channels": out["channels"],
+        "calibrated_channels": out["calibrated_channels"],
+        "log_channels": out["log_channels"],
+        "raw": grid(out["raw"]),
+        "calibrated": grid(out["calibrated"]),
+        "swing_period_s": _json_num(out["swing_period_s"]),
+        "room": _room_json(out["room"]),
+        "trained_on": out.get("trained_on"),
+        "verdict": None if v is None else {"p": _json_num(v["p"]), "label": int(v["label"]), "p_seeds": [_json_num(x) for x in v["p_seeds"]]},
+        "threshold": tfm_model.THRESHOLD,
+        "accuracy": tfm_model.META["accuracy"],
+        "truth": {"human": truth.get("gt"), "human_source": truth.get("gt_source"),
+                  "condition": truth.get("condition"), "camera": truth.get("camera")},
     }
 
 

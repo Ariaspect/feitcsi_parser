@@ -7,6 +7,7 @@ import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
 import { ML } from "./ML";
+import { Transformer } from "./Transformer";
 import { CaptureBar, CaptureDetails, CaptureFollow, CaptureProvider } from "./Capture";
 import { PresenceBar } from "./PresenceBar";
 import { pickMimo } from "./filters";
@@ -716,6 +717,7 @@ export function App() {
               <TabsTrigger value="hybrid2">Hybrid 2</TabsTrigger>
               <TabsTrigger value="classifier">Classifier</TabsTrigger>
               <TabsTrigger value="ml">ML</TabsTrigger>
+              <TabsTrigger value="transformer">Transformer</TabsTrigger>
             </TabsList>
 
             <TabsContent value="channel">
@@ -1039,6 +1041,10 @@ export function App() {
 
             <TabsContent value="ml">
               <ML path={path} dark={dark} />
+            </TabsContent>
+
+            <TabsContent value="transformer">
+              <Transformer path={path} dark={dark} />
             </TabsContent>
           </Tabs>
         ) : (

@@ -4,7 +4,9 @@ import { ChartBusy } from "@/components/ChartBusy";
 import { Button } from "@/components/ui/button";
 import { fetchAf8, type Af8, type Af8Feature } from "./api";
 import { Chart } from "./Chart";
+import { Calib41Panel } from "./Calib41";
 import { MLHeads } from "./MLHeads";
+import { Collapsible } from "./ModelCommon";
 import { ticks } from "./series";
 
 // The 11-feature model (backend/af8_env1.py: AF8's ten features plus X_gate_dc,
@@ -88,6 +90,24 @@ export interface MLProps {
 
 export function ML({ path, dark }: MLProps) {
   const [win, setWin] = useState(0);
+
+  // A new capture starts at its first window.
+  useEffect(() => setWin(0), [path]);
+
+  return (
+    <div className="space-y-4">
+      <Calib41Panel path={path} win={win} setWin={setWin} dark={dark} />
+      <Collapsible title="11-feature screen model" sub="AF8's ten features + X_gate_dc, trained on env1 + env2 (SNR-augmented)">
+        <ScreenModel path={path} win={win} setWin={setWin} dark={dark} />
+      </Collapsible>
+      <Collapsible title="Human & anomaly models" sub="human: 11F + aux + Liu + bs (50) · anomaly: 41 · LR and one hidden layer · trained on all five sets">
+        <MLHeads path={path} win={win} dark={dark} />
+      </Collapsible>
+    </div>
+  );
+}
+
+function ScreenModel({ path, win, setWin, dark }: { path: string; win: number; setWin: (w: number) => void; dark: boolean }) {
   const [data, setData] = useState<Af8 | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -103,9 +123,6 @@ export function ML({ path, dark }: MLProps) {
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-
-  // A new capture starts at its first window.
-  useEffect(() => setWin(0), [path]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -127,8 +144,6 @@ export function ML({ path, dark }: MLProps) {
 
   return (
     <div className="space-y-4" ref={holder}>
-      <MLHeads path={path} win={win} dark={dark} />
-      <div className="text-sm font-semibold">11-feature screen model (deployed)</div>
       {error ? (
         <div className="text-muted-foreground p-8 text-sm">No AF8 verdict for this capture — {error}</div>
       ) : !data ? (
