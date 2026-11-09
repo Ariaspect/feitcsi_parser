@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RealtimeRateRow } from "./api";
-import { EMPTY_RT, alarmDots, captureSpans, firstAtOrAfter, mergeRealtime, nearestRow, sinceOf, yTop } from "./realtime";
+import { EMPTY_RT, alarmDots, captureSpans, firstAtOrAfter, mergeRealtime, nearestRow, sinceOf, yTop } from "./rtseries";
 
 const sent = (t: number[], rateT: number[] = []) => ({
   t,

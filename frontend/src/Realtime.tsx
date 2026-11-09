@@ -21,7 +21,7 @@ import {
   sinceOf,
   yTop,
   type RtSeries,
-} from "./realtime";
+} from "./rtseries";
 
 // The Realtime tab (backend/realtime.py): a movement value every 0.25 s from an always-on CSI stream, beside the
 // one-minute presence verdict. It runs on the server that reaches the board, whether or not this tab is open; the

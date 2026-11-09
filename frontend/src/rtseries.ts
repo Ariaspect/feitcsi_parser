@@ -1,5 +1,6 @@
 // The Realtime tab's client-side history and the small pieces of arithmetic it draws with. Pure, so they are tested
-// without a server (realtime.test.ts).
+// without a server (rtseries.test.ts). Not named realtime.ts: on a case-insensitive file system (lg's) the import
+// "./Realtime" resolves to realtime.ts before Realtime.tsx.
 
 import type { RealtimeRateRow, RealtimeStatus } from "./api";
 
