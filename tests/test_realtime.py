@@ -182,6 +182,12 @@ def test_the_monitor_reads_a_running_capture_and_lets_go_when_it_ends(tmp_path: 
         assert len(s["alarms"]) >= 1
         x = np.array([v for v in s["x"] if v is not None])
         assert np.nanmax(x) > 2.0 and np.nanmedian(x) < 2.0
+        tm = s["timing"]
+        assert tm["batches"] == 2 and tm["frames_per_batch"]["max"] > 300
+        for k in ("per_frame_us", "decode_per_frame_us", "steps_per_frame_us", "per_value_us", "batch_ms", "latency_s"):
+            st = tm[k]
+            assert st["min"] <= st["p50"] <= st["max"] and st["min"] <= st["mean"] <= st["max"] and st["n"] >= 1
+        assert tm["per_frame_us"]["max"] > 0
     finally:
         os.close(fd)
     m._tick()                                       # the capture let go: a batch's next capture may follow at once
@@ -216,5 +222,6 @@ def test_the_api_reports_and_sets_the_threshold(tmp_path: Path, monkeypatch: pyt
     assert s["threshold"] == realtime.DEFAULT_THRESHOLD and s["ping_interval_s"] == 0.02
     assert s["signal"] == {"lag_s": 0.5, "window_s": 0.5, "hop_s": 0.25, "refractory_s": 5.0}
     assert s["rate_table"][0]["rate_hz"] == 43.0
+    assert s["metric"]["does_not"] and s["metric"]["separates"] and s["timing"]["per_frame_us"] is None
     assert client.post("/api/realtime/threshold", json={"threshold": 1.8}).json()["threshold"] == 1.8
     assert client.post("/api/realtime/threshold", json={"threshold": 0.1}).status_code == 400
