@@ -35,6 +35,29 @@ function finite(xs: (number | null)[]): number[] {
   return xs.filter((v): v is number => v != null && Number.isFinite(v));
 }
 
+const ok = (v: number | null | undefined): v is number => v != null && Number.isFinite(v);
+
+/** True when some value has no neighbour with a value -- drift (every 2 s) and bs_* (every 4 s) -- so a line that
+ *  breaks at every gap would draw nothing. */
+function sparse(xs: (number | null)[]): boolean {
+  return xs.some((v, i) => ok(v) && !ok(xs[i - 1]) && !ok(xs[i + 1]));
+}
+
+/** For display only: straight segments between consecutive values (the model sees the gaps as missing). */
+function bridge(xs: (number | null)[]): (number | null)[] {
+  const idx = xs.flatMap((v, i) => (ok(v) ? [i] : []));
+  const out: (number | null)[] = xs.map(() => null);
+  for (let k = 0; k < idx.length; k++) {
+    const a = idx[k];
+    out[a] = xs[a];
+    const b = idx[k + 1];
+    if (b == null) break;
+    const va = xs[a] as number, vb = xs[b] as number;
+    for (let i = a + 1; i < b; i++) out[i] = va + ((vb - va) * (i - a)) / (b - a);
+  }
+  return out;
+}
+
 export function Transformer({ path, dark }: { path: string; dark: boolean }) {
   const [win, setWin] = useState(0);
   const [data, setData] = useState<Tfm | null>(null);
@@ -138,16 +161,21 @@ export function Transformer({ path, dark }: { path: string; dark: boolean }) {
                 const times = vals.map((_, k) => data.window_s[0] + k);
                 const guides = view === "calibrated" && data.calibrated_channels.includes(c)
                   ? [{ value: 0, color: "#9aa5b1", label: "empty median" }] : [];
+                const color = c.startsWith("plf") ? "#b45309" : PERSON;
+                const gappy = sparse(vals);
                 return (
                   <div key={c} className="space-y-1 min-w-0">
                     <div className="text-xs" title={DESCRIPTION[c]}>
-                      <b>{c}</b> <span className="text-muted-foreground">{f.length} of {vals.length} s with a value</span>
+                      <b>{c}</b> <span className="text-muted-foreground">{f.length} of {vals.length} s with a value{gappy ? " · dots = values, dashed = drawn between them (the model sees the gaps as missing)" : ""}</span>
                     </div>
                     <Chart
                       width={panelWidth} dark={dark} height={120} times={times}
                       domain={[data.window_s[0], data.window_s[0] + vals.length - 1]}
                       yDomain={[lo - pad, hi + pad]} yLabel={view === "calibrated" && data.calibrated_channels.includes(c) ? "z vs empty" : c}
-                      series={[{ values: vals, color: c.startsWith("plf") ? "#b45309" : PERSON, width: 1.3, label: c }]}
+                      series={gappy
+                        ? [{ values: bridge(vals), color, width: 1, label: c, dashed: true }]
+                        : [{ values: vals, color, width: 1.3, label: c }]}
+                      dots={gappy ? { values: vals, colors: vals.map(() => color), radius: 2.5, label: c } : undefined}
                       guides={guides}
                     />
                     <div className="text-[11px] text-muted-foreground leading-snug">{DESCRIPTION[c]}</div>
