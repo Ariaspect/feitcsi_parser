@@ -37,6 +37,7 @@ import math
 import os
 import re
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -70,7 +71,44 @@ RATE_TABLE: tuple[dict[str, Any], ...] = (
      "small": 77, "still": 66, "static_fan": 76, "robot": 55, "entries": "7/8", "onset_s": 3.5},
 )
 
+# What the alarm is judged on, in the project's own terms, and what it separates -- the 2026-11-02 measurement
+# (1,097 labelled minutes of env1 / env2 / env3 / env3-1 at 43 Hz, threshold 2.14 set on the other rooms).
+METRIC: dict[str, Any] = {
+    "name": "self ratio x = 0.5 s step / one-frame step",
+    "family": [
+        "Its numerator is the step the sequence models read every second (s025 / s2 / s5 of GRU + 41 and of the "
+        "Transformer tab: median over subcarriers of |r(t) - r(t - L)| / (|r(t)| + |r(t - L)|) on the CSI ratio), "
+        "here at L = 0.5 s and on every frame.",
+        "It is the symmetric relative step of the Hybrid 2 frame step (framediff), but on the CSI ratio, which "
+        "cancels the receiver's gain steps that make up the raw-amplitude step's loudest tail.",
+        "It is divided by its own one-frame step -- the noise of the moment -- so it needs no empty-room "
+        "calibration, unlike the 11F / 41F / GRU inputs, which are read against a room's empty minutes.",
+        "It is not a model and none of the 11F / 41 features: one number against one threshold (the 2026-11-02 "
+        "real-time test).",
+    ],
+    "separates": [
+        ["movement from an empty room, in every room measured, without calibration",
+         "empty rooms: 0.3 alarms/h over 3.4 h; big moves fire in 100 % of minutes"],
+        ["an arrival, within seconds",
+         "7 of 8 camera-dated entries, -9.3 to +10.3 s from the camera (median -0.2 s); the one-minute-in-five "
+         "verdict took a median 183 s"],
+        ["small movement, most of the time", "77 % of small-move minutes fire"],
+    ],
+    "does_not": [
+        ["a person from a non-human mover", "rotating fan 100 %, robot 47 %, static fan 26 % of minutes fire"],
+        ["anything while a rotating fan runs",
+         "x stays above the threshold 86-93 % of the time; the one missed entry was under a running fan"],
+        ["a still person from an empty room",
+         "28 % of still minutes fire -- presence stays the one-minute verdict's job"],
+        ["big from small across rooms", "a 'big only' threshold is 5.0 / 6.0 / 5.3 / 2.6 in env1 / 2 / 3 / 3-1"],
+        ["an exit (the room becoming empty)", "it fires on arrivals; 'empty' comes from the verdict"],
+        ["a noisy link (untested)",
+         "all four rooms were one link state; September's noisy-link captures (19.6 Hz) alarmed 12-73 times an "
+         "hour on empties"],
+    ],
+}
 KEEP_S = 2 * 3600.0                 # history the tab can show
+PERF_KEEP_S = 600.0                 # computation-time statistics cover the last 10 minutes
 RATE_BIN_S = 1.0                    # sampling rate reported per second
 POLL_S = 0.2
 SEGMENT_BYTES = 16 * 1024 * 1024    # ~90 s of stream at ~180 kB/s
@@ -108,6 +146,8 @@ class SelfRatio:
         self._sl = np.zeros(0)
         self._next: float | None = None
         self.dt: float | None = None
+        # the last push: (seconds on the per-frame steps, seconds on the per-hop windows, frames, values)
+        self.last_timing: tuple[float, float, int, int] = (0.0, 0.0, 0, 0)
 
     @staticmethod
     def _step(R: np.ndarray, mag: np.ndarray, T: np.ndarray, idx: np.ndarray, L: int, want: float, dt: float) -> np.ndarray:
@@ -126,6 +166,7 @@ class SelfRatio:
         t = np.asarray(t, dtype=float)
         if t.size == 0:
             return []
+        c0 = time.perf_counter()
         if self._r is not None and (r.shape[1] != self._r.shape[1] or t[0] < self._t[-1]):
             self.reset()
         T = t if self._r is None else np.concatenate([self._t, t])
@@ -152,6 +193,7 @@ class SelfRatio:
         cut = max(0, min(T.size - (L + 1), int(np.searchsorted(T, T[-1] - self.lag_s - 1.0))))
         self._t, self._r = T[cut:], R[cut:]
 
+        c1 = time.perf_counter()
         out: list[tuple[float, float]] = []
         if self._next is None:
             start = T[0] + self.lag_s + self.window_s if first_hop is None else first_hop
@@ -173,6 +215,7 @@ class SelfRatio:
         keep = int(np.searchsorted(self._st, self._next - self.window_s - self.hop_s, side="right"))
         if keep:
             self._st, self._s1, self._sl = self._st[keep:], self._s1[keep:], self._sl[keep:]
+        self.last_timing = (c1 - c0, time.perf_counter() - c1, int(t.size), len(out))
         return out
 
 
@@ -276,6 +319,14 @@ def wired(board: str) -> tuple[bool, str]:
     if dev == capture_control.WIRED_IFACE:
         return True, f"cable ({dev})"
     return False, f"no cable: the board is routed via {dev or 'nothing'}, not {capture_control.WIRED_IFACE}"
+
+
+def _stats(v: np.ndarray) -> dict[str, float | int]:
+    """last / min / mean / p50 / p95 / max / n of a series (in the order it was recorded)."""
+    v = np.asarray(v, dtype=float)
+    return {"last": round(float(v[-1]), 4), "min": round(float(v.min()), 4), "mean": round(float(v.mean()), 4),
+            "p50": round(float(np.median(v)), 4), "p95": round(float(np.percentile(v, 95)), 4),
+            "max": round(float(v.max()), 4), "n": int(v.size)}
 
 
 class SegmentWriter:
@@ -405,6 +456,9 @@ class RealtimeMonitor:
         self.log: collections.deque = collections.deque(maxlen=80)
         self.started_at: float | None = None
         self.frames = 0
+        self.perf: collections.deque = collections.deque()      # per batch: (wall t, frames, read s, step s, hop s, values)
+        self.latency: collections.deque = collections.deque()   # per value: (wall t, s from its time to computed)
+        self.host = socket.gethostname()
         self._sr = SelfRatio()
         self._offset: float | None = None
         self._rate_sec: int | None = None
@@ -474,12 +528,14 @@ class RealtimeMonitor:
                 "signal": {"lag_s": self._sr.lag_s, "window_s": self._sr.window_s, "hop_s": self._sr.hop_s,
                            "refractory_s": REFRACTORY_S},
                 "rate_table": list(RATE_TABLE),
+                "metric": METRIC,
                 "t": [round(p[0], 3) for p in pts],
                 "x": [None if not math.isfinite(p[1]) else round(p[1], 4) for p in pts],
                 "src": [p[2] for p in pts],
                 "rate_t": [p[0] for p in rates],
                 "rate": [p[1] for p in rates],
                 "alarms": [{"t": a[0], "x": round(a[1], 3)} for a in self.alarms if a[0] > now - float(window_s)],
+                "timing": self._timing(now),
                 "log": list(self.log)[-30:],
             }
 
@@ -727,7 +783,9 @@ class RealtimeMonitor:
 
     # ------------------------------------------------------------------ frames -> values
     def _consume(self, reader: FrameReader, src: int) -> int:
+        c0 = time.perf_counter()
         t, r, n = reader.read()
+        read_s = time.perf_counter() - c0
         if n == 0:
             return 0
         now = time.time()
@@ -751,9 +809,15 @@ class RealtimeMonitor:
                 else:
                     self._rate_n += cnt
             if t.size and r.size:
-                for g, x in self._sr.push(t, r):
+                new = self._sr.push(t, r)
+                done = time.time()
+                step_s, hop_s, _, _ = self._sr.last_timing
+                self.perf.append((done, int(t.size), read_s, step_s, hop_s, len(new)))
+                for g, x in new:
                     wall = g + off
                     self.points.append((wall, x, src))
+                    if math.isfinite(x):
+                        self.latency.append((done, done - wall))
                     if math.isfinite(x) and x >= self.threshold and wall - self._last_alarm >= REFRACTORY_S:
                         self.alarms.append((wall, x))
                         self._last_alarm = wall
@@ -763,7 +827,35 @@ class RealtimeMonitor:
             for dq in (self.points, self.rates, self.alarms):
                 while dq and dq[0][0] < cut:
                     dq.popleft()
+            for dq in (self.perf, self.latency):
+                while dq and dq[0][0] < now - PERF_KEEP_S:
+                    dq.popleft()
         return n
+
+    def _timing(self, now: float) -> dict[str, Any]:
+        """Computation time over the last ``PERF_KEEP_S`` on this host. Frames are handled in batches (one per
+        ``POLL_S`` tick), so a per-frame time is a batch's time over its frames; a per-value time is the batch's
+        window medians over its values. Latency: from a value's time to when it was computed (stream transfer,
+        the tick and the computation together)."""
+        rows = [p for p in self.perf if p[1] > 0]
+        f = np.array([p[1] for p in rows], dtype=float)
+        rd, st, hp = (np.array([p[i] for p in rows], dtype=float) for i in (2, 3, 4))
+        nv = np.array([p[5] for p in rows], dtype=float)
+        has = nv > 0
+        span = (now - rows[0][0]) if len(rows) > 1 else 0.0
+        return {
+            "host": self.host,
+            "window_s": PERF_KEEP_S,
+            "batches": len(rows),
+            "per_frame_us": _stats((rd + st) / f * 1e6) if rows else None,
+            "decode_per_frame_us": _stats(rd / f * 1e6) if rows else None,
+            "steps_per_frame_us": _stats(st / f * 1e6) if rows else None,
+            "per_value_us": _stats(hp[has] / nv[has] * 1e6) if has.any() else None,
+            "batch_ms": _stats((rd + st + hp) * 1e3) if rows else None,
+            "frames_per_batch": _stats(f) if rows else None,
+            "latency_s": _stats(np.array([v for _, v in self.latency], dtype=float)) if self.latency else None,
+            "cpu_percent": round(100.0 * float((rd + st + hp).sum()) / span, 3) if span > 0 else None,
+        }
 
     def _note(self, text: str) -> None:
         self.log.append(f"{time.strftime('%H:%M:%S')}  {text}")

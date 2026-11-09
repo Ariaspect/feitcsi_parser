@@ -7,7 +7,9 @@ import {
   setRealtimeThreshold,
   startRealtime,
   stopRealtime,
+  type RealtimeStat,
   type RealtimeStatus,
+  type RealtimeTiming,
 } from "./api";
 import { Chart } from "./Chart";
 import { formatClock } from "./series";
@@ -235,16 +237,40 @@ export function Realtime({ dark }: { dark: boolean }) {
 
       {status && (
         <section className="space-y-2 rounded-md border p-3 text-xs">
-          <div className="text-sm font-semibold">What it is</div>
+          {status.metric && (<>
+          <div className="text-sm font-semibold">Judging metric: {status.metric.name}</div>
           <p className="leading-snug text-muted-foreground">
             x = median over the last {status.signal.window_s} s of the {status.signal.lag_s} s step ÷ the same median of
-            the one-frame step, where a step is the median over subcarriers of |r(t) − r(t − L)| ÷ (|r(t)| + |r(t − L)|)
-            on the CSI ratio r. Noise moves the ratio as much in one frame as in half a second, so an empty room reads
-            about 1; a body moving moves the half-second step far more. It says <b>movement</b>, never person: a robot or a
-            rotating fan moves too (a rotating fan fired 100 % of its minutes at every rate). Measured offline on 1,097
-            labelled minutes of four rooms (2026-11-02); the lower rates were simulated by dropping frames and used a
-            longer window or lag, which this channel does not.
+            the one-frame step; a value every {status.signal.hop_s} s, an alarm when x ≥ the threshold (at most one per{" "}
+            {status.signal.refractory_s} s). Noise moves the ratio as much in one frame as in half a second, so an empty
+            room reads about 1; a body moving moves the half-second step far more.
           </p>
+          <ul className="list-disc space-y-0.5 pl-5 leading-snug text-muted-foreground">
+            {status.metric.family.map((f) => <li key={f}>{f}</li>)}
+          </ul>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <div className="font-semibold text-emerald-700 dark:text-emerald-400">Separates</div>
+              <ul className="list-disc space-y-0.5 pl-5 leading-snug">
+                {status.metric.separates.map(([what, how]) => (
+                  <li key={what}>{what} <span className="text-muted-foreground">— {how}</span></li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <div className="font-semibold text-red-700 dark:text-red-400">Does not separate</div>
+              <ul className="list-disc space-y-0.5 pl-5 leading-snug">
+                {status.metric.does_not.map(([what, how]) => (
+                  <li key={what}>{what} <span className="text-muted-foreground">— {how}</span></li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <p className="text-muted-foreground">
+            Measured offline on 1,097 labelled minutes of four rooms (2026-11-02). By frame rate (the lower rates simulated
+            by dropping frames, with a longer window or lag, which this channel does not use):
+          </p>
+          </>)}
           <div className="overflow-x-auto">
             <table className="w-full text-right tabular-nums">
               <thead className="text-muted-foreground">
@@ -290,6 +316,61 @@ export function Realtime({ dark }: { dark: boolean }) {
           </details>
         </section>
       )}
+
+      {status?.timing && <Timing timing={status.timing} />}
     </div>
+  );
+}
+
+const TIMING_ROWS: [keyof RealtimeTiming, string, string, number][] = [
+  ["per_frame_us", "per frame — total", "µs", 1],
+  ["decode_per_frame_us", "per frame — decode (index, CSI ratio)", "µs", 1],
+  ["steps_per_frame_us", "per frame — the two steps", "µs", 1],
+  ["per_value_us", "per value — the 0.5 s window medians", "µs", 1],
+  ["batch_ms", "per batch (one 0.2 s read)", "ms", 2],
+  ["frames_per_batch", "frames per batch", "", 0],
+  ["latency_s", "latency: value's time → computed", "s", 2],
+];
+
+function Timing({ timing }: { timing: RealtimeTiming }) {
+  const cols: (keyof RealtimeStat)[] = ["last", "min", "mean", "p50", "p95", "max", "n"];
+  return (
+    <section className="space-y-2 rounded-md border p-3 text-xs">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-sm font-semibold">Computation time</span>
+        <span className="text-muted-foreground">
+          on {timing.host} (the laptop that reaches the board — lg only forwards), last {timing.window_s / 60} min,{" "}
+          {timing.batches.toLocaleString()} batches · CPU {timing.cpu_percent == null ? "—" : `${timing.cpu_percent.toFixed(2)} %`} of one core
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-right tabular-nums">
+          <thead className="text-muted-foreground">
+            <tr>
+              <th className="text-left font-normal" />
+              {cols.map((c) => <th key={c} className="font-normal">{c === "mean" ? "avg" : c}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {TIMING_ROWS.map(([key, label, unit, digits]) => {
+              const st = timing[key] as RealtimeStat | null;
+              return (
+                <tr key={key}>
+                  <td className="text-left">{label}{unit ? ` (${unit})` : ""}</td>
+                  {cols.map((c) => (
+                    <td key={c}>{st == null ? "—" : c === "n" ? st.n.toLocaleString() : st[c].toFixed(digits)}</td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-muted-foreground leading-snug">
+        Frames are handled in batches, one per 0.2 s read of the stream; a per-frame time is a batch's time over its
+        frames, a per-value time its window medians over its values. Latency counts the stream's transfer, the 0.2 s read
+        interval and the computation together.
+      </p>
+    </section>
   );
 }

@@ -1976,6 +1976,40 @@ export interface RealtimeRateRow {
   onset_s: number;
 }
 
+/** last / min / mean / p50 / p95 / max / n of one computation-time series (backend/realtime.py _stats). */
+export interface RealtimeStat {
+  last: number;
+  min: number;
+  mean: number;
+  p50: number;
+  p95: number;
+  max: number;
+  n: number;
+}
+
+/** Computation time over the last `window_s` on the host that runs the channel (the laptop). */
+export interface RealtimeTiming {
+  host: string;
+  window_s: number;
+  batches: number;
+  per_frame_us: RealtimeStat | null;
+  decode_per_frame_us: RealtimeStat | null;
+  steps_per_frame_us: RealtimeStat | null;
+  per_value_us: RealtimeStat | null;
+  batch_ms: RealtimeStat | null;
+  frames_per_batch: RealtimeStat | null;
+  latency_s: RealtimeStat | null;
+  cpu_percent: number | null;
+}
+
+/** What the alarm is judged on and what it separates ([what, measured]), from the 2026-11-02 measurement. */
+export interface RealtimeMetric {
+  name: string;
+  family: string[];
+  separates: [string, string][];
+  does_not: [string, string][];
+}
+
 /** GET /api/realtime/status: the real-time movement channel (backend/realtime.py). Times are epoch seconds. */
 export interface RealtimeStatus {
   enabled: boolean;
@@ -1993,6 +2027,8 @@ export interface RealtimeStatus {
   frames: number;
   signal: { lag_s: number; window_s: number; hop_s: number; refractory_s: number };
   rate_table: RealtimeRateRow[];
+  metric: RealtimeMetric;
+  timing: RealtimeTiming;
   /** the self ratio every hop; `src` 0 = own stream, 1 = a running capture's file */
   t: number[];
   x: (number | null)[];
