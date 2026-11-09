@@ -1959,3 +1959,74 @@ export async function fetchTfm(path: string, window: number, signal?: AbortSigna
   }
   return res.json();
 }
+
+/** One row of the threshold-per-rate measurement (backend/realtime.py RATE_TABLE, offline 2026-11-02). */
+export interface RealtimeRateRow {
+  rate_hz: number;
+  window_s: number;
+  lag_s: number;
+  threshold: number;
+  empty_alarms_per_h: number;
+  big: number;
+  small: number;
+  still: number;
+  static_fan: number;
+  robot: number;
+  entries: string;
+  onset_s: number;
+}
+
+/** GET /api/realtime/status: the real-time movement channel (backend/realtime.py). Times are epoch seconds. */
+export interface RealtimeStatus {
+  enabled: boolean;
+  state: "stopped" | "waiting" | "starting" | "streaming" | "capture" | "error";
+  detail: string;
+  source: "stream" | "capture" | null;
+  source_file: string | null;
+  board: string | null;
+  now: number;
+  started_at: number | null;
+  threshold: number;
+  default_threshold: number;
+  ping_interval_s: number;
+  sampling_rate_hz: number | null;
+  frames: number;
+  signal: { lag_s: number; window_s: number; hop_s: number; refractory_s: number };
+  rate_table: RealtimeRateRow[];
+  /** the self ratio every hop; `src` 0 = own stream, 1 = a running capture's file */
+  t: number[];
+  x: (number | null)[];
+  src: number[];
+  /** frames the signal used per wall-clock second */
+  rate_t: number[];
+  rate: number[];
+  alarms: { t: number; x: number }[];
+  log: string[];
+  proxied_via?: string;
+}
+
+async function realtimeCall(url: string, what: string, init?: RequestInit): Promise<RealtimeStatus> {
+  const res = await fetch(url, init);
+  if (!res.ok) throw await captureError(res, what);
+  return (await res.json()) as RealtimeStatus;
+}
+
+export function fetchRealtimeStatus(since: number, windowS: number, signal?: AbortSignal): Promise<RealtimeStatus> {
+  return realtimeCall(`/api/realtime/status?since=${since}&window_s=${windowS}`, "realtime status", { signal });
+}
+
+export function startRealtime(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/start", "realtime start", { method: "POST" });
+}
+
+export function stopRealtime(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/stop", "realtime stop", { method: "POST" });
+}
+
+export function setRealtimeThreshold(threshold: number): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/threshold", "realtime threshold", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threshold }),
+  });
+}

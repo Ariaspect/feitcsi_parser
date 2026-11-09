@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 import subprocess
 
-from . import af8_explain, calib41, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, ml_heads, motionsig, tfm_model, truth as truthmod
+from . import af8_explain, calib41, capture_control, classifier, farsense, framediff, hybrid, hybrid2, lgdetect, lgproc, ml_heads, motionsig, realtime, tfm_model, truth as truthmod
 from .presence import CHANNELS
 from .stream import get_stream
 from .tiles import (
@@ -2396,6 +2396,67 @@ def capture_sync() -> dict:
     if not m.start_sync():
         raise HTTPException(409, "a sync is already running, or no collection host is configured")
     return m.status()
+
+
+# ---------------------------------------------------------------------- realtime
+@app.on_event("startup")
+def _start_realtime() -> None:
+    """The Realtime tab's channel runs all the time on the server that reaches the board (``REALTIME_AUTOSTART=0``
+    turns that off). A proxy-mode server has no board: it forwards the tab's calls like the capture calls."""
+    if not capture_control.PROXY_URL and os.environ.get("REALTIME_AUTOSTART", "1") != "0":
+        realtime.monitor().start()
+
+
+@app.on_event("shutdown")
+def _stop_realtime() -> None:
+    if not capture_control.PROXY_URL and realtime._monitor is not None:
+        realtime._monitor.stop()
+
+
+@app.get("/api/realtime/status")
+def realtime_status(since: float = 0.0, window_s: float = Query(900.0, ge=10.0, le=realtime.KEEP_S)) -> dict:
+    """The real-time movement channel: its state, the self ratio every 0.25 s since ``since`` (epoch s; at most the
+    last ``window_s``), frames per second, the threshold and the alarms. See ``backend/realtime.py``."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("GET", f"/api/realtime/status?since={since}&window_s={window_s}")
+    return realtime.monitor().status(since=since, window_s=window_s)
+
+
+@app.post("/api/realtime/start")
+def realtime_start() -> dict:
+    """Start the channel (it starts with the server; this undoes a stop)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/start")
+    m = realtime.monitor()
+    m.start()
+    return m.status(window_s=10.0)
+
+
+@app.post("/api/realtime/stop")
+def realtime_stop() -> dict:
+    """Stop the channel and end its stream on the board (frees the board, stops the stimulus)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/stop", timeout=30.0)
+    m = realtime.monitor()
+    m.stop()
+    return m.status(window_s=10.0)
+
+
+class RealtimeThreshold(BaseModel):
+    threshold: float
+
+
+@app.post("/api/realtime/threshold")
+def realtime_threshold(body: RealtimeThreshold) -> dict:
+    """Set the alarm threshold on the self ratio (2.14 by default: 43 Hz, measured 2026-11-02)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/threshold", body.model_dump())
+    m = realtime.monitor()
+    try:
+        m.set_threshold(body.threshold)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return m.status(window_s=10.0)
 
 
 def _json_num(v: object) -> float | int | None:

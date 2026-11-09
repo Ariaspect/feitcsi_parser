@@ -448,6 +448,23 @@ is chosen by sniffing the bytes, so a misnamed file still reads correctly.
 
 Returns `{"status": "ok"}`.
 
+### `GET /api/realtime/status` (the Realtime tab)
+
+A movement channel that runs all the time beside the one-minute verdict (`backend/realtime.py`). The server that
+reaches the board over the cable keeps its own CSI stream open (`csi_stream.sh`, the capture stimulus, 0.02 s) and
+computes, every 0.25 s, the self ratio *x* = median over 0.5 s of the 0.5 s step ÷ the same median of the one-frame
+step on the CSI ratio: an empty room reads about 1, a body moving reads far more. It reports **movement**, never a
+person — a robot or a rotating fan moves too. While a capture runs (its script holds `/tmp/mtk-capture.lock`) the
+stream is handed to it within about a second and the capture's growing `.bin` is read instead; the stream resumes 5 s
+after the last capture. Nothing is saved.
+
+Parameters: `since` (epoch s, values after it), `window_s` (at most this far back, 10–7200). Returns the state, the
+values (`t`, `x`, `src`: 0 own stream, 1 a capture's file), frames per second (`rate_t`, `rate`), the measured
+`sampling_rate_hz`, the `threshold` (2.14 by default: 0.3 alarms/h on empty rooms at 43 Hz, measured 2026-11-02),
+the alarms (x at or above it, 5 s apart at most) and the offline measurement per frame rate (`rate_table`).
+`POST /api/realtime/threshold {"threshold": 2.0}` sets the threshold; `POST /api/realtime/start` / `stop` start and
+stop the channel (it starts with the server unless `REALTIME_AUTOSTART=0`). A proxy-mode server forwards these.
+
 ## Doppler
 
 Two panels, in their own tab: an STFT of the **complex CSI ratio**, and one of
