@@ -1841,6 +1841,52 @@ def tfm_endpoint(
     }
 
 
+@app.get("/api/tfm-phys")
+def tfm_phys_endpoint(
+    path: str = Query(..., description="Path to capture file"),
+    window: int = Query(0, ge=0, description="Which 60 s window, as /api/af8 cuts the capture"),
+) -> dict:
+    """The Physics tab: the physics channels (raw and calibrated) and the verdicts of seq13pw, seq15pwu and the
+    17-channel base, all calibrated with the room's five install empty minutes and judged by the model that never saw
+    the capture's room; plus the full-dataset check and the board timing. See ``backend.tfm_phys``."""
+    from . import tfm_phys
+
+    p = resolve_capture_path(path)
+    try:
+        out = tfm_phys.evaluate(p, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    t0, t1 = out["window_s"]
+    truth = _item_truth(p, t0, t1)
+    grid = lambda a: None if a is None else [[_json_num(v) for v in row] for row in np.asarray(a, dtype=float)]
+    models = {m: {k: tfm_phys.META["models"][m][k] for k in ("variant", "channels", "log_channels", "calibrated_channels")}
+              for m in tfm_phys.MODELS}
+    verdicts = {m: {"p": _json_num(v["p"]), "label": int(v["label"]), "p_seeds": [_json_num(x) for x in v["p_seeds"]],
+                    "trained_on": v["trained_on"]} for m, v in out["models"].items()}
+    return {
+        "file": p.name,
+        "window": out["window"],
+        "windows": out["windows"],
+        "window_s": out["window_s"],
+        "channels": out["channels"],
+        "models": models,
+        "raw": grid(out["raw"]),
+        "calibrated": grid(out["calibrated"]),
+        "swing_period_s": _json_num(out["swing_period_s"]),
+        "swing_a": _json_num(out["swing_a"]),
+        "swing_ab": _json_num(out["swing_ab"]),
+        "w": _json_num(out["w"]),
+        "room": _room_json(out["room"]),
+        "reference_minute": bool(out["reference_minute"]),
+        "verdicts": verdicts,
+        "threshold": tfm_phys.THRESHOLD,
+        "timings": {k: _json_num(v) for k, v in out["timings"].items()},
+        "results": tfm_phys.RESULTS,
+        "truth": {"human": truth.get("gt"), "human_source": truth.get("gt_source"),
+                  "condition": truth.get("condition"), "camera": truth.get("camera")},
+    }
+
+
 @app.get("/api/motion-signal")
 def motion_signal(
     path: str = Query(..., description="Path to capture file"),

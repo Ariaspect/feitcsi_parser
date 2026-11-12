@@ -1,0 +1,1418 @@
+{
+ "verification": {
+  "windows": 1426,
+  "computed": 1426,
+  "n_errors": 0,
+  "wall_s": 395.5,
+  "tab_room_lookup_ok": 1426,
+  "references_n": 20,
+  "sets_n": {
+   "loeo": 1077,
+   "scnC": 149,
+   "env2_later": 100,
+   "unused": 80,
+   "rooms_all": 1257
+  },
+  "channels": {
+   "phys": {
+    "max_rel_diff": {
+     "s025": 5.9467322135515804e-08,
+     "s2": 5.936072187366679e-08,
+     "lgrow": 0.0072112470155983165,
+     "g15_res": 5.9450436716146895e-08,
+     "sT": 5.944515963808464e-08,
+     "u_g15v": 5.9425265009801534e-08,
+     "pk_w": 5.937890311053959e-08,
+     "bs_w": 5.9104522320818e-08,
+     "rpm": 5.9388469368293727e-08,
+     "bs_f": 5.638825858600837e-08,
+     "plf_res": 5.8681994154505394e-08,
+     "plf_g": 5.869649583558507e-08,
+     "swing_ab": 5.612098824039871e-08,
+     "pk_u": 5.936074373179095e-08,
+     "bs_u": 5.883912775003302e-08
+    },
+    "nan_mismatch": {
+     "s025": 0,
+     "s2": 0,
+     "lgrow": 0,
+     "g15_res": 0,
+     "sT": 0,
+     "u_g15v": 0,
+     "pk_w": 0,
+     "bs_w": 0,
+     "rpm": 0,
+     "bs_f": 0,
+     "plf_res": 0,
+     "plf_g": 0,
+     "swing_ab": 0,
+     "pk_u": 0,
+     "bs_u": 0
+    }
+   },
+   "base": {
+    "max_rel_diff": {
+     "s025": 5.9467322135515804e-08,
+     "s2": 5.936072187366679e-08,
+     "s5": 5.942827774600035e-08,
+     "pk": 5.9414637414372495e-08,
+     "rpm": 5.9388469368293727e-08,
+     "pk_diff": 5.9264668616568115e-08,
+     "pk_res": 5.9494777854669594e-08,
+     "drift": 5.9325305192355946e-08,
+     "ret": 5.9504838143838024e-08,
+     "g15": 5.941752997124048e-08,
+     "bs_all": 5.852291360343522e-08,
+     "bs_r1": 5.890398319460183e-08,
+     "bs_r2": 5.890398319460183e-08,
+     "bs_tap": 5.8917666940869154e-08,
+     "bs_f": 5.638825858600837e-08,
+     "plf_res": 5.8681994154505394e-08,
+     "plf_g": 5.869649583558507e-08
+    },
+    "nan_mismatch": {
+     "s025": 0,
+     "s2": 0,
+     "s5": 0,
+     "pk": 0,
+     "rpm": 0,
+     "pk_diff": 0,
+     "pk_res": 0,
+     "drift": 0,
+     "ret": 0,
+     "g15": 0,
+     "bs_all": 0,
+     "bs_r1": 0,
+     "bs_r2": 0,
+     "bs_tap": 0,
+     "bs_f": 0,
+     "plf_res": 0,
+     "plf_g": 0
+    }
+   }
+  },
+  "probabilities": {
+   "seq13pw": {
+    "n": 1326,
+    "max_abs_diff": 1.3372625351504297e-07,
+    "verdict_flips": 0
+   },
+   "seq15pwu": {
+    "n": 1326,
+    "max_abs_diff": 1.2251521630535223e-07,
+    "verdict_flips": 0
+   },
+   "seq17": {
+    "n": 1326,
+    "max_abs_diff": 1.7474411989626404e-07,
+    "verdict_flips": 0
+   }
+  },
+  "accuracy": {
+   "seq13pw": {
+    "loeo": {
+     "env1": {
+      "n": 265,
+      "all": 89.4,
+      "kpi1": 100.0,
+      "kpi2": 82.5
+     },
+     "env2": {
+      "n": 437,
+      "all": 96.6,
+      "kpi1": 96.7,
+      "kpi2": 96.5
+     },
+     "env3": {
+      "n": 270,
+      "all": 92.6,
+      "kpi1": 100.0,
+      "kpi2": 87.5
+     },
+     "env3-1": {
+      "n": 105,
+      "all": 95.2,
+      "kpi1": 95.2,
+      "kpi2": null
+     },
+     "all": {
+      "n": 1077,
+      "all": 93.7,
+      "kpi1": 97.8,
+      "kpi2": 90.1,
+      "ba": 93.7
+     }
+    },
+    "scnC": {
+     "env3-1": {
+      "n": 149,
+      "all": 91.3,
+      "kpi1": 89.7,
+      "kpi2": 93.0
+     },
+     "all": {
+      "n": 149,
+      "all": 91.3,
+      "kpi1": 89.7,
+      "kpi2": 93.0,
+      "ba": 90.2
+     }
+    },
+    "env2_later": {
+     "env2": {
+      "n": 100,
+      "all": 93.0,
+      "kpi1": 94.0,
+      "kpi2": 92.0
+     },
+     "all": {
+      "n": 100,
+      "all": 93.0,
+      "kpi1": 94.0,
+      "kpi2": 92.0,
+      "ba": null
+     }
+    },
+    "unused": {
+     "env1": {
+      "n": 70,
+      "all": 78.6,
+      "kpi1": 100.0,
+      "kpi2": 70.0
+     },
+     "env2": {
+      "n": 10,
+      "all": 100.0,
+      "kpi1": null,
+      "kpi2": 100.0
+     },
+     "all": {
+      "n": 80,
+      "all": 81.2,
+      "kpi1": 100.0,
+      "kpi2": 75.0,
+      "ba": 87.5
+     }
+    },
+    "rooms_all": {
+     "env1": {
+      "n": 335,
+      "all": 87.2,
+      "kpi1": 100.0,
+      "kpi2": 79.5
+     },
+     "env2": {
+      "n": 547,
+      "all": 96.0,
+      "kpi1": 96.1,
+      "kpi2": 95.9
+     },
+     "env3": {
+      "n": 270,
+      "all": 92.6,
+      "kpi1": 100.0,
+      "kpi2": 87.5
+     },
+     "env3-1": {
+      "n": 105,
+      "all": 95.2,
+      "kpi1": 95.2,
+      "kpi2": null
+     },
+     "all": {
+      "n": 1257,
+      "all": 92.8,
+      "kpi1": 97.5,
+      "kpi2": 88.9,
+      "ba": 92.8
+     }
+    }
+   },
+   "seq15pwu": {
+    "loeo": {
+     "env1": {
+      "n": 265,
+      "all": 90.6,
+      "kpi1": 100.0,
+      "kpi2": 84.4
+     },
+     "env2": {
+      "n": 437,
+      "all": 92.9,
+      "kpi1": 87.8,
+      "kpi2": 96.5
+     },
+     "env3": {
+      "n": 270,
+      "all": 94.8,
+      "kpi1": 100.0,
+      "kpi2": 91.2
+     },
+     "env3-1": {
+      "n": 105,
+      "all": 99.0,
+      "kpi1": 99.0,
+      "kpi2": null
+     },
+     "all": {
+      "n": 1077,
+      "all": 93.4,
+      "kpi1": 95.4,
+      "kpi2": 91.7,
+      "ba": 93.5
+     }
+    },
+    "scnC": {
+     "env3-1": {
+      "n": 149,
+      "all": 94.6,
+      "kpi1": 92.3,
+      "kpi2": 97.2
+     },
+     "all": {
+      "n": 149,
+      "all": 94.6,
+      "kpi1": 92.3,
+      "kpi2": 97.2,
+      "ba": 92.2
+     }
+    },
+    "env2_later": {
+     "env2": {
+      "n": 100,
+      "all": 93.0,
+      "kpi1": 94.0,
+      "kpi2": 92.0
+     },
+     "all": {
+      "n": 100,
+      "all": 93.0,
+      "kpi1": 94.0,
+      "kpi2": 92.0,
+      "ba": null
+     }
+    },
+    "unused": {
+     "env1": {
+      "n": 70,
+      "all": 82.9,
+      "kpi1": 100.0,
+      "kpi2": 76.0
+     },
+     "env2": {
+      "n": 10,
+      "all": 100.0,
+      "kpi1": null,
+      "kpi2": 100.0
+     },
+     "all": {
+      "n": 80,
+      "all": 85.0,
+      "kpi1": 100.0,
+      "kpi2": 80.0,
+      "ba": 90.0
+     }
+    },
+    "rooms_all": {
+     "env1": {
+      "n": 335,
+      "all": 89.0,
+      "kpi1": 100.0,
+      "kpi2": 82.4
+     },
+     "env2": {
+      "n": 547,
+      "all": 93.1,
+      "kpi1": 89.1,
+      "kpi2": 95.9
+     },
+     "env3": {
+      "n": 270,
+      "all": 94.8,
+      "kpi1": 100.0,
+      "kpi2": 91.2
+     },
+     "env3-1": {
+      "n": 105,
+      "all": 99.0,
+      "kpi1": 99.0,
+      "kpi2": null
+     },
+     "all": {
+      "n": 1257,
+      "all": 92.8,
+      "kpi1": 95.4,
+      "kpi2": 90.7,
+      "ba": 92.9
+     }
+    }
+   },
+   "seq17": {
+    "loeo": {
+     "env1": {
+      "n": 265,
+      "all": 82.3,
+      "kpi1": 98.1,
+      "kpi2": 71.9
+     },
+     "env2": {
+      "n": 437,
+      "all": 79.4,
+      "kpi1": 95.6,
+      "kpi2": 68.1
+     },
+     "env3": {
+      "n": 270,
+      "all": 83.0,
+      "kpi1": 99.1,
+      "kpi2": 71.9
+     },
+     "env3-1": {
+      "n": 105,
+      "all": 96.2,
+      "kpi1": 96.2,
+      "kpi2": null
+     },
+     "all": {
+      "n": 1077,
+      "all": 82.6,
+      "kpi1": 97.0,
+      "kpi2": 70.2,
+      "ba": 82.4
+     }
+    },
+    "scnC": {
+     "env3-1": {
+      "n": 149,
+      "all": 96.6,
+      "kpi1": 94.9,
+      "kpi2": 98.6
+     },
+     "all": {
+      "n": 149,
+      "all": 96.6,
+      "kpi1": 94.9,
+      "kpi2": 98.6,
+      "ba": 93.3
+     }
+    },
+    "env2_later": {
+     "env2": {
+      "n": 100,
+      "all": 98.0,
+      "kpi1": 96.0,
+      "kpi2": 100.0
+     },
+     "all": {
+      "n": 100,
+      "all": 98.0,
+      "kpi1": 96.0,
+      "kpi2": 100.0,
+      "ba": null
+     }
+    },
+    "unused": {
+     "env1": {
+      "n": 70,
+      "all": 52.9,
+      "kpi1": 100.0,
+      "kpi2": 34.0
+     },
+     "env2": {
+      "n": 10,
+      "all": 100.0,
+      "kpi1": null,
+      "kpi2": 100.0
+     },
+     "all": {
+      "n": 80,
+      "all": 58.8,
+      "kpi1": 100.0,
+      "kpi2": 45.0,
+      "ba": 72.5
+     }
+    },
+    "rooms_all": {
+     "env1": {
+      "n": 335,
+      "all": 76.1,
+      "kpi1": 98.4,
+      "kpi2": 62.9
+     },
+     "env2": {
+      "n": 547,
+      "all": 83.2,
+      "kpi1": 95.7,
+      "kpi2": 74.1
+     },
+     "env3": {
+      "n": 270,
+      "all": 83.0,
+      "kpi1": 99.1,
+      "kpi2": 71.9
+     },
+     "env3-1": {
+      "n": 105,
+      "all": 96.2,
+      "kpi1": 96.2,
+      "kpi2": null
+     },
+     "all": {
+      "n": 1257,
+      "all": 82.3,
+      "kpi1": 97.0,
+      "kpi2": 70.2,
+      "ba": 81.7
+     }
+    }
+   }
+  },
+  "strata_loeo": {
+   "seq13pw": {
+    "empty_no_object": 100.0,
+    "object_only": 90.5,
+    "person_no_object": 96.4,
+    "person_plus_object": 89.6
+   },
+   "seq15pwu": {
+    "empty_no_object": 100.0,
+    "object_only": 91.7,
+    "person_no_object": 92.5,
+    "person_plus_object": 91.6
+   },
+   "seq17": {
+    "empty_no_object": 98.5,
+    "object_only": 63.3,
+    "person_no_object": 96.1,
+    "person_plus_object": 79.2
+   }
+  },
+  "conditions": [
+   {
+    "set": "env2_later",
+    "room": "env2",
+    "cond": "rot fan + small",
+    "n": 25,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "env2_later",
+    "room": "env2",
+    "cond": "rot fan + still",
+    "n": 15,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 3,
+    "wrong_seq15pwu": 3,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "env2_later",
+    "room": "env2",
+    "cond": "small move",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "env2_later",
+    "room": "env2",
+    "cond": "static fan + still",
+    "n": 10,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "env2_later",
+    "room": "env2",
+    "cond": "still",
+    "n": 30,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 3,
+    "wrong_seq15pwu": 3,
+    "wrong_seq17": 2
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "empty",
+    "n": 45,
+    "y": 0,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 2
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "large move",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "rot fan",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 9,
+    "wrong_seq15pwu": 5,
+    "wrong_seq17": 20
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "rot fan + small",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "rot fan + still",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "small move",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "static fan",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 2,
+    "wrong_seq15pwu": 3,
+    "wrong_seq17": 12
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "static fan + small",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "static fan + still",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 7,
+    "wrong_seq15pwu": 7,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "still",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "vacuum",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 10,
+    "wrong_seq15pwu": 10,
+    "wrong_seq17": 13
+   },
+   {
+    "set": "loeo",
+    "room": "env1",
+    "cond": "vacuum + still",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "empty",
+    "n": 55,
+    "y": 0,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "large move",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 5,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "rot fan",
+    "n": 89,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 52
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "rot fan + small",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 5,
+    "wrong_seq15pwu": 5,
+    "wrong_seq17": 6
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "rot fan + still",
+    "n": 10,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 3,
+    "wrong_seq17": 2
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "small move",
+    "n": 24,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "standing/walking",
+    "n": 14,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 8,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "static fan",
+    "n": 40,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "static fan + small",
+    "n": 5,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "static fan + still",
+    "n": 15,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "still",
+    "n": 67,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 4,
+    "wrong_seq15pwu": 9,
+    "wrong_seq17": 5
+   },
+   {
+    "set": "loeo",
+    "room": "env2",
+    "cond": "vacuum",
+    "n": 78,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 2,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 21
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Big mov",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Empty",
+    "n": 49,
+    "y": 0,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Fan rot (empty)",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Fan rot + small mov",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 4,
+    "wrong_seq15pwu": 2,
+    "wrong_seq17": 20
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Fan rot + static occ",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 9,
+    "wrong_seq15pwu": 4,
+    "wrong_seq17": 19
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Fan still (empty)",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Fan still + small mov",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 4
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Fan still + static occ",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Robot (empty)",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 6,
+    "wrong_seq15pwu": 7,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Robot + static occ / small mov",
+    "n": 20,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Small mov",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3",
+    "cond": "Static occupancy",
+    "n": 21,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3-1",
+    "cond": "Big mov",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3-1",
+    "cond": "Empty",
+    "n": 45,
+    "y": 0,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3-1",
+    "cond": "Small mov",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "loeo",
+    "room": "env3-1",
+    "cond": "Static occupancy",
+    "n": 20,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 5,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 4
+   },
+   {
+    "set": "scnC",
+    "room": "env3-1",
+    "cond": "1 person",
+    "n": 13,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "scnC",
+    "room": "env3-1",
+    "cond": "1 person (lying)",
+    "n": 5,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "scnC",
+    "room": "env3-1",
+    "cond": "2 people",
+    "n": 48,
+    "y": 1,
+    "obj": 0,
+    "wrong_seq13pw": 6,
+    "wrong_seq15pwu": 4,
+    "wrong_seq17": 3
+   },
+   {
+    "set": "scnC",
+    "room": "env3-1",
+    "cond": "2 people + ceiling fan",
+    "n": 65,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 4,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "scnC",
+    "room": "env3-1",
+    "cond": "empty",
+    "n": 12,
+    "y": 0,
+    "obj": 0,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "scnC",
+    "room": "env3-1",
+    "cond": "empty + ceiling fan",
+    "n": 6,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 1,
+    "wrong_seq15pwu": 1,
+    "wrong_seq17": 1
+   },
+   {
+    "set": "unused",
+    "room": "env1",
+    "cond": "empty",
+    "n": 20,
+    "y": 0,
+    "obj": 0,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "unused",
+    "room": "env1",
+    "cond": "rot fan",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 12,
+    "wrong_seq15pwu": 9,
+    "wrong_seq17": 20
+   },
+   {
+    "set": "unused",
+    "room": "env1",
+    "cond": "static fan",
+    "n": 20,
+    "y": 0,
+    "obj": 1,
+    "wrong_seq13pw": 3,
+    "wrong_seq15pwu": 3,
+    "wrong_seq17": 13
+   },
+   {
+    "set": "unused",
+    "room": "env1",
+    "cond": "static fan + still",
+    "n": 10,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   },
+   {
+    "set": "unused",
+    "room": "env2",
+    "cond": "rot fan + still",
+    "n": 10,
+    "y": 1,
+    "obj": 1,
+    "wrong_seq13pw": 0,
+    "wrong_seq15pwu": 0,
+    "wrong_seq17": 0
+   }
+  ]
+ },
+ "lg": {
+  "machine": "lg server, one core (taskset -c 3) (python 3.12.13, numpy 2.5.2, cores [3])",
+  "note": "Same 8 windows as the board run: 5 from the 11-09 board timing of the deployed Transformer and 3 rotating-fan windows (w > 0.9, the swing subtraction runs).",
+  "reps": 3,
+  "stages": [
+   "total seq13pw",
+   "total seq15pwu",
+   "both physics models, one series",
+   "total base 17",
+   "index",
+   "series seq13pw",
+   "calibrate + forward seq13pw",
+   "series seq15pwu",
+   "calibrate + forward seq15pwu",
+   "  seq15pwu series: decode",
+   "  seq15pwu series: steps + swing period",
+   "  seq15pwu series: plf",
+   "  seq15pwu series: swing share",
+   "  seq15pwu series: FarSense",
+   "  seq15pwu series: reflection (g15_res, u_g15v)",
+   "  seq15pwu series: breathing lines (bs)",
+   "series base 17",
+   "calibrate + forward base"
+  ],
+  "rows": [
+   {
+    "stem": "20261001_151502",
+    "room": "env2",
+    "w": 0.0,
+    "p": {
+     "seq13pw": 0.021435817237654885,
+     "seq15pwu": 0.013935865624005625,
+     "seq17": 0.014315681469785051
+    },
+    "t": {
+     "index": 0.05624434500350617,
+     "series seq13pw": 0.4870727289962815,
+     "calibrate + forward seq13pw": 0.0006229989958228543,
+     "total seq13pw": 0.5390151769970544,
+     "series seq15pwu": 0.47222981801314745,
+     "calibrate + forward seq15pwu": 0.0006372310017468408,
+     "total seq15pwu": 0.5291113940184005,
+     "  seq15pwu series: decode": 0.19605878699803725,
+     "  seq15pwu series: steps + swing period": 0.06655575799231883,
+     "  seq15pwu series: plf": 0.004719876989838667,
+     "  seq15pwu series: swing share": 0.008216660004109144,
+     "  seq15pwu series: FarSense": 0.041067661994020455,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07426483801100403,
+     "  seq15pwu series: breathing lines (bs)": 0.08154591399943456,
+     "series base 17": 0.4904780209908495,
+     "calibrate + forward base": 0.0006367859896272421,
+     "total base 17": 0.5474461429839721,
+     "both physics models, one series": 0.5296988970221719
+    }
+   },
+   {
+    "stem": "20261002_040002",
+    "room": "env2",
+    "w": 0.010801741681700784,
+    "p": {
+     "seq13pw": 0.01448480793012808,
+     "seq15pwu": 0.012290324319090176,
+     "seq17": 0.01331972433375645
+    },
+    "t": {
+     "index": 0.06811776100948919,
+     "series seq13pw": 0.45236144099908415,
+     "calibrate + forward seq13pw": 0.0006253360043046996,
+     "total seq13pw": 0.5214186520024668,
+     "series seq15pwu": 0.535908156001824,
+     "calibrate + forward seq15pwu": 0.0006605320086237043,
+     "total seq15pwu": 0.6047016410011565,
+     "  seq15pwu series: decode": 0.20404005200543907,
+     "  seq15pwu series: steps + swing period": 0.0746005709952442,
+     "  seq15pwu series: plf": 0.004494385997531936,
+     "  seq15pwu series: swing share": 0.008281012007500976,
+     "  seq15pwu series: FarSense": 0.06180542299989611,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07268882999778725,
+     "  seq15pwu series: breathing lines (bs)": 0.10902606100717094,
+     "series base 17": 0.5068016739969607,
+     "calibrate + forward base": 0.0006367599999066442,
+     "total base 17": 0.5758244489989011,
+     "both physics models, one series": 0.6053111390065169
+    }
+   },
+   {
+    "stem": "20261013_120426",
+    "room": "env1",
+    "w": 0.21631916538039914,
+    "p": {
+     "seq13pw": 0.007416094745068859,
+     "seq15pwu": 0.005874445874177249,
+     "seq17": 0.0216444866769208
+    },
+    "t": {
+     "index": 0.0691746139928,
+     "series seq13pw": 0.47389349999139085,
+     "calibrate + forward seq13pw": 0.0006655010074609891,
+     "total seq13pw": 0.5464835309976479,
+     "series seq15pwu": 0.5476550860039424,
+     "calibrate + forward seq15pwu": 0.0006822889990871772,
+     "total seq15pwu": 0.6202041450160323,
+     "  seq15pwu series: decode": 0.2160793359944364,
+     "  seq15pwu series: steps + swing period": 0.07339964600396343,
+     "  seq15pwu series: plf": 0.0044888680131407455,
+     "  seq15pwu series: swing share": 0.008328049996634945,
+     "  seq15pwu series: FarSense": 0.06183118899934925,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07434258499415591,
+     "  seq15pwu series: breathing lines (bs)": 0.10933936700166669,
+     "series base 17": 0.5139274070097599,
+     "calibrate + forward base": 0.0006749730091542006,
+     "total base 17": 0.576415634015575,
+     "both physics models, one series": 0.6208583870175062
+    }
+   },
+   {
+    "stem": "20261021_142736",
+    "room": "env3",
+    "w": 0.0,
+    "p": {
+     "seq13pw": 0.013053049383896096,
+     "seq15pwu": 0.009289972821183117,
+     "seq17": 0.00943853802774553
+    },
+    "t": {
+     "index": 0.058548764005536214,
+     "series seq13pw": 0.3936743399972329,
+     "calibrate + forward seq13pw": 0.000612544987234287,
+     "total seq13pw": 0.45130122198315803,
+     "series seq15pwu": 0.46716716600349173,
+     "calibrate + forward seq15pwu": 0.0006135080038802698,
+     "total seq15pwu": 0.5273499579925556,
+     "  seq15pwu series: decode": 0.19076293300895486,
+     "  seq15pwu series: steps + swing period": 0.07096567099506501,
+     "  seq15pwu series: plf": 0.004489824001211673,
+     "  seq15pwu series: swing share": 0.008330925003974698,
+     "  seq15pwu series: FarSense": 0.0403853799944045,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07430357699922752,
+     "  seq15pwu series: breathing lines (bs)": 0.07501405299990438,
+     "series base 17": 0.48371663999569137,
+     "calibrate + forward base": 0.0006436690018745139,
+     "total base 17": 0.5429186450055568,
+     "both physics models, one series": 0.5279625029797899
+    }
+   },
+   {
+    "stem": "20261023_111259",
+    "room": "env3-1",
+    "w": 0.0,
+    "p": {
+     "seq13pw": 0.009917019273956352,
+     "seq15pwu": 0.009195572733780279,
+     "seq17": 0.007790103259702398
+    },
+    "t": {
+     "index": 0.06327745300950482,
+     "series seq13pw": 0.40670678799506277,
+     "calibrate + forward seq13pw": 0.0006182680081110448,
+     "total seq13pw": 0.4589101179881254,
+     "series seq15pwu": 0.47023358500155155,
+     "calibrate + forward seq15pwu": 0.0006120320031186566,
+     "total seq15pwu": 0.5325643899996066,
+     "  seq15pwu series: decode": 0.19092436399660073,
+     "  seq15pwu series: steps + swing period": 0.07955211598891765,
+     "  seq15pwu series: plf": 0.0046323330025188625,
+     "  seq15pwu series: swing share": 0.00801081900135614,
+     "  seq15pwu series: FarSense": 0.04100388099323027,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07170451300044078,
+     "  seq15pwu series: breathing lines (bs)": 0.07563024999399204,
+     "series base 17": 0.49710463199880905,
+     "calibrate + forward base": 0.0006376170058501884,
+     "total base 17": 0.5695537819847232,
+     "both physics models, one series": 0.5331826580077177
+    }
+   },
+   {
+    "stem": "20261009_112535",
+    "room": "env2",
+    "w": 0.9977047492120692,
+    "p": {
+     "seq13pw": 0.017308273650228877,
+     "seq15pwu": 0.014796504525141505,
+     "seq17": 0.6147196640490427
+    },
+    "t": {
+     "index": 0.06756925799709279,
+     "series seq13pw": 0.484028519000276,
+     "calibrate + forward seq13pw": 0.0006105079955887049,
+     "total seq13pw": 0.5478218420030316,
+     "series seq15pwu": 0.5589585220004665,
+     "calibrate + forward seq15pwu": 0.0006420529971364886,
+     "total seq15pwu": 0.6227956149959937,
+     "  seq15pwu series: decode": 0.20479742900351994,
+     "  seq15pwu series: steps + swing period": 0.07562376299756579,
+     "  seq15pwu series: plf": 0.0047077140043256804,
+     "  seq15pwu series: swing share": 0.008318570995470509,
+     "  seq15pwu series: FarSense": 0.062140780995832756,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.08975002099759877,
+     "  seq15pwu series: breathing lines (bs)": 0.10855531400011387,
+     "series base 17": 0.4955741519952426,
+     "calibrate + forward base": 0.0006386739987647161,
+     "total base 17": 0.5714073049894068,
+     "both physics models, one series": 0.6234061229915824
+    }
+   },
+   {
+    "stem": "20261013_164146",
+    "room": "env1",
+    "w": 0.951825760690889,
+    "p": {
+     "seq13pw": 0.4017351896476601,
+     "seq15pwu": 0.21376074572672907,
+     "seq17": 0.9901931443465916
+    },
+    "t": {
+     "index": 0.061111621995223686,
+     "series seq13pw": 0.47547291200316977,
+     "calibrate + forward seq13pw": 0.0006507990037789568,
+     "total seq13pw": 0.5372134659992298,
+     "series seq15pwu": 0.528714090003632,
+     "calibrate + forward seq15pwu": 0.0006222590018296614,
+     "total seq15pwu": 0.5904479710006854,
+     "  seq15pwu series: decode": 0.19504084199434146,
+     "  seq15pwu series: steps + swing period": 0.0760644929978298,
+     "  seq15pwu series: plf": 0.004585430011502467,
+     "  seq15pwu series: swing share": 0.007950084007461555,
+     "  seq15pwu series: FarSense": 0.06352830700052436,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.06993743900966365,
+     "  seq15pwu series: breathing lines (bs)": 0.10922621899226215,
+     "series base 17": 0.4840056109969737,
+     "calibrate + forward base": 0.0006408689951058477,
+     "total base 17": 0.5361721949884668,
+     "both physics models, one series": 0.5910769030015217
+    }
+   },
+   {
+    "stem": "20261021_164727",
+    "room": "env3",
+    "w": 0.98907032431752,
+    "p": {
+     "seq13pw": 0.2273857005918186,
+     "seq15pwu": 0.4520843758849592,
+     "seq17": 0.010190003674981444
+    },
+    "t": {
+     "index": 0.06294332101242617,
+     "series seq13pw": 0.4504442659963388,
+     "calibrate + forward seq13pw": 0.0006658609927399084,
+     "total seq13pw": 0.514243005993194,
+     "series seq15pwu": 0.5246406020014547,
+     "calibrate + forward seq15pwu": 0.0006431489891838282,
+     "total seq15pwu": 0.5884084819990676,
+     "  seq15pwu series: decode": 0.19747477199416608,
+     "  seq15pwu series: steps + swing period": 0.0754432419926161,
+     "  seq15pwu series: plf": 0.004517069988651201,
+     "  seq15pwu series: swing share": 0.008218307004426606,
+     "  seq15pwu series: FarSense": 0.06242397299502045,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07072617798985448,
+     "  seq15pwu series: breathing lines (bs)": 0.10714502600603737,
+     "series base 17": 0.48801558901323006,
+     "calibrate + forward base": 0.000626658002147451,
+     "total base 17": 0.5515855680278037,
+     "both physics models, one series": 0.5890463690011529
+    }
+   }
+  ],
+  "median": {
+   "total seq13pw": 0.5293160590008483,
+   "total seq15pwu": 0.5894282264998765,
+   "both physics models, one series": 0.5900616360013373,
+   "total base 17": 0.5605696750062634,
+   "index": 0.0631103870109655,
+   "series seq13pw": 0.4631274704952375,
+   "calibrate + forward seq13pw": 0.000624167500063777,
+   "series seq15pwu": 0.5266773460025433,
+   "calibrate + forward seq15pwu": 0.0006396419994416647,
+   "  seq15pwu series: decode": 0.19676677949610166,
+   "  seq15pwu series: steps + swing period": 0.07502190649393015,
+   "  seq15pwu series: plf": 0.004551250000076834,
+   "  seq15pwu series: swing share": 0.008249659505963791,
+   "  seq15pwu series: FarSense": 0.06181830599962268,
+   "  seq15pwu series: reflection (g15_res, u_g15v)": 0.07347683400439564,
+   "  seq15pwu series: breathing lines (bs)": 0.10785017000307562,
+   "series base 17": 0.493026086493046,
+   "calibrate + forward base": 0.0006381455023074523
+  },
+  "max": {
+   "total seq13pw": 0.5478218420030316,
+   "total seq15pwu": 0.6227956149959937,
+   "both physics models, one series": 0.6234061229915824,
+   "total base 17": 0.576415634015575,
+   "index": 0.0691746139928,
+   "series seq13pw": 0.4870727289962815,
+   "calibrate + forward seq13pw": 0.0006658609927399084,
+   "series seq15pwu": 0.5589585220004665,
+   "calibrate + forward seq15pwu": 0.0006822889990871772,
+   "  seq15pwu series: decode": 0.2160793359944364,
+   "  seq15pwu series: steps + swing period": 0.07955211598891765,
+   "  seq15pwu series: plf": 0.004719876989838667,
+   "  seq15pwu series: swing share": 0.008330925003974698,
+   "  seq15pwu series: FarSense": 0.06352830700052436,
+   "  seq15pwu series: reflection (g15_res, u_g15v)": 0.08975002099759877,
+   "  seq15pwu series: breathing lines (bs)": 0.10933936700166669,
+   "series base 17": 0.5139274070097599,
+   "calibrate + forward base": 0.0006749730091542006
+  },
+  "p_match": null
+ },
+ "generated": "2026-11-12"
+}

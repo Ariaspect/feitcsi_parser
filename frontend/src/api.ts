@@ -1960,6 +1960,97 @@ export async function fetchTfm(path: string, window: number, signal?: AbortSigna
   return res.json();
 }
 
+/** One model's verdict on a window of the Physics tab. */
+export interface PhysVerdict {
+  p: number;
+  label: number;
+  p_seeds: (number | null)[];
+  trained_on: string[];
+}
+
+/** Accuracy (%) of one set, overall and by KPI; ``ba`` (balanced accuracy) on the pooled row only. */
+export interface PhysAcc {
+  n: number;
+  all: number | null;
+  kpi1: number | null;
+  kpi2: number | null;
+  ba?: number | null;
+}
+
+/** One stage of the board / lg timing: median seconds per one-minute window. */
+export interface PhysTimingRow {
+  stem: string;
+  room: string | null;
+  w: number | null;
+  p: Record<string, number>;
+  t: Record<string, number>;
+}
+
+export interface PhysTiming {
+  machine: string;
+  note: string;
+  reps: number;
+  stages: string[];
+  rows: PhysTimingRow[];
+  median: Record<string, number>;
+  max: Record<string, number>;
+  p_match?: string | null;
+}
+
+/** Display-only results of the Physics tab (backend/tfm_phys_results.json). */
+export interface PhysResults {
+  generated?: string;
+  verification?: {
+    windows: number;
+    computed: number;
+    n_errors: number;
+    wall_s: number;
+    tab_room_lookup_ok: number;
+    references_n: number;
+    sets_n: Record<string, number>;
+    channels: Record<string, { max_rel_diff: Record<string, number>; nan_mismatch: Record<string, number> }>;
+    probabilities: Record<string, { n: number; max_abs_diff: number; verdict_flips: number }>;
+    accuracy: Record<string, Record<string, Record<string, PhysAcc>>>;
+    strata_loeo: Record<string, Record<string, number | null>>;
+    conditions: { set: string; room: string; cond: string; n: number; y: number; obj: number; [k: string]: string | number }[];
+  };
+  board?: PhysTiming;
+  lg?: PhysTiming;
+}
+
+/** /api/tfm-phys: the Physics tab -- seq13pw / seq15pwu (and the 17-channel base, same calibration) on one window
+ *  (backend/tfm_phys.py). */
+export interface TfmPhys {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  window_s: [number, number];
+  channels: string[];
+  models: Record<string, { variant: string; channels: string[]; log_channels: string[]; calibrated_channels: string[] }>;
+  raw: (number | null)[][];
+  calibrated: (number | null)[][] | null;
+  swing_period_s: number | null;
+  swing_a: number | null;
+  swing_ab: number | null;
+  w: number | null;
+  room: RoomFold | null;
+  reference_minute: boolean;
+  verdicts: Record<string, PhysVerdict>;
+  threshold: number;
+  timings: Record<string, number | null>;
+  results: PhysResults;
+  truth: ModelTruth;
+}
+
+export async function fetchTfmPhys(path: string, window: number, signal?: AbortSignal): Promise<TfmPhys> {
+  const res = await fetch(`/api/tfm-phys?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `physics: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** One row of the threshold-per-rate measurement (backend/realtime.py RATE_TABLE, offline 2026-11-02). */
 export interface RealtimeRateRow {
   rate_hz: number;

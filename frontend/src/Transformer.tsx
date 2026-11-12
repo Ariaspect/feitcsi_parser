@@ -31,7 +31,7 @@ const DESCRIPTION: Record<string, string> = {
   plf_g: "Phase-locked fraction on the full signal (same definition).",
 };
 
-function finite(xs: (number | null)[]): number[] {
+export function finite(xs: (number | null)[]): number[] {
   return xs.filter((v): v is number => v != null && Number.isFinite(v));
 }
 
@@ -39,12 +39,12 @@ const ok = (v: number | null | undefined): v is number => v != null && Number.is
 
 /** True when some value has no neighbour with a value -- drift (every 2 s) and bs_* (every 4 s) -- so a line that
  *  breaks at every gap would draw nothing. */
-function sparse(xs: (number | null)[]): boolean {
+export function sparse(xs: (number | null)[]): boolean {
   return xs.some((v, i) => ok(v) && !ok(xs[i - 1]) && !ok(xs[i + 1]));
 }
 
 /** For display only: straight segments between consecutive values (the model sees the gaps as missing). */
-function bridge(xs: (number | null)[]): (number | null)[] {
+export function bridge(xs: (number | null)[]): (number | null)[] {
   const idx = xs.flatMap((v, i) => (ok(v) ? [i] : []));
   const out: (number | null)[] = xs.map(() => null);
   for (let k = 0; k < idx.length; k++) {

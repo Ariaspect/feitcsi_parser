@@ -7,6 +7,7 @@ import { Hybrid } from "./Hybrid";
 import { Hybrid2 } from "./Hybrid2";
 import { Classifier } from "./Classifier";
 import { ML } from "./ML";
+import { Physics } from "./Physics";
 import { Transformer } from "./Transformer";
 import { Realtime } from "./Realtime";
 import { CaptureBar, CaptureDetails, CaptureFollow, CaptureProvider } from "./Capture";
@@ -719,6 +720,7 @@ export function App() {
               <TabsTrigger value="classifier">Classifier</TabsTrigger>
               <TabsTrigger value="ml">ML</TabsTrigger>
               <TabsTrigger value="transformer">Transformer</TabsTrigger>
+              <TabsTrigger value="physics">Physics</TabsTrigger>
               <TabsTrigger value="realtime">Realtime</TabsTrigger>
             </TabsList>
 
@@ -1047,6 +1049,10 @@ export function App() {
 
             <TabsContent value="transformer">
               <Transformer path={path} dark={dark} />
+            </TabsContent>
+
+            <TabsContent value="physics">
+              <Physics path={path} dark={dark} />
             </TabsContent>
 
             <TabsContent value="realtime">
