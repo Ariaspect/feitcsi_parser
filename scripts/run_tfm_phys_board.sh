@@ -18,7 +18,11 @@ cp "$ROOT/data/gt_tables.csv" "$ROOT/data/ml_heads_train.csv" "$TMP/cy_phys/data
 cp "$ROOT/scripts/bench_tfm_phys_board.py" "$TMP/cy_phys/"
 W="{"
 for s in $STEMS; do
-  f=$(ls "$CAPS/$s.bin" "$CAPS/lg_archive/${s:0:8}/$s.bin" 2>/dev/null | head -1)
+  f=""                                        # flat copy first, else the lg_archive day folder (10-01/02/05 live there)
+  for c in "$CAPS/$s.bin" "$CAPS/lg_archive/${s:0:8}/$s.bin"; do
+    [ -f "$c" ] && { f=$c; break; }
+  done
+  [ -n "$f" ] || { echo "capture $s not found under $CAPS" >&2; exit 1; }
   cp "$f" "$TMP/cy_phys/caps/"
   W="$W\"$s\": [0.0, 61.0],"
 done

@@ -1414,5 +1414,313 @@
   },
   "p_match": null
  },
- "generated": "2026-11-12"
+ "generated": "2026-11-13",
+ "board": {
+  "machine": "board (LG webOS TV SoC, aarch64, one core: taskset -c 3) (python 3.12.12, numpy 1.26.4, cores [3])",
+  "note": "Same 8 windows and script as lg, 3 repetitions each, measured 2026-11-13 by the lg_csi_experiments session. The board had rebooted 8 minutes before; loadavg 18-20 with the CPU about 90 % idle (TV background tasks). seq13pw is faster on windows with no swing (w = 0, 3.4-3.6 s) because the plain FarSense / bs runs are reused; seq15pwu always reruns them on the swing-removed signal.",
+  "reps": 3,
+  "stages": [
+   "total seq13pw",
+   "total seq15pwu",
+   "both physics models, one series",
+   "total base 17",
+   "index",
+   "series seq13pw",
+   "calibrate + forward seq13pw",
+   "series seq15pwu",
+   "calibrate + forward seq15pwu",
+   "  seq15pwu series: decode",
+   "  seq15pwu series: steps + swing period",
+   "  seq15pwu series: plf",
+   "  seq15pwu series: swing share",
+   "  seq15pwu series: FarSense",
+   "  seq15pwu series: reflection (g15_res, u_g15v)",
+   "  seq15pwu series: breathing lines (bs)",
+   "series base 17",
+   "calibrate + forward base"
+  ],
+  "rows": [
+   {
+    "stem": "20261001_151502",
+    "room": "env2",
+    "w": 0.0,
+    "p": {
+     "seq13pw": 0.021435817234610074,
+     "seq15pwu": 0.013935865632282505,
+     "seq17": 0.014315681462032251
+    },
+    "t": {
+     "index": 0.10101775999999063,
+     "series seq13pw": 3.278503580000006,
+     "calibrate + forward seq13pw": 0.0076265600000624545,
+     "total seq13pw": 3.387334140000007,
+     "series seq15pwu": 4.110541399999988,
+     "calibrate + forward seq15pwu": 0.00765790000002653,
+     "total seq15pwu": 4.219124319999992,
+     "  seq15pwu series: decode": 0.49201524000000063,
+     "  seq15pwu series: steps + swing period": 0.9111548399999947,
+     "  seq15pwu series: plf": 0.117220360000033,
+     "  seq15pwu series: swing share": 0.21932538000010027,
+     "  seq15pwu series: FarSense": 0.8932022400000506,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6179723799999692,
+     "  seq15pwu series: breathing lines (bs)": 0.8580508600000485,
+     "series base 17": 4.159588519999943,
+     "calibrate + forward base": 0.007848540000054527,
+     "total base 17": 4.344280040000058,
+     "both physics models, one series": 4.226937120000002
+    }
+   },
+   {
+    "stem": "20261002_040002",
+    "room": "env2",
+    "w": 0.010801741681698819,
+    "p": {
+     "seq13pw": 0.014484807927991986,
+     "seq15pwu": 0.012290324321613746,
+     "seq17": 0.0133197243302017
+    },
+    "t": {
+     "index": 0.10866793999991842,
+     "series seq13pw": 4.163319539999975,
+     "calibrate + forward seq13pw": 0.007539599999972779,
+     "total seq13pw": 4.279524719999813,
+     "series seq15pwu": 4.992832379999982,
+     "calibrate + forward seq15pwu": 0.00800231999994594,
+     "total seq15pwu": 5.110140119999983,
+     "  seq15pwu series: decode": 0.4822177600000259,
+     "  seq15pwu series: steps + swing period": 1.0410086399999727,
+     "  seq15pwu series: plf": 0.1123678399999335,
+     "  seq15pwu series: swing share": 0.2209974999999531,
+     "  seq15pwu series: FarSense": 1.324406280000062,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.605153820000055,
+     "  seq15pwu series: breathing lines (bs)": 1.198513739999953,
+     "series base 17": 4.250141020000001,
+     "calibrate + forward base": 0.00824334000003546,
+     "total base 17": 4.366806520000068,
+     "both physics models, one series": 5.117930060000049
+    }
+   },
+   {
+    "stem": "20261009_112535",
+    "room": "env2",
+    "w": 0.9977047492120692,
+    "p": {
+     "seq13pw": 0.01730827368546759,
+     "seq15pwu": 0.014796504526137167,
+     "seq17": 0.6147196614926087
+    },
+    "t": {
+     "index": 0.10460722000004807,
+     "series seq13pw": 4.236042379999958,
+     "calibrate + forward seq13pw": 0.007601639999961662,
+     "total seq13pw": 4.348319739999965,
+     "series seq15pwu": 5.09362864000002,
+     "calibrate + forward seq15pwu": 0.007758640000020023,
+     "total seq15pwu": 5.205730620000054,
+     "  seq15pwu series: decode": 0.4993379400000322,
+     "  seq15pwu series: steps + swing period": 1.0890652799999998,
+     "  seq15pwu series: plf": 0.1162985400000025,
+     "  seq15pwu series: swing share": 0.22050482000008742,
+     "  seq15pwu series: FarSense": 1.3612542399999938,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6215293400000519,
+     "  seq15pwu series: breathing lines (bs)": 1.1896472199999835,
+     "series base 17": 4.341146160000108,
+     "calibrate + forward base": 0.00784735999991426,
+     "total base 17": 4.453564460000166,
+     "both physics models, one series": 5.213320400000043
+    }
+   },
+   {
+    "stem": "20261013_120426",
+    "room": "env1",
+    "w": 0.21631916538040113,
+    "p": {
+     "seq13pw": 0.007416094770052209,
+     "seq15pwu": 0.005874445889046658,
+     "seq17": 0.021644485941226227
+    },
+    "t": {
+     "index": 0.09241158000008909,
+     "series seq13pw": 4.186859879999929,
+     "calibrate + forward seq13pw": 0.00777944000003572,
+     "total seq13pw": 4.286909860000037,
+     "series seq15pwu": 5.079578240000046,
+     "calibrate + forward seq15pwu": 0.00778047999995124,
+     "total seq15pwu": 5.179904439999973,
+     "  seq15pwu series: decode": 0.5080989599999839,
+     "  seq15pwu series: steps + swing period": 1.0317909800000962,
+     "  seq15pwu series: plf": 0.11351416000002246,
+     "  seq15pwu series: swing share": 0.22029459999998835,
+     "  seq15pwu series: FarSense": 1.325486000000069,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6203805599999441,
+     "  seq15pwu series: breathing lines (bs)": 1.1916183600000068,
+     "series base 17": 4.260934659999975,
+     "calibrate + forward base": 0.008005939999975453,
+     "total base 17": 4.362440640000045,
+     "both physics models, one series": 5.1879875600000105
+    }
+   },
+   {
+    "stem": "20261013_164146",
+    "room": "env1",
+    "w": 0.9518257606908884,
+    "p": {
+     "seq13pw": 0.401735189108674,
+     "seq15pwu": 0.21376074350461197,
+     "seq17": 0.9901931444194656
+    },
+    "t": {
+     "index": 0.08242931999996017,
+     "series seq13pw": 4.174783479999974,
+     "calibrate + forward seq13pw": 0.007846939999922142,
+     "total seq13pw": 4.2631435599998895,
+     "series seq15pwu": 5.014431540000032,
+     "calibrate + forward seq15pwu": 0.008140080000089256,
+     "total seq15pwu": 5.105000940000082,
+     "  seq15pwu series: decode": 0.49420211999995445,
+     "  seq15pwu series: steps + swing period": 1.039591640000026,
+     "  seq15pwu series: plf": 0.11438570000007076,
+     "  seq15pwu series: swing share": 0.2193507199999658,
+     "  seq15pwu series: FarSense": 1.3700597800000196,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.5972596999999951,
+     "  seq15pwu series: breathing lines (bs)": 1.1756860199999437,
+     "series base 17": 4.29530292000004,
+     "calibrate + forward base": 0.0077917200000001685,
+     "total base 17": 4.383607780000034,
+     "both physics models, one series": 5.112702520000084
+    }
+   },
+   {
+    "stem": "20261021_142736",
+    "room": "env3",
+    "w": 0.0,
+    "p": {
+     "seq13pw": 0.01305304948145632,
+     "seq15pwu": 0.009289972862611826,
+     "seq17": 0.009438537997373578
+    },
+    "t": {
+     "index": 0.1062290600000324,
+     "series seq13pw": 3.297816599999919,
+     "calibrate + forward seq13pw": 0.00793132000001151,
+     "total seq13pw": 3.3977993599997944,
+     "series seq15pwu": 4.189188339999987,
+     "calibrate + forward seq15pwu": 0.007951440000056209,
+     "total seq15pwu": 4.304460740000081,
+     "  seq15pwu series: decode": 0.4877724200000557,
+     "  seq15pwu series: steps + swing period": 1.0129872400000295,
+     "  seq15pwu series: plf": 0.11764396000000943,
+     "  seq15pwu series: swing share": 0.22740569999996296,
+     "  seq15pwu series: FarSense": 0.9211152800000946,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6056564000000435,
+     "  seq15pwu series: breathing lines (bs)": 0.8245782999999847,
+     "series base 17": 4.170342099999971,
+     "calibrate + forward base": 0.007821480000075098,
+     "total base 17": 4.285654340000065,
+     "both physics models, one series": 4.312392060000093
+    }
+   },
+   {
+    "stem": "20261021_164727",
+    "room": "env3",
+    "w": 0.98907032431752,
+    "p": {
+     "seq13pw": 0.22738569944646936,
+     "seq15pwu": 0.45208437162279136,
+     "seq17": 0.010190003678491499
+    },
+    "t": {
+     "index": 0.08235046000004331,
+     "series seq13pw": 4.245070779999992,
+     "calibrate + forward seq13pw": 0.0080560000000105,
+     "total seq13pw": 4.334679579999943,
+     "series seq15pwu": 5.115500959999963,
+     "calibrate + forward seq15pwu": 0.007765599999970618,
+     "total seq15pwu": 5.204809819999923,
+     "  seq15pwu series: decode": 0.5104944400000022,
+     "  seq15pwu series: steps + swing period": 1.0717325600001004,
+     "  seq15pwu series: plf": 0.11440840000000208,
+     "  seq15pwu series: swing share": 0.22019762000002174,
+     "  seq15pwu series: FarSense": 1.3708774000000403,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6150933599999462,
+     "  seq15pwu series: breathing lines (bs)": 1.196131400000013,
+     "series base 17": 4.370321659999945,
+     "calibrate + forward base": 0.007893319999993764,
+     "total base 17": 4.459466219999854,
+     "both physics models, one series": 5.2128753599998845
+    }
+   },
+   {
+    "stem": "20261023_111259",
+    "room": "env3-1",
+    "w": 0.0,
+    "p": {
+     "seq13pw": 0.009917019268904311,
+     "seq15pwu": 0.009195572766257685,
+     "seq17": 0.007790103261607175
+    },
+    "t": {
+     "index": 0.09428489999993417,
+     "series seq13pw": 3.4508284999999432,
+     "calibrate + forward seq13pw": 0.008197539999969194,
+     "total seq13pw": 3.5560351799999808,
+     "series seq15pwu": 4.301549619999946,
+     "calibrate + forward seq15pwu": 0.007905019999952856,
+     "total seq15pwu": 4.406880659999956,
+     "  seq15pwu series: decode": 0.4966241000000764,
+     "  seq15pwu series: steps + swing period": 1.1374766400000453,
+     "  seq15pwu series: plf": 0.11440656000002036,
+     "  seq15pwu series: swing share": 0.2257946400000037,
+     "  seq15pwu series: FarSense": 0.8976939199999379,
+     "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6203862400000162,
+     "  seq15pwu series: breathing lines (bs)": 0.8165607600000158,
+     "series base 17": 4.3736781399999245,
+     "calibrate + forward base": 0.008215080000013586,
+     "total base 17": 4.478983099999937,
+     "both physics models, one series": 4.415015639999979
+    }
+   }
+  ],
+  "median": {
+   "total seq13pw": 4.271334139999851,
+   "total seq15pwu": 5.107570530000032,
+   "both physics models, one series": 5.115316290000067,
+   "total base 17": 4.375207150000051,
+   "index": 0.0976513299999624,
+   "series seq13pw": 4.169051509999974,
+   "calibrate + forward seq13pw": 0.007813189999978931,
+   "series seq15pwu": 5.003631960000007,
+   "calibrate + forward seq15pwu": 0.007842749999952048,
+   "  seq15pwu series: decode": 0.4954131100000154,
+   "  seq15pwu series: steps + swing period": 1.0403001399999994,
+   "  seq15pwu series: plf": 0.11440748000001122,
+   "  seq15pwu series: swing share": 0.22039971000003789,
+   "  seq15pwu series: FarSense": 1.3249461400000655,
+   "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6165328699999577,
+   "  seq15pwu series: breathing lines (bs)": 1.1826666199999636,
+   "series base 17": 4.278118790000008,
+   "calibrate + forward base": 0.007870930000024146
+  },
+  "max": {
+   "total seq13pw": 4.348319739999965,
+   "total seq15pwu": 5.205730620000054,
+   "both physics models, one series": 5.213320400000043,
+   "total base 17": 4.478983099999937,
+   "index": 0.10866793999991842,
+   "series seq13pw": 4.245070779999992,
+   "calibrate + forward seq13pw": 0.008197539999969194,
+   "series seq15pwu": 5.115500959999963,
+   "calibrate + forward seq15pwu": 0.008140080000089256,
+   "  seq15pwu series: decode": 0.5104944400000022,
+   "  seq15pwu series: steps + swing period": 1.1374766400000453,
+   "  seq15pwu series: plf": 0.11764396000000943,
+   "  seq15pwu series: swing share": 0.22740569999996296,
+   "  seq15pwu series: FarSense": 1.3708774000000403,
+   "  seq15pwu series: reflection (g15_res, u_g15v)": 0.6215293400000519,
+   "  seq15pwu series: breathing lines (bs)": 1.198513739999953,
+   "series base 17": 4.3736781399999245,
+   "calibrate + forward base": 0.00824334000003546
+  },
+  "p_match": "P vs lg on the same 8 windows: max |\u0394P| seq13pw 1.1e-09, seq15pwu 4.3e-09, seq17 2.6e-09."
+ }
 }
