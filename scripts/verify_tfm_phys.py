@@ -38,7 +38,7 @@ if not RESCORE:
     NPROC = int(sys.argv[3]) if len(sys.argv) > 3 else 8
     sys.path.insert(0, str(CODE))
     sys.path.insert(1, str(HERE / "bench"))
-    from backend import mtk, tfm_model, tfm_phys as TP, tfm_series  # noqa: E402
+    from backend import mtk, tfm_model, tfm_phys as TP, tfm_phys_fast as TF, tfm_series  # noqa: E402
     CAP = Path("/home/lg_csi/lg_csi_captures")
     SCN = CAP / "20261023" / "20261023_132301.bin"
     MODELS = TP.MODELS
@@ -53,7 +53,7 @@ def one(job: tuple) -> dict:
     rid, stem, path, t0, t1, room = job
     try:
         idx = mtk.MTKIndex(Path(path))
-        s = TP.series(path, t0, t1, idx)
+        s = TF.series(path, t0, t1, idx)                # the tab's series (backend.tfm_phys_fast, since 2026-11-15)
         b = tfm_series.series(path, t0, t1, idx)
         out = {"row_id": rid, "phys": np.array([s["S"][c] for c in TP.PHYS_CHANNELS]), "base": b["X"],
                "swing_ab": s["swing_ab"], "w": s["w"], "T_s": s["T"], "error": ""}

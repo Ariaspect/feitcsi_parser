@@ -94,3 +94,79 @@ def test_series_reproduces_the_benchmarks_channels() -> None:
     ref = _grid(row["phys"])
     assert np.array_equal(np.isfinite(X), np.isfinite(ref))
     assert np.allclose(X, ref, rtol=1e-3, equal_nan=True)       # lg's arithmetic; a laptop's BLAS differs ~1e-5
+
+
+# ------------------------------------------------------------------ the board-speed series (backend.tfm_phys_fast)
+from backend import af8, af8_env1 as E, breath_components as BC, farsense, mtk, tfm_phys_fast as TF  # noqa: E402
+
+
+def _cap():
+    row = next((r for r in META["check"] if r["fold"] != "scnC" and (ROOT / "captures" / f"{r['stem']}.bin").exists()), None)
+    if row is None:
+        pytest.skip("no check capture on this machine")
+    return ROOT / "captures" / f"{row['stem']}.bin"
+
+
+def test_fast_pieces_equal_the_originals() -> None:
+    rng = np.random.default_rng(3)
+    fs, n = 41.6667, 2500
+    t = np.arange(n) / fs
+    g = (1.0 + 0.02 * rng.normal(size=(n, 31)) + 0.02j * rng.normal(size=(n, 31))
+         + 0.05 * np.exp(2j * np.pi * 0.25 * t)[:, None] * rng.normal(size=31))
+    for k in (1, 10, 42, 250):                                   # running-sum moving average = np.convolve "same"
+        ref = np.apply_along_axis(lambda c: np.convolve(c, np.ones(k) / k, "same"), 0, g)
+        assert np.allclose(TF._ma(g, k), ref, rtol=0, atol=1e-12)
+    A = np.abs(g)
+    for L in (10, 83, 830):
+        assert np.array_equal(TF._step(g, A, L), af8._step(g, L))
+    assert TF.swing_period(g, A, fs) == af8.swing_period(g, fs)
+    T = af8.swing_period(g, fs)
+    for band in (False, True):
+        assert TF.swing_alpha(g, T, fs, band) == pytest.approx(TP.swing_alpha(g, T, fs, band), abs=1e-12)
+    z0, V0, _ = TP._fast_subspace(g, fs)
+    z1, V1, _ = TF.fast_subspace(g, fs)
+    assert np.allclose(np.abs(V0.conj().T @ V1), np.eye(V0.shape[1]), atol=1e-9)
+    fab = np.zeros(n, bool); fab[1200:1230] = True
+    for rpm in (True, False):
+        a, b = TF.farsense_pk(g, fab, fs, rpm)
+        ra, rb = TS._fs_windows(g, fab, fs, 0)
+        assert np.allclose(a, ra, rtol=1e-9, equal_nan=True)
+        assert b is None if not rpm else np.allclose(b, rb, rtol=1e-9, equal_nan=True)
+    gf = (1.0 + 0.02 * rng.normal(size=(n, 245)) + 0.02j * rng.normal(size=(n, 245))
+          + 0.05 * np.exp(2j * np.pi * 0.25 * t)[:, None] * rng.normal(size=245))
+    ra, rf = TP._bs_lines(gf, fs)                                # reads the full grid's every 8th column
+    for gram in ("stretch", "direct"):
+        a, f = TF.bs_lines(gf[:, ::af8.STRIDE], fs, gram)
+        assert np.allclose(a, ra, rtol=1e-9, equal_nan=True) and np.array_equal(f, rf, equal_nan=True)
+    Y = rng.normal(size=(833, 8)).cumsum(0)
+    v, fr = TF._prominences(Y, fs)
+    ref = [BC.prominence(Y[:, j], fs) for j in range(8)]
+    assert np.allclose(v, [p[0] for p in ref], rtol=1e-9) and np.array_equal(fr, [p[1] for p in ref])
+    pat = rng.normal(size=(417, 31)); bnr = rng.random(31)
+    r0, s0 = farsense.combine_autocorrelations(pat, bnr, keep_fraction=TF.FS_KEEP)
+    r1, s1 = TF.combine_autocorrelations(pat, bnr)
+    assert np.array_equal(s0, s1) and np.allclose(r0, r1, rtol=0, atol=1e-12 * np.abs(r0).max())
+
+
+def test_fast_decode_and_gating_equal_the_originals() -> None:
+    p = _cap()
+    idx = mtk.MTKIndex(p)
+    G = TF.load_grid(p, idx, 0.0, 61.0)
+    H, tt, live, nb = E.load_chains(p, idx, 0.0, 61.0)
+    assert np.array_equal(G["tt"], tt) and np.array_equal(G["live"], live)
+    assert np.array_equal(G["h0"], H[:, 0, ::af8.STRIDE]) and np.array_equal(G["h1"], H[:, 1, ::af8.STRIDE])
+    ref = E.direct_path_gated(H, live, nb)[:, ::af8.STRIDE]
+    assert np.allclose(TF.gated8(G["full1"], G["live"]), ref, rtol=0, atol=1e-9 * np.abs(ref).max())
+
+
+def test_fast_series_equals_the_reference() -> None:
+    p = _cap()
+    idx = mtk.MTKIndex(p)
+    s0, s1 = TP.series(p, 0.0, 61.0, idx), TF.series(p, 0.0, 61.0, idx)
+    assert s0["T"] == s1["T"] and s0["w"] == pytest.approx(s1["w"], abs=1e-12)
+    for c in TP.PHYS_CHANNELS:
+        assert np.allclose(s0["S"][c], s1["S"][c], rtol=1e-9, atol=0, equal_nan=True), c
+    room = tfm_model.room_for(p.stem)
+    for name in TP.NEW_MODELS:
+        assert TP.judge(TP.matrix(s1["S"], name), name, room)[1]["p"] == pytest.approx(
+            TP.judge(TP.matrix(s0["S"], name), name, room)[1]["p"], abs=1e-12)

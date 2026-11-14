@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 
 OUT = Path(__file__).resolve().parents[1] / "backend" / "tfm_phys_results.json"
-STAGES = ["total seq13pw", "total seq15pwu", "both physics models, one series", "total base 17", "index",
+STAGES = ["total seq13pw", "total seq15pwu", "both physics models, one series", "total base 17",
+          "total seq13pw, reference arithmetic", "total seq15pwu, reference arithmetic", "index",
           "series seq13pw", "calibrate + forward seq13pw", "series seq15pwu", "calibrate + forward seq15pwu",
           "  seq15pwu series: decode", "  seq15pwu series: steps + swing period", "  seq15pwu series: plf",
           "  seq15pwu series: swing share", "  seq15pwu series: FarSense", "  seq15pwu series: reflection (g15_res, u_g15v)",

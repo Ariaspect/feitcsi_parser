@@ -157,7 +157,9 @@ def _bs_lines(gf: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
 def series(path: str | Path, t0: float, t1: float, index: mtk.MTKIndex | None = None,
            channels: list[str] | None = None, timings: dict[str, float] | None = None) -> dict[str, Any]:
     """{"S": channel -> (61,) raw series, "T": swing period (s), "swing_a", "swing_ab", "w"} of [t0, t1) s from the
-    capture's first frame, for ``channels`` (default: every physics channel). ``timings`` collects seconds per stage."""
+    capture's first frame, for ``channels`` (default: every physics channel). ``timings`` collects seconds per stage.
+    The reference arithmetic; the tab computes it with ``backend.tfm_phys_fast.series`` (same values to rounding,
+    checked on every labelled window by scripts/verify_tfm_phys_fast.py)."""
     want = set(PHYS_CHANNELS if channels is None else channels)
     tm = timings if timings is not None else {}
     clock = [time.perf_counter()]
@@ -272,7 +274,8 @@ def _cached(path: str, mtime: float, window: int) -> dict[str, Any]:
     a = time.perf_counter()
     idx = mtk.MTKIndex(p)
     tm["index"] = time.perf_counter() - a
-    s = series(p, t0, t1, idx, timings=tm)
+    from backend import tfm_phys_fast                 # the same values as series(), faster (board timing)
+    s = tfm_phys_fast.series(p, t0, t1, idx, timings=tm)
     room = room_for(p.stem)
     out: dict[str, Any] = {"window": int(window), "windows": [[float(u), float(v)] for u, v in wins],
                            "window_s": [float(t0), float(t1)], "channels": PHYS_CHANNELS,

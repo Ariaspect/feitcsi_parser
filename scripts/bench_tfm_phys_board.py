@@ -2,8 +2,10 @@
 
 Per capture and repetition: the frame index (MTKIndex), then for each model on its own -- seq13pw, seq15pwu and the
 17-channel base -- the series of exactly the channels it reads plus calibration and the 5-seed forward; and both physics
-models from one series (seq15pwu's channels cover seq13pw's). Stage times of the seq15pwu series are kept too. The
-median over the repetitions is stored per capture, with each model's P (to compare machines).
+models from one series (seq15pwu's channels cover seq13pw's). The physics series is the tab's, backend.tfm_phys_fast
+(since 2026-11-15); the reference arithmetic (tfm_phys.series) is timed too, for the totals only, and its P must equal
+the fast one's. Stage times of the seq15pwu series are kept too. The median over the repetitions is stored per capture,
+with each model's P (to compare machines).
 
 Usage (numpy only; CODE = a directory holding this repo's backend/ and data/):
   python3 bench_tfm_phys_board.py CODE WINDOWS.json REPS OUT.json cap1.bin [cap2.bin ...]
@@ -25,7 +27,7 @@ sys.path.insert(0, sys.argv[1])
 
 import numpy as np  # noqa: E402
 
-from backend import mtk, tfm_model, tfm_phys as TP, tfm_series  # noqa: E402
+from backend import mtk, tfm_model, tfm_phys as TP, tfm_phys_fast as TF, tfm_series  # noqa: E402
 
 W = json.loads(Path(sys.argv[2]).read_text())
 REP = int(sys.argv[3])
@@ -42,10 +44,13 @@ for cap in sys.argv[5:]:
         a = pc(); idx = mtk.MTKIndex(p); t["index"] = pc() - a
         for m in TP.NEW_MODELS:
             tm: dict[str, float] = {}
-            a = pc(); s = TP.series(p, t0, t1, idx, channels=CH[m], timings=tm); t[f"series {m}"] = pc() - a
+            a = pc(); s = TF.series(p, t0, t1, idx, channels=CH[m], timings=tm); t[f"series {m}"] = pc() - a
             a = pc(); _, v = TP.judge(TP.matrix(s["S"], m), m, room); t[f"calibrate + forward {m}"] = pc() - a
             P[m] = v["p"]
             t[f"total {m}"] = t["index"] + t[f"series {m}"] + t[f"calibrate + forward {m}"]
+            a = pc(); r = TP.series(p, t0, t1, idx, channels=CH[m]); pr = TP.judge(TP.matrix(r["S"], m), m, room)[1]["p"]
+            t[f"total {m}, reference arithmetic"] = t["index"] + pc() - a
+            assert abs(pr - v["p"]) < 1e-9, (stem, m, pr, v["p"])
             if m == "seq15pwu":
                 for k, x in tm.items():
                     t[f"  seq15pwu series: {k}"] = x
