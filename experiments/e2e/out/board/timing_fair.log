@@ -1,0 +1,28 @@
+load before: 16.87 16.90 16.95 4/1211 6633
+20261001_151502 env2   | 13F 1.47 s | 15F 1.80 s | e2e (no tf) 3x2x3 1.67 s | e2e all4 3x2x3 2.99 s
+20261002_040002 env2   | 13F 1.88 s | 15F 2.22 s | e2e (no tf) 3x2x3 1.63 s | e2e all4 3x2x3 2.93 s
+20261009_112535 env2   | 13F 1.89 s | 15F 2.19 s | e2e (no tf) 3x2x3 1.63 s | e2e all4 3x2x3 2.93 s
+20261013_120426 env1   | 13F 1.83 s | 15F 2.17 s | e2e (no tf) 3x2x3 1.61 s | e2e all4 3x2x3 2.93 s
+20261013_164146 env1   | 13F 1.82 s | 15F 2.18 s | e2e (no tf) 3x2x3 1.60 s | e2e all4 3x2x3 2.91 s
+20261021_142736 env3   | 13F 1.49 s | 15F 1.81 s | e2e (no tf) 3x2x3 1.63 s | e2e all4 3x2x3 2.96 s
+20261021_164727 env3   | 13F 1.89 s | 15F 2.24 s | e2e (no tf) 3x2x3 1.63 s | e2e all4 3x2x3 2.95 s
+20261023_111259 env3-1 | 13F 1.53 s | 15F 1.87 s | e2e (no tf) 3x2x3 1.61 s | e2e all4 3x2x3 2.90 s
+median over captures: {
+ "13F": 1.8245316999964416,
+ "15F": 2.1709313399915118,
+ "e2e (no tf) 3x2x3": 1.6288986500003375,
+ "e2e all4 3x2x3": 2.931063760013785,
+ "13F | index": 0.09237396999378689,
+ "13F | input": 1.7299731700040866,
+ "13F | calibrate + forwards": 0.007884299993747845,
+ "15F | index": 0.09273867000592873,
+ "15F | input": 2.0738461400032975,
+ "15F | calibrate + forwards": 0.007735749997664243,
+ "e2e (no tf) 3x2x3 | index": 0.09271769999759272,
+ "e2e (no tf) 3x2x3 | input": 0.8300373399979435,
+ "e2e (no tf) 3x2x3 | calibrate + forwards": 0.702377109992085,
+ "e2e all4 3x2x3 | index": 0.09196735001751222,
+ "e2e all4 3x2x3 | input": 0.8272877800045535,
+ "e2e all4 3x2x3 | calibrate + forwards": 2.0061997000011615
+}
+load after: 17.97 17.44 17.15 1/1211 8562
