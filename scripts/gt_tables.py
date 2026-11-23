@@ -65,14 +65,16 @@ LATER = {
   "static fan + still": [(R("1102", "20:30", "20:32"), ""), (R("1102", "20:47", "20:49"), ""),
                          (R("1102", "20:58", "21:03"), "")],
   "rot fan + still": [(R("1102", "21:09", "21:14"), ""), (R("1102", "21:16", "21:20"), ""),
-                      (R("1104", "19:43", "19:47"), "prone")],
+                      (R("1104", "19:43", "19:47"), "prone"),
+                      (R("1105", "21:41", "21:45"), ""), (R("1105", "21:47", "21:52"), "")],
   "rot fan + small": [(R("1104", "18:21", "18:26"), ""), (R("1104", "18:29", "18:34"), ""),
                       (R("1104", "19:52", "19:56"), "typing"),
                       (R("1105", "19:51", "19:55"), ""), (R("1105", "20:06", "20:10"), "")],
  },
 }
-# The user's table (2026-11-09) dates the 1102 static-fan / rot-fan + still sessions 11/3; every capture at those
-# times is stamped 20261102 and none exists for 11/03, so they stay under 1102.
+# The user's table (2026-11-09, corrected the same day) dates the 1102 static-fan / rot-fan + still sessions 11/3; every
+# capture at those times is stamped 20261102 (file name and capture_start_utc_epoch) and none exists for 11/03, so they
+# stay under 1102. The corrected table adds rot fan + still on 11/05 21:41-21:45 and 21:47-21:52.
 
 _cache = {}
 def day_stems(d):

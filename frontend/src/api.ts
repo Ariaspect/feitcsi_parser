@@ -1960,6 +1960,97 @@ export async function fetchTfm(path: string, window: number, signal?: AbortSigna
   return res.json();
 }
 
+/** One model's verdict on a window of the Physics tab. */
+export interface PhysVerdict {
+  p: number;
+  label: number;
+  p_seeds: (number | null)[];
+  trained_on: string[];
+}
+
+/** Accuracy (%) of one set, overall and by KPI; ``ba`` (balanced accuracy) on the pooled row only. */
+export interface PhysAcc {
+  n: number;
+  all: number | null;
+  kpi1: number | null;
+  kpi2: number | null;
+  ba?: number | null;
+}
+
+/** One stage of the board / lg timing: median seconds per one-minute window. */
+export interface PhysTimingRow {
+  stem: string;
+  room: string | null;
+  w: number | null;
+  p: Record<string, number>;
+  t: Record<string, number>;
+}
+
+export interface PhysTiming {
+  machine: string;
+  note: string;
+  reps: number;
+  stages: string[];
+  rows: PhysTimingRow[];
+  median: Record<string, number>;
+  max: Record<string, number>;
+  p_match?: string | null;
+}
+
+/** Display-only results of the Physics tab (backend/tfm_phys_results.json). */
+export interface PhysResults {
+  generated?: string;
+  verification?: {
+    windows: number;
+    computed: number;
+    n_errors: number;
+    wall_s: number;
+    tab_room_lookup_ok: number;
+    references_n: number;
+    sets_n: Record<string, number>;
+    channels: Record<string, { max_rel_diff: Record<string, number>; nan_mismatch: Record<string, number> }>;
+    probabilities: Record<string, { n: number; max_abs_diff: number; verdict_flips: number }>;
+    accuracy: Record<string, Record<string, Record<string, PhysAcc>>>;
+    strata_loeo: Record<string, Record<string, number | null>>;
+    conditions: { set: string; room: string; cond: string; n: number; y: number; obj: number; [k: string]: string | number }[];
+  };
+  board?: PhysTiming;
+  lg?: PhysTiming;
+}
+
+/** /api/tfm-phys: the Physics tab -- seq13pw / seq15pwu (and the 17-channel base, same calibration) on one window
+ *  (backend/tfm_phys.py). */
+export interface TfmPhys {
+  file: string;
+  window: number;
+  windows: [number, number][];
+  window_s: [number, number];
+  channels: string[];
+  models: Record<string, { variant: string; channels: string[]; log_channels: string[]; calibrated_channels: string[] }>;
+  raw: (number | null)[][];
+  calibrated: (number | null)[][] | null;
+  swing_period_s: number | null;
+  swing_a: number | null;
+  swing_ab: number | null;
+  w: number | null;
+  room: RoomFold | null;
+  reference_minute: boolean;
+  verdicts: Record<string, PhysVerdict>;
+  threshold: number;
+  timings: Record<string, number | null>;
+  results: PhysResults;
+  truth: ModelTruth;
+}
+
+export async function fetchTfmPhys(path: string, window: number, signal?: AbortSignal): Promise<TfmPhys> {
+  const res = await fetch(`/api/tfm-phys?path=${encodeURIComponent(path)}&window=${window}`, { signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `physics: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** One row of the threshold-per-rate measurement (backend/realtime.py RATE_TABLE, offline 2026-11-02). */
 export interface RealtimeRateRow {
   rate_hz: number;
@@ -2010,6 +2101,37 @@ export interface RealtimeMetric {
   does_not: [string, string][];
 }
 
+/** One 5-s judgment of the last minute (backend/realtime_presence.py); P per model key, absent before a reference. */
+export interface PresenceRow {
+  t: number;
+  first_stamp: number;
+  frames: number;
+  span_s: number;
+  compute_s: number;
+  install_minute?: number;
+  reference_saved?: boolean;
+  [model: string]: number | boolean | undefined;
+}
+
+/** The 13F / 15F judgments every 5 s on the Realtime stream, and their install reference. */
+export interface RealtimePresence {
+  models: { key: string; label: string }[];
+  fold: string;
+  trained_on: string[];
+  threshold: number;
+  hop_s: number;
+  window_s: number;
+  install_minutes: number;
+  reference: { minutes: number; first_wall: number[]; saved: number; path: string } | null;
+  installing: boolean;
+  install_done: number;
+  detail: string;
+  errors: number;
+  ring_mb: number;
+  compute_s: { p50: number; max: number; n: number } | null;
+  rows: PresenceRow[];
+}
+
 /** GET /api/realtime/status: the real-time movement channel (backend/realtime.py). Times are epoch seconds. */
 export interface RealtimeStatus {
   enabled: boolean;
@@ -2037,6 +2159,7 @@ export interface RealtimeStatus {
   rate_t: number[];
   rate: number[];
   alarms: { t: number; x: number }[];
+  presence?: RealtimePresence;
   log: string[];
   proxied_via?: string;
 }
@@ -2047,8 +2170,23 @@ async function realtimeCall(url: string, what: string, init?: RequestInit): Prom
   return (await res.json()) as RealtimeStatus;
 }
 
-export function fetchRealtimeStatus(since: number, windowS: number, signal?: AbortSignal): Promise<RealtimeStatus> {
-  return realtimeCall(`/api/realtime/status?since=${since}&window_s=${windowS}`, "realtime status", { signal });
+export function fetchRealtimeStatus(
+  since: number,
+  windowS: number,
+  signal?: AbortSignal,
+  psince = 0,
+): Promise<RealtimeStatus> {
+  return realtimeCall(`/api/realtime/status?since=${since}&window_s=${windowS}&psince=${psince}`, "realtime status", {
+    signal,
+  });
+}
+
+export function installRealtimeReference(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/install", "realtime install", { method: "POST" });
+}
+
+export function cancelRealtimeInstall(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/install/cancel", "realtime install cancel", { method: "POST" });
 }
 
 export function startRealtime(): Promise<RealtimeStatus> {
