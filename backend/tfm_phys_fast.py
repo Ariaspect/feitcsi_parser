@@ -196,6 +196,13 @@ def decode2(path: Path, index: mtk.MTKIndex, ids: np.ndarray) -> np.ndarray:
     width = index.num_subcarriers
     if not (np.asarray(index._bins)[ids] == width).all():
         return mtk.decode_complex(path, index, ids)
+    return fill_nulls2(decode_raw2(path, index, ids))
+
+
+def decode_raw2(path: Path, index: mtk.MTKIndex, ids: np.ndarray) -> np.ndarray:
+    """``decode2`` before the null fill: (frames, 2, width), a missing slot all NaN. Frame by frame, so a stream can
+    decode each frame once and fill the nulls per window (``fill_nulls2``), where the structural test belongs."""
+    width = index.num_subcarriers
     perm = np.fft.fftshift(np.arange(width))
     cols = (2 * perm[:, None] + np.arange(2)[None, :]).ravel()
     mm = np.memmap(path, dtype="<u1", mode="r")
@@ -208,10 +215,24 @@ def decode2(path: Path, index: mtk.MTKIndex, ids: np.ndarray) -> np.ndarray:
         out[~present, slot] = np.nan
         if not rows.size:
             continue
-        z = np.empty((rows.size, width), np.complex128)
+        z = out[rows, slot]
         for off, part in ((r_off, z.real), (i_off, z.imag)):
             raw = np.asarray(mm[off[rows, None] + cols[None, :]]).view("<u2")
             part[...] = (raw << 2).view(np.int16) >> 2
+        out[rows, slot] = z
+    del mm
+    return out
+
+
+def fill_nulls2(out: np.ndarray) -> np.ndarray:
+    """``decode2``'s null fill, in place on ``decode_raw2``'s output: a bin zero in every present frame of a slot is
+    structural, interpolated across (a run longer than ``mtk.MAX_NULL_RUN`` or at an edge: NaN)."""
+    width = out.shape[2]
+    for slot in range(2):
+        rows = np.flatnonzero(~np.isnan(out[:, slot, 0].real))
+        if not rows.size:
+            continue
+        z = out[rows, slot]
         structural = np.all(z == 0, axis=0)
         for start, stop in mtk._null_runs(structural):
             left, right = start - 1, stop
@@ -223,7 +244,6 @@ def decode2(path: Path, index: mtk.MTKIndex, ids: np.ndarray) -> np.ndarray:
                 mu = (k - left) / span
                 z[:, k] = z[:, left] * (1 - mu) + z[:, right] * mu
         out[rows, slot] = z
-    del mm
     return out
 
 
@@ -237,14 +257,18 @@ def load_grid(path: Path, index: mtk.MTKIndex, t0: float, t1: float) -> dict[str
     ids = np.flatnonzero(np.asarray(sel["mask"], bool) & (tr >= t0) & (tr < t1))
     if ids.size < 2:
         raise ValueError(f"fewer than 2 frames in [{t0:g}, {t1:g}) s once the set was made uniform")
-    D = decode2(path, index, ids)
+    return grid_from_frames(decode2(path, index, ids), t[ids])
+
+
+def grid_from_frames(D: np.ndarray, t: np.ndarray) -> dict[str, Any]:
+    """``load_grid`` from the window's uniform frames already decoded (nulls filled) and their times."""
     fin = np.isfinite(D)
     live = fin.all(axis=1).mean(axis=0) > af8.LIVE_FRACTION
     rows = np.flatnonzero(fin[:, :, live].all(axis=(1, 2)) & (D[:, 0, :] != 0)[:, live].all(axis=1))
     p8 = np.flatnonzero(live)[::af8.STRIDE]
     full1 = D[rows, 1, :]
     full1[:, ~live] = 0
-    return {"full1": full1, "h0": D[rows[:, None], 0, p8[None, :]], "h1": full1[:, p8], "tt": t[ids][rows],
+    return {"full1": full1, "h0": D[rows[:, None], 0, p8[None, :]], "h1": full1[:, p8], "tt": t[rows],
             "live": live, "n_bins": D.shape[2]}
 
 
@@ -507,21 +531,32 @@ def series(path: str | Path, t0: float, t1: float, index: mtk.MTKIndex | None = 
            channels: list[str] | None = None, timings: dict[str, float] | None = None,
            gram: str = "stretch") -> dict[str, Any]:
     """``tfm_phys.series``, faster. Same return value and stage names."""
+    tm = timings if timings is not None else {}
+    clock = time.perf_counter()
+    path = Path(path)
+    idx = index if index is not None else mtk.MTKIndex(path)
+    G = load_grid(path, idx, t0, t1)
+    out = series_grid(G, channels, tm, gram, clock)
+    if out is None:                                    # never seen (kept frames are finite); keep the old path
+        from backend import tfm_phys
+        return tfm_phys.series(path, t0, t1, idx, channels, timings)
+    return out
+
+
+def series_grid(G: dict[str, Any], channels: list[str] | None = None, timings: dict[str, float] | None = None,
+                gram: str = "stretch", clock: float | None = None) -> dict[str, Any] | None:
+    """``series`` from ``load_grid``'s (or ``grid_from_frames``') grid; None when the resampled ratio is not finite."""
     want = set(PHYS_CHANNELS if channels is None else channels)
     tm = timings if timings is not None else {}
-    clock = [time.perf_counter()]
+    clock = [time.perf_counter() if clock is None else clock]
 
     def lap(name: str) -> None:
         now = time.perf_counter(); tm[name] = tm.get(name, 0.0) + now - clock[0]; clock[0] = now
 
-    path = Path(path)
-    idx = index if index is not None else mtk.MTKIndex(path)
-    G = load_grid(path, idx, t0, t1)
     tt = G["tt"]
     g, fab, fs = af8.resample(G["h1"] / G["h0"], tt)
-    if not np.isfinite(g).all():                       # never seen (kept frames are finite); keep the old path
-        from backend import tfm_phys
-        return tfm_phys.series(path, t0, t1, idx, channels, timings)
+    if not np.isfinite(g).all():
+        return None
     lap("decode")
     A = np.abs(g)
     S: dict[str, np.ndarray] = {}
