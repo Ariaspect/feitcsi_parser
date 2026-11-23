@@ -114,7 +114,8 @@ POLL_S = 0.2
 SEGMENT_BYTES = 16 * 1024 * 1024    # ~90 s of stream at ~180 kB/s
 # One ssh stream lasts this long, then the next one starts (a gap of a few seconds an hour). Odd on purpose: no
 # capture asks for it (the capture tab caps at 3300 s), so a board process with this argument is one of ours.
-STREAM_SECONDS = 3601
+# REALTIME_STREAM_SECONDS lengthens it for a recording that must not have that gap (keep it odd and above 3300).
+STREAM_SECONDS = int(os.environ.get("REALTIME_STREAM_SECONDS", "3601"))
 BOARD_SCRIPT = "/var/csi/csi_stream.sh"
 RT_DIR = Path(os.environ.get("REALTIME_DIR", "/tmp/csi-realtime"))
 RESTART_BACKOFF_S = 10.0
