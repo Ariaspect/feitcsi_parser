@@ -47,7 +47,7 @@ from typing import Any
 
 import numpy as np
 
-from . import capture_control, mtk
+from . import capture_control, mtk, realtime_presence
 
 LAG_S = 0.5
 WINDOW_S = 0.5
@@ -234,6 +234,7 @@ class FrameReader:
         self.mac = mac
         self._mac_fixed = mac is not None
         self.records_seen = 0
+        self.last_ids = np.zeros(0, dtype=np.int64)   # every frame the last read() took, any MIMO mode / AP
 
     def skip_to_tail(self, seconds: float) -> None:
         """Start reading near the end of what is already in the file (attaching to a capture mid-way)."""
@@ -269,6 +270,7 @@ class FrameReader:
             return empty
         ids = np.arange(self.done, n)
         self.done = n
+        self.last_ids = ids
         if not self._mac_fixed:
             counts = collections.Counter(idx.source_macs)
             self.mac = counts.most_common(1)[0][0] if counts else None
@@ -473,6 +475,7 @@ class RealtimeMonitor:
         self._seg_i = 0
         self._next_try = 0.0
         self._free_since: float | None = 0.0   # since when no capture has held LOCAL_LOCK (0: not since we started)
+        self.presence = realtime_presence.PresenceJudge()   # 13F / 15F every 5 s on the same frames
 
     # ------------------------------------------------------------------ public
     def start(self) -> None:
@@ -486,6 +489,7 @@ class RealtimeMonitor:
             self._next_try = 0.0
             self.state, self.detail = "starting", ""
             self._note("monitor started")
+            self.presence.start()
             self._thread = threading.Thread(target=self._run, name="realtime-monitor", daemon=True)
             self._thread.start()
 
@@ -496,6 +500,7 @@ class RealtimeMonitor:
             self._stop.set()
         if thread is not None:
             thread.join(timeout=20)
+        self.presence.stop()
 
     def set_threshold(self, value: float) -> None:
         if not (math.isfinite(value) and 0.5 <= value <= 100):
@@ -504,7 +509,8 @@ class RealtimeMonitor:
             self.threshold = float(value)
             self._note(f"threshold set to {value:g}")
 
-    def status(self, since: float = 0.0, window_s: float = 900.0) -> dict[str, Any]:
+    def status(self, since: float = 0.0, window_s: float = 900.0, psince: float = 0.0) -> dict[str, Any]:
+        presence = self.presence.status(psince, window_s)
         with self._lock:
             now = time.time()
             lo = max(float(since), now - float(window_s))
@@ -536,6 +542,7 @@ class RealtimeMonitor:
                 "rate": [p[1] for p in rates],
                 "alarms": [{"t": a[0], "x": round(a[1], 3)} for a in self.alarms if a[0] > now - float(window_s)],
                 "timing": self._timing(now),
+                "presence": presence,
                 "log": list(self.log)[-30:],
             }
 
@@ -794,6 +801,12 @@ class RealtimeMonitor:
             if self._offset is None or lag < self._offset or lag > self._offset + 5.0:
                 self._offset = lag
         off = self._offset if self._offset is not None else now - (t[-1] if t.size else 0.0)
+        if reader.index is not None:
+            try:
+                self.presence.feed(reader.path, reader.index, reader.last_ids, off)
+            except Exception as exc:  # the movement channel goes on whatever the presence ring does
+                with self._lock:
+                    self._note(f"presence ring: {type(exc).__name__}: {exc}")
         with self._lock:
             self.frames += int(t.size)
             # frames the signal used, per wall-clock second; a second closes when a later one starts

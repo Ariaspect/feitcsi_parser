@@ -2460,12 +2460,34 @@ def _stop_realtime() -> None:
 
 
 @app.get("/api/realtime/status")
-def realtime_status(since: float = 0.0, window_s: float = Query(900.0, ge=10.0, le=realtime.KEEP_S)) -> dict:
+def realtime_status(since: float = 0.0, window_s: float = Query(900.0, ge=10.0, le=realtime.KEEP_S),
+                    psince: float = 0.0) -> dict:
     """The real-time movement channel: its state, the self ratio every 0.25 s since ``since`` (epoch s; at most the
-    last ``window_s``), frames per second, the threshold and the alarms. See ``backend/realtime.py``."""
+    last ``window_s``), frames per second, the threshold and the alarms; and the 13F / 15F judgments every 5 s since
+    ``psince`` (``presence``). See ``backend/realtime.py``, ``backend/realtime_presence.py``."""
     if capture_control.PROXY_URL:
-        return _capture_forward("GET", f"/api/realtime/status?since={since}&window_s={window_s}")
-    return realtime.monitor().status(since=since, window_s=window_s)
+        return _capture_forward("GET", f"/api/realtime/status?since={since}&window_s={window_s}&psince={psince}")
+    return realtime.monitor().status(since=since, window_s=window_s, psince=psince)
+
+
+@app.post("/api/realtime/install")
+def realtime_install() -> dict:
+    """Take a new install reference for the 13F / 15F judgments from the next five complete minutes (room empty)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/install")
+    m = realtime.monitor()
+    m.presence.start_install()
+    return m.status(window_s=10.0)
+
+
+@app.post("/api/realtime/install/cancel")
+def realtime_install_cancel() -> dict:
+    """Stop collecting a new install reference (the one in force, if any, stays)."""
+    if capture_control.PROXY_URL:
+        return _capture_forward("POST", "/api/realtime/install/cancel")
+    m = realtime.monitor()
+    m.presence.cancel_install()
+    return m.status(window_s=10.0)
 
 
 @app.post("/api/realtime/start")

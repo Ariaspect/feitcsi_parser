@@ -2101,6 +2101,37 @@ export interface RealtimeMetric {
   does_not: [string, string][];
 }
 
+/** One 5-s judgment of the last minute (backend/realtime_presence.py); P per model key, absent before a reference. */
+export interface PresenceRow {
+  t: number;
+  first_stamp: number;
+  frames: number;
+  span_s: number;
+  compute_s: number;
+  install_minute?: number;
+  reference_saved?: boolean;
+  [model: string]: number | boolean | undefined;
+}
+
+/** The 13F / 15F judgments every 5 s on the Realtime stream, and their install reference. */
+export interface RealtimePresence {
+  models: { key: string; label: string }[];
+  fold: string;
+  trained_on: string[];
+  threshold: number;
+  hop_s: number;
+  window_s: number;
+  install_minutes: number;
+  reference: { minutes: number; first_wall: number[]; saved: number; path: string } | null;
+  installing: boolean;
+  install_done: number;
+  detail: string;
+  errors: number;
+  ring_mb: number;
+  compute_s: { p50: number; max: number; n: number } | null;
+  rows: PresenceRow[];
+}
+
 /** GET /api/realtime/status: the real-time movement channel (backend/realtime.py). Times are epoch seconds. */
 export interface RealtimeStatus {
   enabled: boolean;
@@ -2128,6 +2159,7 @@ export interface RealtimeStatus {
   rate_t: number[];
   rate: number[];
   alarms: { t: number; x: number }[];
+  presence?: RealtimePresence;
   log: string[];
   proxied_via?: string;
 }
@@ -2138,8 +2170,23 @@ async function realtimeCall(url: string, what: string, init?: RequestInit): Prom
   return (await res.json()) as RealtimeStatus;
 }
 
-export function fetchRealtimeStatus(since: number, windowS: number, signal?: AbortSignal): Promise<RealtimeStatus> {
-  return realtimeCall(`/api/realtime/status?since=${since}&window_s=${windowS}`, "realtime status", { signal });
+export function fetchRealtimeStatus(
+  since: number,
+  windowS: number,
+  signal?: AbortSignal,
+  psince = 0,
+): Promise<RealtimeStatus> {
+  return realtimeCall(`/api/realtime/status?since=${since}&window_s=${windowS}&psince=${psince}`, "realtime status", {
+    signal,
+  });
+}
+
+export function installRealtimeReference(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/install", "realtime install", { method: "POST" });
+}
+
+export function cancelRealtimeInstall(): Promise<RealtimeStatus> {
+  return realtimeCall("/api/realtime/install/cancel", "realtime install cancel", { method: "POST" });
 }
 
 export function startRealtime(): Promise<RealtimeStatus> {

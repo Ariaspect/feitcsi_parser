@@ -3,10 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  cancelRealtimeInstall,
   fetchRealtimeStatus,
+  installRealtimeReference,
   setRealtimeThreshold,
   startRealtime,
   stopRealtime,
+  type PresenceRow,
+  type RealtimePresence,
   type RealtimeStat,
   type RealtimeStatus,
   type RealtimeTiming,
@@ -25,9 +29,10 @@ import {
   type RtSeries,
 } from "./rtseries";
 
-// The Realtime tab (backend/realtime.py): a movement value every 0.25 s from an always-on CSI stream, beside the
-// one-minute presence verdict. It runs on the server that reaches the board, whether or not this tab is open; the
-// tab polls what is new once a second and keeps the last hour.
+// The Realtime tab (backend/realtime.py): a movement value every 0.25 s from an always-on CSI stream, and on the same
+// frames the 13F / 15F presence verdict every 5 s on the last minute (backend/realtime_presence.py). It runs on the
+// server that reaches the board, whether or not this tab is open; the tab polls what is new once a second and keeps
+// the last hour.
 
 const POLL_MS = 1000;
 const KEEP_S = 3600;
@@ -39,6 +44,7 @@ const WINDOWS: [number, string][] = [
 ];
 const LINE = "#0f766e";
 const ALARM = "#d62728";
+const MODEL_COLORS: Record<string, string> = { seq13pw: "#7c3aed", seq15pwu: "#ea580c" };
 
 const STATE: Record<RealtimeStatus["state"], { label: string; color: string }> = {
   streaming: { label: "streaming", color: "#15803d" },
@@ -60,8 +66,11 @@ export function Realtime({ dark }: { dark: boolean }) {
   const [win, setWin] = useState(300);
   const [draft, setDraft] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+  const [judged, setJudged] = useState<PresenceRow[]>([]);
   const histRef = useRef(hist);
   histRef.current = hist;
+  const judgedRef = useRef(judged);
+  judgedRef.current = judged;
 
   const holder = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(880);
@@ -79,10 +88,13 @@ export function Realtime({ dark }: { dark: boolean }) {
     const controller = new AbortController();
     const poll = async () => {
       try {
-        const s = await fetchRealtimeStatus(sinceOf(histRef.current), KEEP_S, controller.signal);
+        const j = judgedRef.current;
+        const s = await fetchRealtimeStatus(sinceOf(histRef.current), KEEP_S, controller.signal,
+                                            j.length ? j[j.length - 1].t : 0);
         if (!alive) return;
         setStatus(s);
         setHist((prev) => mergeRealtime(prev, s, s.now, KEEP_S));
+        setJudged((prev) => mergeJudged(prev, s.presence?.rows ?? [], s.now, KEEP_S));
         setError(null);
       } catch (err) {
         if (!alive || controller.signal.aborted) return;
@@ -140,6 +152,11 @@ export function Realtime({ dark }: { dark: boolean }) {
 
   return (
     <div className="space-y-4" ref={holder}>
+      {status?.presence && (
+        <Presence presence={status.presence} rows={judged} domain={domain} width={width} dark={dark}
+                  acting={acting} streaming={status.state === "streaming" || status.state === "capture"}
+                  onInstall={() => act(installRealtimeReference)} onCancel={() => act(cancelRealtimeInstall)} />
+      )}
       <section className="space-y-3 rounded-md border p-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">Real-time movement</span>
@@ -371,6 +388,123 @@ function Timing({ timing }: { timing: RealtimeTiming }) {
         frames, a per-value time its window medians over its values. Latency counts the stream's transfer, the 0.2 s read
         interval and the computation together.
       </p>
+    </section>
+  );
+}
+
+/** Append judgments newer than what is held; drop those older than `keepS` before `now`. */
+function mergeJudged(prev: PresenceRow[], rows: PresenceRow[], now: number, keepS: number): PresenceRow[] {
+  const lt = prev.length ? prev[prev.length - 1].t : -Infinity;
+  const out = prev.concat(rows.filter((r) => r.t > lt));
+  const a = firstAtOrAfter(out.map((r) => r.t), now - keepS);
+  return a ? out.slice(a) : out;
+}
+
+function Presence({ presence, rows, domain, width, dark, acting, streaming, onInstall, onCancel }: {
+  presence: RealtimePresence;
+  rows: PresenceRow[];
+  domain: [number, number];
+  width: number;
+  dark: boolean;
+  acting: boolean;
+  streaming: boolean;
+  onInstall: () => void;
+  onCancel: () => void;
+}) {
+  const shown = rows.filter((r) => r.t >= domain[0]);
+  // a line breaks where judgments stop (stream gap, capture hand-off, no reference)
+  const times: number[] = [];
+  const vals: Record<string, (number | null)[]> = Object.fromEntries(presence.models.map((m) => [m.key, []]));
+  shown.forEach((r, i) => {
+    if (i && r.t - shown[i - 1].t > 2.5 * presence.hop_s) {
+      times.push((r.t + shown[i - 1].t) / 2);
+      presence.models.forEach((m) => vals[m.key].push(null));
+    }
+    times.push(r.t);
+    presence.models.forEach((m) => vals[m.key].push(typeof r[m.key] === "number" ? (r[m.key] as number) : null));
+  });
+  const last = [...rows].reverse().find((r) => presence.models.some((m) => typeof r[m.key] === "number"));
+  const ref = presence.reference;
+  const installs = shown.filter((r) => r.install_minute != null);
+  return (
+    <section className="space-y-3 rounded-md border p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold">Presence every {presence.hop_s} s</span>
+        <span className="text-[11px] text-muted-foreground">
+          13F / 15F on the last {presence.window_s - 1} s · trained on {presence.trained_on.join(" + ")} · calibrated on
+          this room&apos;s {presence.install_minutes} install empty minutes · occupied when the 5-seed mean P &gt;{" "}
+          {presence.threshold}
+        </span>
+        <span className="ml-auto flex gap-1">
+          {presence.installing ? (
+            <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={acting} onClick={onCancel}>
+              Cancel install
+            </Button>
+          ) : (
+            <Button variant={ref ? "outline" : "default"} size="sm" className="h-7 px-2 text-xs"
+                    disabled={acting || !streaming}
+                    title={`Take the next ${presence.install_minutes} complete minutes as the empty-room reference. The room must stay empty.`}
+                    onClick={onInstall}>
+              {ref ? "Re-install reference" : "Install reference"}
+            </Button>
+          )}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs tabular-nums">
+        {presence.models.map((m) => {
+          const p = last && typeof last[m.key] === "number" ? (last[m.key] as number) : null;
+          const occ = p != null && p > presence.threshold;
+          return (
+            <span key={m.key} className="flex items-center gap-1.5">
+              <span style={{ color: MODEL_COLORS[m.key] }}>●</span>{m.label}
+              <span className={"rounded px-1.5 py-0.5 text-sm font-semibold text-white " +
+                               (p == null ? "bg-gray-400" : occ ? "bg-red-600" : "bg-emerald-600")}>
+                {p == null ? "—" : occ ? "occupied" : "empty"}
+              </span>
+              <span className="text-muted-foreground">P {p == null ? "—" : p.toFixed(3)}</span>
+            </span>
+          );
+        })}
+        <span className="text-muted-foreground">
+          {last ? `window ending ${formatClock(last.t, 60)} · ${last.frames.toLocaleString()} frames` : presence.detail}
+        </span>
+        {presence.compute_s && (
+          <span className="text-muted-foreground">
+            compute p50 {presence.compute_s.p50.toFixed(2)} s · max {presence.compute_s.max.toFixed(2)} s
+          </span>
+        )}
+      </div>
+      {presence.installing ? (
+        <div className="text-[11px] text-amber-600">
+          Installing the reference: {presence.install_done} of {presence.install_minutes} minutes taken — keep the room
+          empty until it finishes (about {presence.install_minutes + 1} min from the press).
+        </div>
+      ) : !ref ? (
+        <div className="text-[11px] text-amber-600">
+          No reference yet: with the room empty, press Install reference. Until then nothing is judged.
+        </div>
+      ) : (
+        <div className="text-[11px] text-muted-foreground">
+          Reference: {ref.minutes} minutes from {formatClock(ref.first_wall[0], 60)}, saved{" "}
+          {new Date(ref.saved * 1000).toLocaleString()} ({ref.path}).
+        </div>
+      )}
+      <Chart
+        width={width - 26} dark={dark} height={160} times={times} domain={domain} xMode="clock"
+        yDomain={[0, 1]} yLabel="P(occupied), last minute"
+        series={presence.models.map((m) => ({ values: vals[m.key], color: MODEL_COLORS[m.key], width: 1.4, label: m.label }))}
+        guides={[{ value: presence.threshold, color: "#9aa5b1", label: "0.5" }]}
+        bands={installs.map((r) => ({ t0: r.t - presence.window_s, t1: r.t }))} bandColor="#b45309"
+      />
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        {presence.models.map((m) => (
+          <span key={m.key}><span style={{ color: MODEL_COLORS[m.key] }}>━</span> {m.label} P, a point per window end</span>
+        ))}
+        <span><span style={{ color: "#b45309", opacity: 0.5 }}>■</span> install minutes</span>
+        <span>a person shows within about 5 s of arriving; &quot;empty&quot; needs a whole empty minute</span>
+        {presence.errors > 0 && <span className="text-destructive">{presence.errors} errors · {presence.detail}</span>}
+      </div>
     </section>
   );
 }
