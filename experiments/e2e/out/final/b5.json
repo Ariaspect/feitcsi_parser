@@ -1,0 +1,160 @@
+{
+ "nested_single": {
+  "scnC": {
+   "acc": 86.7,
+   "empty": 75.0,
+   "occupied": 100.0
+  },
+  "env3": {
+   "acc": 93.3,
+   "empty": 87.5,
+   "occupied": 100.0
+  }
+ },
+ "nested_top3": {
+  "scnC": {
+   "acc": 86.7,
+   "empty": 75.0,
+   "occupied": 100.0
+  },
+  "env3": {
+   "acc": 86.7,
+   "empty": 75.0,
+   "occupied": 100.0
+  }
+ },
+ "per_config": {
+  "cnn1d.B.st8.lfhf": {
+   "scnC": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 73.3,
+    "empty": 50.0,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4.att": {
+   "scnC": {
+    "acc": 100.0,
+    "empty": 100.0,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 86.7,
+    "empty": 75.0,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4.st16": {
+   "scnC": {
+    "acc": 100.0,
+    "empty": 100.0,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4.st16.att": {
+   "scnC": {
+    "acc": 100.0,
+    "empty": 100.0,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4.st16.e80": {
+   "scnC": {
+    "acc": 100.0,
+    "empty": 100.0,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4c": {
+   "scnC": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4c.st16": {
+   "scnC": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.all4c.st16.att": {
+   "scnC": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   }
+  },
+  "sbo.B.lfhf": {
+   "scnC": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   }
+  },
+  "scnet.B.st16.all4c": {
+   "scnC": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   }
+  },
+  "scnet.B.st16.all4c.att": {
+   "scnC": {
+    "acc": 93.3,
+    "empty": 87.5,
+    "occupied": 100.0
+   },
+   "env3": {
+    "acc": 80.0,
+    "empty": 62.5,
+    "occupied": 100.0
+   }
+  }
+ }
+}
