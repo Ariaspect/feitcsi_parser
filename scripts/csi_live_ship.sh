@@ -51,9 +51,25 @@ ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p '$(dirname "$REMOTE_PATH")'" 2>>"$LOG" 
     || { log "FATAL cannot create remote dir"; exit 1; }
 
 backoff=1
+misses=0
 while :; do
+    # A failed ssh means "size unknown", not 0. Reading it as 0 re-sent the whole
+    # file onto a complete copy when the link flapped just after a capture ended:
+    # 20261102_200614 and _200751 sat in live/ at exactly twice their size.
     off=$(remote_size)
-    case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    case "$off" in
+        ''|*[!0-9]*)
+            misses=$((misses + 1))
+            if ! guard_alive && [ "$misses" -ge "${MAX_MISSES:-3}" ]; then
+                log "FATAL remote size unknown $misses times after the capture ended -- leaving it to the batch upload"
+                exit 1
+            fi
+            log "remote size unknown (link down?), retrying in ${backoff}s"
+            sleep "$backoff"
+            backoff=$(( backoff < 8 ? backoff * 2 : 8 ))
+            continue ;;
+    esac
+    misses=0
 
     lsz=$(local_size)
     if [ "$off" -gt "$lsz" ]; then
