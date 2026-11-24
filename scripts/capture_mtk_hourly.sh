@@ -983,6 +983,13 @@ post_upload() {
                 [ "$f" = "$OUT" ] && [ "$promoted" = 1 ] && continue
                 if scp -o BatchMode=yes -o LogLevel=ERROR -q "$f" "$REMOTE:$dest/" 2>>"$LOG"; then
                     plog "UPLOAD $(basename "$f") -> $REMOTE:$dest/"
+                    # The capture is safely in $dest now, so a live copy left
+                    # behind (short, or doubled by a dropped link) is only junk
+                    # that the web listing shows as a second capture.
+                    if [ "$f" = "$OUT" ] && [ "$LIVE" = "1" ]; then
+                        ssh "${SSH_OPTS[@]}" "$REMOTE" "rm -f '$LIVE_PATH'" 2>>"$LOG" \
+                            && plog "LIVE  removed the unpromoted live copy $LIVE_PATH"
+                    fi
                 else
                     # Left on disk deliberately. Retention prunes by age, so a
                     # failed upload survives days of retries rather than being
