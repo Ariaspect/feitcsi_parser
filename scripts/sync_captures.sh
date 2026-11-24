@@ -42,6 +42,8 @@ done
 if [ "$check" = 0 ]; then
     exec 8>"${POST_LOCK:-/tmp/mtk-post.lock}"
     flock -w 900 8 || echo "background uploads still running after 900 s, syncing anyway" >&2
+    # Only wait for them; holding the lock through a long sync blocks the next capture's upload.
+    exec 8>&-
 fi
 
 # Local stems of the last DAYS days: the flat layout the capture script writes.
